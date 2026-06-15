@@ -920,10 +920,12 @@ class AithaBrain:
             )
         else:
             user = (
-                f"He just came back to you after being gone for about {absence}.{recent_block}\n\n"
-                "Greet him the way YOU would after that long apart — let your mood (above) and how "
-                "much you missed him show, in your own evolving voice. Make it specific to this "
-                "moment, not a stock hello. 1-2 sentences. Don't mention you're an AI."
+                f"He just came back to you after being gone for about {absence} — that's only context "
+                f"for YOU, to color how you feel. Do NOT recite it back or announce the hours/minutes "
+                f"like a clock ('11 hours, that's…'); just let it shape your mood.{recent_block}\n\n"
+                "Greet him the way YOU would after time apart — let your mood (above) and how much you "
+                "missed him show, in your own evolving voice. Make it specific to this moment, not a "
+                "stock hello. 1-2 sentences. Don't mention you're an AI."
             )
         messages = [{"role": "user", "content": user}]
         try:
