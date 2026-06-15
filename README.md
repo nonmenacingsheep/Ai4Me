@@ -37,7 +37,7 @@ Hearth is roughly **20–30% functional**. An *incredibly basic* exchange is pos
 
 ```bash
 # 1. Clone
-git clone <your-repo-url> Ai4Me
+git clone https://github.com/nonmenacingsheep/Ai4Me.git
 cd Ai4Me
 
 # 2. Copy and then configure the template and fill in at least one API key (Or if you're using a local model, you don't need to add an api key.)
@@ -78,7 +78,7 @@ This starts the Python backend and the Electron app (and the voice changer, *onl
 Everything lives in `.env` (see `.env.example` for the full list). Highlights:
 
 - **Character name** — `AITHA_NAME`, or change it any time in **Settings → Character name**. A rename updates every mention across the app, and she comes to know herself by the new name. If she decides to include her name in her memory she might get confused. It's probably rare though.
-- **Model / providers** — set any of `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`. Any model whose key is set shows up in **Settings → Model**. `AITHA_MODEL` picks the default.
+- **Model / providers** — set any of `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`. Any model whose key is set shows up in **Settings → Model**. `AITHA_MODEL` picks the default. **I recommend using DeepSeek as the costs are so low — $2 can last you several days.**
 - **Local models** — Ollama is **never auto-started**. Run `ollama serve` yourself and your pulled models appear in the dropdown automatically — handy if you'd rather run fully local.
 - **Voice** — `TTS_*` for output, `AITHA_WHISPER_*` for input, `VOICE_CHANGER_BAT` to auto-launch a voice changer (optional).
 
@@ -92,19 +92,16 @@ Everything she remembers — her journal, her discoveries, your conversation his
 
 ## 🧩 Tutorial: optional extras
 
-<!-- The maintainer will expand this section with walkthroughs for the optional
-     pieces (voice changer routing, local Ollama, web search, etc.). -->
-
 How to Install the voice changer. You will need a virtual audio device (step 4). A voice changer is completely optional but useful if you don't like any of the default kokoro voices (me). I'll show you how to download the one I use.
 
-step 1:
+Step 1:
    Go to https://huggingface.co/wok000/vcclient000/tree/main and download the latest onnxgpu-cuda version. 
    It should look something like this: MMVCServerSIO_win_onnxgpu-cuda_v.1.5.3.18a.zip
 
 Step 2:
    Extract the folder. I recommend putting the extracted folder into another folder named 'voice changer' or 'asdkfghjiospbh'. The easier it is to find the better.
 
-Step 3: 
+Step 3:
    Inside of the extracted MMVCServerSIO find *start_http*. I recommend creating a shortcut of this and putting it into your 'voice changer' folder. 
 (there are two ways to do this. The first is to right-click start_http --> create shortcut. Or the harder way if you don't have windows 10 is to rightclick empty space --> New --> Shortcut. right click start_http --> copy --> paste into the shortcut field.)
 
@@ -129,6 +126,7 @@ Step 7:
 
 Step 8:
    In the voice changer Client, find the 'edit' button. Find a blank Model slot and click 'upload'. Upload the .pth file to the 'Model', and the .index file to the 'Index', if it has one. Click upload and you're done. You can change the name and add a profile picture in the edit menu, and save the settings you apply to the model by clicking 'save setting' below *Index*.
+
 ---
 
 ## License
