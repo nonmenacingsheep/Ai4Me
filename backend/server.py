@@ -1286,21 +1286,32 @@ async def ws_endpoint(websocket: WebSocket):
         gctx["minutes_since_chat"] = None
         recent_tail = _recent_exchanges_text(conversation, limit=6)
         greeting = ""
-        delivered = True
-        try:
-            async for token in brain.stream_greeting(gctx, greet_block, absence, recent_tail):
-                greeting += token
-                await websocket.send_json({"type": "token", "content": token})
-            await websocket.send_json({"type": "done"})
-        except Exception as e:
-            delivered = False
-            print(f"[greeting] {e}")
-        if greeting.strip() and delivered:
+        dropped = False  # socket died mid-stream — stop entirely, don't burn the flag
+        # The model can transiently return nothing on a cold start; try twice before
+        # giving up so the welcome-back doesn't silently vanish on a fresh launch.
+        for attempt in range(2):
+            greeting = ""
+            try:
+                async for token in brain.stream_greeting(gctx, greet_block, absence, recent_tail):
+                    greeting += token
+                    await websocket.send_json({"type": "token", "content": token})
+                if greeting.strip():
+                    await websocket.send_json({"type": "done"})
+                    break
+                print(f"[greeting] empty (attempt {attempt + 1})")
+            except (WebSocketDisconnect, RuntimeError):
+                dropped = True
+                break
+            except Exception as e:
+                print(f"[greeting] error (attempt {attempt + 1}): {e}")
+            await asyncio.sleep(1.0)
+        if greeting.strip() and not dropped:
             _greeted = True
             conversation.append({"role": "assistant", "content": greeting})
             mem_store.save_conversation(conversation)
             tts.speak(greeting)
             last_self_ts = time.time()
+            print("[greeting] delivered")
 
     async def apply_self_directives(hfilter):
         """Act on every directive she emitted this turn — journal, notes, core
