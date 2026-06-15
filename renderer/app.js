@@ -1649,9 +1649,9 @@ function panelSessions() {
   const body = document.createElement('div');
   body.style.cssText = 'display:flex;flex-direction:column;gap:10px';
   const c = hearth.campaign;
-  body.innerHTML = '<div class="hp-field"><label>Active campaign summary (Aitha can read this)</label>'
+  body.innerHTML = '<div class="hp-field"><label>Campaign summary — auto-updates as you play (Aitha & the DM read this)</label>'
     + `<textarea id="hp-summary" rows="4">${escapeHtml(c?.summary || '')}</textarea></div>`
-    + '<button class="hp-save" id="hp-summary-save">Save summary</button>'
+    + '<button class="hp-save" id="hp-summary-save">Save summary (overrides until more play)</button>'
     + '<div style="height:8px"></div><div style="color:var(--text-3);font-size:11px;text-transform:uppercase">Campaigns</div>';
   (hearth.campaigns || []).forEach(cp => {
     const item = document.createElement('div');
@@ -1772,6 +1772,148 @@ function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/* ── Session Zero: guided character creation ──────────────────────────── */
+const DND_RACES = ['Human', 'Elf', 'Dwarf', 'Halfling', 'Half-Elf', 'Half-Orc', 'Tiefling', 'Dragonborn', 'Gnome'];
+const DND_CLASSES = ['Fighter', 'Wizard', 'Rogue', 'Cleric', 'Ranger', 'Barbarian', 'Bard', 'Druid', 'Monk', 'Paladin', 'Sorcerer', 'Warlock'];
+const DND_BACKGROUNDS = ['Acolyte', 'Charlatan', 'Criminal', 'Entertainer', 'Folk Hero', 'Guild Artisan', 'Hermit', 'Noble', 'Outlander', 'Sage', 'Soldier', 'Urchin'];
+const STANDARD_ARRAY = [15, 14, 13, 12, 10, 8];
+const HIT_DICE = { Barbarian: 12, Fighter: 10, Paladin: 10, Ranger: 10, Sorcerer: 6, Wizard: 6 };  // others d8
+const SZ_STEPS = ['Concept', 'Race', 'Class', 'Abilities', 'Background & Gear', 'Review'];
+const ABILS = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
+const abilMod = (score) => Math.floor(((+score || 10) - 10) / 2);
+
+let wizard = null;
+
+function openSessionZero() {
+  if (!hearth.campaign) { return; }
+  const body = document.createElement('div');
+  body.style.cssText = 'display:flex;flex-direction:column;gap:12px';
+  body.innerHTML =
+    '<div class="sz-intro">Build your characters before the adventure begins. Walk through it step by step — or just start talking and the DM will guide you.</div>'
+    + '<button class="hp-save" id="sz-build-me">⚔ Build your character</button>'
+    + '<button class="hp-save sz-alt" id="sz-build-aitha">✦ Let Aitha create hers with the DM</button>';
+  openPanel('Session Zero', body);
+  $h('sz-build-me').addEventListener('click', () => startCharWizard('me'));
+  $h('sz-build-aitha').addEventListener('click', () => {
+    closePanel();
+    hpost('/api/hearth/say', { text: "Let's begin session zero. DM, please interview Aitha to create her "
+      + "character — ask her who she wants to be, one step at a time, and let her decide." });
+  });
+}
+
+function startCharWizard(who) {
+  const s = (hearth.campaign?.sheets?.[who]) || {};
+  const known = (s.name && s.name !== 'You' && s.name !== 'Aitha') ? s.name : '';
+  wizard = {
+    who, step: 0, name: known, concept: '',
+    race: s.race || '', cls: s.class || '', background: s.background || '',
+    stats: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10, ...(s.stats || {}) },
+    gear: s.inventory || '',
+  };
+  renderWizard();
+}
+
+function captureWizardStep() {
+  const w = wizard; if (!w) return;
+  if (w.step === 0) {
+    w.name = ($h('sz-name')?.value || '').trim() || w.name;
+    w.concept = ($h('sz-concept')?.value || '').trim();
+  } else if (w.step === 3) {
+    ABILS.forEach(k => { const v = +($h('sz-st-' + k)?.value); if (v) w.stats[k] = v; });
+  } else if (w.step === 4) {
+    w.background = $h('sz-bg')?.value || '';
+    w.gear = $h('sz-gear')?.value || '';
+  }
+}
+
+function renderWizard() {
+  const w = wizard; if (!w) return;
+  const progress = SZ_STEPS.map((label, i) =>
+    `<div class="sz-step${i === w.step ? ' active' : ''}${i < w.step ? ' done' : ''}">${label}</div>`).join('');
+  let inner = '';
+  if (w.step === 0) {
+    inner = '<div class="hp-field"><label>Character name</label>'
+      + `<input id="sz-name" value="${escapeHtml(w.name)}" placeholder="e.g. Kael Thornwood"></div>`
+      + '<div class="hp-field"><label>Concept (one line — optional)</label>'
+      + `<input id="sz-concept" value="${escapeHtml(w.concept)}" placeholder="a haunted ex-soldier seeking redemption"></div>`;
+  } else if (w.step === 1) {
+    inner = '<div class="sz-grid">' + DND_RACES.map(r =>
+      `<button class="sz-pick${w.race === r ? ' sel' : ''}" data-race="${r}">${r}</button>`).join('') + '</div>';
+  } else if (w.step === 2) {
+    inner = '<div class="sz-grid">' + DND_CLASSES.map(r =>
+      `<button class="sz-pick${w.cls === r ? ' sel' : ''}" data-cls="${r}">${r}</button>`).join('') + '</div>';
+  } else if (w.step === 3) {
+    inner = '<div class="sz-hint">Assign the standard array (15, 14, 13, 12, 10, 8) or type your own.</div>'
+      + '<div class="hp-stats-grid">' + ABILS.map(k =>
+        `<div class="hp-field"><label>${k.toUpperCase()} <span class="sz-mod" id="sz-mod-${k}"></span></label>`
+        + `<input id="sz-st-${k}" type="number" value="${w.stats[k] ?? 10}"></div>`).join('') + '</div>'
+      + '<button class="hp-mini-btn sz-array" id="sz-array">Fill standard array</button>';
+  } else if (w.step === 4) {
+    inner = '<div class="hp-field"><label>Background</label><select id="sz-bg">'
+      + ['', ...DND_BACKGROUNDS].map(b => `<option${w.background === b ? ' selected' : ''}>${b}</option>`).join('')
+      + '</select></div>'
+      + '<div class="hp-field"><label>Starting gear / notes</label>'
+      + `<textarea id="sz-gear" rows="3">${escapeHtml(w.gear)}</textarea></div>`;
+  } else {
+    const hd = HIT_DICE[w.cls] || 8;
+    const hp = hd + abilMod(w.stats.con);
+    inner = '<div class="sz-review">'
+      + `<div class="sz-rev-name">${escapeHtml(w.name || '(unnamed)')}</div>`
+      + `<div class="sz-rev-sub">${escapeHtml(w.race || '?')} ${escapeHtml(w.cls || '?')}${w.background ? ' · ' + escapeHtml(w.background) : ''}</div>`
+      + '<div class="sz-rev-stats">' + ABILS.map(k =>
+        `<span><b>${w.stats[k] ?? 10}</b> ${k.toUpperCase()} (${abilMod(w.stats[k]) >= 0 ? '+' : ''}${abilMod(w.stats[k])})</span>`).join('') + '</div>'
+      + `<div class="sz-hint">Starting HP ≈ ${hp} (d${hd} + CON). ${w.concept ? '“' + escapeHtml(w.concept) + '”' : ''}</div>`
+      + '</div>';
+  }
+  const body = document.createElement('div');
+  body.className = 'sz-wizard';
+  body.innerHTML = `<div class="sz-progress">${progress}</div><div class="sz-stepbody">${inner}</div>`
+    + '<div class="sz-nav">'
+    + `<button class="btn-secondary" id="sz-back"${w.step === 0 ? ' disabled' : ''}>Back</button>`
+    + `<button class="btn-primary" id="sz-next">${w.step === SZ_STEPS.length - 1 ? 'Finish' : 'Next'}</button>`
+    + '</div>';
+  openPanel((w.who === 'aitha' ? 'Aitha' : 'Your') + ' Character — Session Zero', body);
+
+  body.querySelectorAll('[data-race]').forEach(b => b.addEventListener('click', () => { w.race = b.dataset.race; renderWizard(); }));
+  body.querySelectorAll('[data-cls]').forEach(b => b.addEventListener('click', () => { w.cls = b.dataset.cls; renderWizard(); }));
+  const refreshMods = () => ABILS.forEach(k => {
+    const el = $h('sz-mod-' + k); if (el) { const m = abilMod($h('sz-st-' + k)?.value); el.textContent = (m >= 0 ? '+' : '') + m; }
+  });
+  if (w.step === 3) {
+    refreshMods();
+    ABILS.forEach(k => $h('sz-st-' + k)?.addEventListener('input', refreshMods));
+    $h('sz-array')?.addEventListener('click', () => { STANDARD_ARRAY.forEach((v, i) => w.stats[ABILS[i]] = v); renderWizard(); });
+  }
+  $h('sz-back')?.addEventListener('click', () => { captureWizardStep(); w.step = Math.max(0, w.step - 1); renderWizard(); });
+  $h('sz-next')?.addEventListener('click', () => {
+    captureWizardStep();
+    if (w.step < SZ_STEPS.length - 1) { w.step++; renderWizard(); } else finishWizard();
+  });
+}
+
+async function finishWizard() {
+  const w = wizard; if (!w) return;
+  const cur = (hearth.campaign?.sheets?.[w.who]) || {};
+  const hd = HIT_DICE[w.cls] || 8;
+  const hp = Math.max(1, hd + abilMod(w.stats.con));
+  const notes = [cur.notes, w.concept ? 'Concept: ' + w.concept : ''].filter(Boolean).join('\n');
+  const sheet = {
+    ...cur,
+    name: w.name || cur.name || (w.who === 'aitha' ? 'Aitha' : 'You'),
+    race: w.race, class: w.cls, level: cur.level || 1, background: w.background,
+    stats: w.stats,
+    hp: { cur: hp, max: hp, temp: 0 },
+    ac: cur.ac || (10 + abilMod(w.stats.dex)),
+    inventory: w.gear || cur.inventory || '',
+    notes,
+  };
+  await hpost('/api/hearth/sheet', { who: w.who, sheet });
+  closePanel();
+  hpost('/api/hearth/say', { text: `(${w.who === 'aitha' ? 'Aitha' : 'I'} finished a character: `
+    + `${sheet.name}, a ${w.race || ''} ${w.cls || ''}.)` });
+  wizard = null;
+}
+
 // Electron disables window.prompt(), so we roll our own small text dialog.
 // Returns a Promise that resolves to the entered string, or null if cancelled.
 function inlinePrompt(title, { label = '', value = '', placeholder = '', ok = 'OK' } = {}) {
@@ -1836,10 +1978,7 @@ function sendHearth() {
 $h('hearth-send').addEventListener('click', sendHearth);
 $h('hearth-input').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendHearth(); } });
 $h('hearth-continue').addEventListener('click', () => hpost('/api/hearth/continue', {}));
-$h('hearth-session-zero').addEventListener('click', () => hpost('/api/hearth/say', {
-  text: "Let's do session zero and create our characters. DM, please walk us through it — "
-      + "start with Aitha: ask her about the character she wants to play, then me.",
-}));
+$h('hearth-session-zero').addEventListener('click', openSessionZero);
 
 /* ─── Boot ─────────────────────────────────────────────────────────── */
 connect();
