@@ -98,6 +98,9 @@ function openSettings() {
     ws.send(JSON.stringify({ type: 'get_settings' }));
   }
   loadMemory();
+  // Point the Appearance editor at the tab you're currently looking at.
+  editTarget = activeView;
+  syncThemeControls();
   // Always open on the General tab.
   modalTabs?.querySelectorAll('.modal-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'general'));
   document.querySelectorAll('.modal-tabpane').forEach(p => p.classList.toggle('active', p.dataset.pane === 'general'));
@@ -728,8 +731,41 @@ const PRESET_DEFAULTS = {
   moody:   { accent: '#6d8bd0', bg: '#05060d', orb: '#6d8bd0' },
   magma:   { accent: '#f43f5e', bg: '#140609', orb: '#f43f5e' },
   hearth:  { accent: '#f5b14b', bg: '#140d05', orb: '#f5b14b' },
+  forest:  { accent: '#43c59e', bg: '#08130d', orb: '#43c59e' },
+  rose:    { accent: '#f472b6', bg: '#160810', orb: '#f472b6' },
+  ocean:   { accent: '#2dd4bf', bg: '#061413', orb: '#2dd4bf' },
+  mono:    { accent: '#9aa7b8', bg: '#0b0d12', orb: '#9aa7b8' },
 };
-let currentTheme = { preset: 'default', accent: null, bg: null, orb: null };
+const ALL_PRESET_CLASSES = ['sky', 'warm', 'moody', 'magma', 'hearth', 'forest', 'rose', 'ocean', 'mono']
+  .map(p => 'chat-theme-' + p);
+
+// Each app-tab remembers its own full theme. Sky (chat) mirrors the backend —
+// it's shared with Aitha (two-way). Mantle/Magma/Hearth are local display prefs.
+const TAB_DEFAULTS = {
+  chat:   { preset: 'default', accent: null, bg: null, orb: null },
+  mantle: { preset: 'moody',   accent: null, bg: null, orb: null },
+  notes:  { preset: 'magma',   accent: null, bg: null, orb: null },
+  hearth: { preset: 'hearth',  accent: null, bg: null, orb: null },
+};
+const VIEW_ORDER = ['chat', 'mantle', 'notes', 'hearth'];
+
+function emptyTheme() { return { preset: 'default', accent: null, bg: null, orb: null }; }
+
+function loadTabThemes() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('tabThemes') || '{}') || {}; } catch (_) {}
+  const out = {};
+  for (const v of VIEW_ORDER) out[v] = Object.assign({}, TAB_DEFAULTS[v], saved[v] || {});
+  return out;
+}
+function saveTabThemes() {
+  try { localStorage.setItem('tabThemes', JSON.stringify(tabThemes)); } catch (_) {}
+}
+
+let tabThemes  = loadTabThemes();
+let activeView = 'chat';        // which app-tab is on screen
+let editTarget = 'chat';        // which tab the Appearance editor is editing
+let currentTheme = tabThemes.chat;   // alias for the Sky/chat theme (backend-synced)
 
 function hexToRgb(hex) {
   const m = /^#?([0-9a-f]{6})$/i.exec((hex || '').trim());
@@ -745,56 +781,69 @@ function mix(hex, target, amt) {
   return `${f(c.r)}, ${f(c.g)}, ${f(c.b)}`;
 }
 
-function applyTheme(theme, by) {
-  currentTheme = Object.assign({ preset: 'default', accent: null, bg: null, orb: null }, theme || {});
-  // Overrides go on <body> (inline) — the presets set vars on body.<class>, so an
-  // inline body style is what actually wins over them for the whole subtree.
+// Pure CSS applier — paints whatever theme object it's given onto <body>. The
+// active app-tab decides which theme this gets called with.
+function applyThemeObject(theme) {
+  const t = Object.assign(emptyTheme(), theme || {});
   const root = document.body.style;
   // Big look: preset via body class (default needs none — it's :root).
-  document.body.classList.remove(
-    'chat-theme-sky', 'chat-theme-warm', 'chat-theme-moody',
-    'chat-theme-magma', 'chat-theme-hearth');
-  if (currentTheme.preset && currentTheme.preset !== 'default') {
-    document.body.classList.add('chat-theme-' + currentTheme.preset);
+  document.body.classList.remove(...ALL_PRESET_CLASSES);
+  if (t.preset && t.preset !== 'default') {
+    document.body.classList.add('chat-theme-' + t.preset);
   }
-
   // Clear prior fine-tune overrides, then re-apply.
   ['--accent-v', '--accent-v-bright', '--accent-v-dim', '--accent-v-glow',
    '--border-accent', '--bg-deep', '--bg-mid',
    '--orb-rgb', '--orb-core', '--orb-deep'].forEach(p => root.removeProperty(p));
-
-  if (currentTheme.accent && rgbStr(currentTheme.accent)) {
-    const rgb = rgbStr(currentTheme.accent);
-    root.setProperty('--accent-v', currentTheme.accent);
-    root.setProperty('--accent-v-bright', `rgb(${mix(currentTheme.accent,'white',0.3)})`);
+  if (t.accent && rgbStr(t.accent)) {
+    const rgb = rgbStr(t.accent);
+    root.setProperty('--accent-v', t.accent);
+    root.setProperty('--accent-v-bright', `rgb(${mix(t.accent,'white',0.3)})`);
     root.setProperty('--accent-v-dim', `rgba(${rgb}, 0.15)`);
     root.setProperty('--accent-v-glow', `rgba(${rgb}, 0.25)`);
     root.setProperty('--border-accent', `rgba(${rgb}, 0.30)`);
   }
-  if (currentTheme.bg && hexToRgb(currentTheme.bg)) {
-    root.setProperty('--bg-deep', currentTheme.bg);
-    root.setProperty('--bg-mid', `rgb(${mix(currentTheme.bg,'white',0.06)})`);
+  if (t.bg && hexToRgb(t.bg)) {
+    root.setProperty('--bg-deep', t.bg);
+    root.setProperty('--bg-mid', `rgb(${mix(t.bg,'white',0.06)})`);
   }
-  if (currentTheme.orb && rgbStr(currentTheme.orb)) {
-    root.setProperty('--orb-rgb', rgbStr(currentTheme.orb));
-    root.setProperty('--orb-core', mix(currentTheme.orb, 'white', 0.4));
-    root.setProperty('--orb-deep', mix(currentTheme.orb, 'black', 0.35));
+  if (t.orb && rgbStr(t.orb)) {
+    root.setProperty('--orb-rgb', rgbStr(t.orb));
+    root.setProperty('--orb-core', mix(t.orb, 'white', 0.4));
+    root.setProperty('--orb-deep', mix(t.orb, 'black', 0.35));
   }
+}
 
-  syncThemeControls();
+// Paint the theme belonging to a given app-tab (used on tab switch).
+function showTabTheme(view) {
+  applyThemeObject(tabThemes[view] || TAB_DEFAULTS[view] || {});
+}
+
+// Backend echo for the SHARED Sky/chat theme (she or he changed it).
+function applyTheme(theme, by) {
+  tabThemes.chat = Object.assign(emptyTheme(), theme || {});
+  currentTheme = tabThemes.chat;
+  saveTabThemes();
+  if (activeView === 'chat') applyThemeObject(currentTheme);
+  if (editTarget === 'chat') syncThemeControls();
   if (by === 'her') themeToast('Aitha changed the look');
 }
 
+function themeForEdit() { return tabThemes[editTarget] || TAB_DEFAULTS[editTarget] || emptyTheme(); }
+
 function syncThemeControls() {
+  const t = themeForEdit();
+  document.querySelectorAll('.binder-tab').forEach(b =>
+    b.classList.toggle('active', b.dataset.tabtarget === editTarget));
   document.querySelectorAll('.theme-card').forEach(c =>
-    c.classList.toggle('active', c.dataset.preset === currentTheme.preset));
-  const d = PRESET_DEFAULTS[currentTheme.preset] || PRESET_DEFAULTS.default;
+    c.classList.toggle('active', c.dataset.preset === t.preset));
+  const d = PRESET_DEFAULTS[t.preset] || PRESET_DEFAULTS.default;
   const accent = document.getElementById('theme-accent');
   const bg = document.getElementById('theme-bg');
   const orb = document.getElementById('theme-orb');
-  if (accent) accent.value = currentTheme.accent || d.accent;
-  if (bg) bg.value = currentTheme.bg || d.bg;
-  if (orb) orb.value = currentTheme.orb || d.orb;
+  if (accent) accent.value = t.accent || d.accent;
+  if (bg) bg.value = t.bg || d.bg;
+  if (orb) orb.value = t.orb || d.orb;
 }
 
 function sendTheme(patch) {
@@ -803,15 +852,39 @@ function sendTheme(patch) {
   }
 }
 
+// Apply an edit to whichever tab the binder is pointed at. Sky routes through
+// the backend (shared with Aitha); the rest are local + persisted.
+function editTheme(patch) {
+  if (editTarget === 'chat') { sendTheme(patch); return; }  // echoes back via applyTheme
+  tabThemes[editTarget] = Object.assign({}, tabThemes[editTarget], patch);
+  saveTabThemes();
+  if (activeView === editTarget) applyThemeObject(tabThemes[editTarget]);
+  syncThemeControls();
+}
+
+function restoreTabDefault() {
+  const def = Object.assign(emptyTheme(), TAB_DEFAULTS[editTarget]);
+  if (editTarget === 'chat') { sendTheme(def); return; }
+  tabThemes[editTarget] = def;
+  saveTabThemes();
+  if (activeView === editTarget) applyThemeObject(def);
+  syncThemeControls();
+}
+
+document.getElementById('theme-binder')?.addEventListener('click', (e) => {
+  const b = e.target.closest('.binder-tab');
+  if (!b) return;
+  editTarget = b.dataset.tabtarget;
+  syncThemeControls();
+});
 document.getElementById('theme-presets')?.addEventListener('click', (e) => {
   const card = e.target.closest('.theme-card');
-  if (card) sendTheme({ preset: card.dataset.preset });
+  if (card) editTheme({ preset: card.dataset.preset });
 });
-document.getElementById('theme-accent')?.addEventListener('change', e => sendTheme({ accent: e.target.value }));
-document.getElementById('theme-bg')?.addEventListener('change', e => sendTheme({ bg: e.target.value }));
-document.getElementById('theme-orb')?.addEventListener('change', e => sendTheme({ orb: e.target.value }));
-document.getElementById('theme-reset')?.addEventListener('click', () =>
-  sendTheme({ accent: null, bg: null, orb: null }));
+document.getElementById('theme-accent')?.addEventListener('change', e => editTheme({ accent: e.target.value }));
+document.getElementById('theme-bg')?.addEventListener('change', e => editTheme({ bg: e.target.value }));
+document.getElementById('theme-orb')?.addEventListener('change', e => editTheme({ orb: e.target.value }));
+document.getElementById('theme-reset')?.addEventListener('click', restoreTabDefault);
 document.getElementById('mantle-refresh')?.addEventListener('click', () => loadMind());
 
 let themeToastTimer = null;
@@ -925,19 +998,14 @@ const views = {
 let notesLoaded = false;
 let hearthLoaded = false;
 
-// Each tab carries its own temporary look (the chat preset shows on Sky).
-const TAB_THEME = { notes: 'theme-magma', hearth: 'theme-hearth', mantle: 'theme-mantle' };
-
 navItems.forEach(item => {
-  item.addEventListener('click', () => {
-    const v = item.dataset.view;
-    document.body.classList.remove('theme-magma', 'theme-hearth', 'theme-mantle');
-    if (TAB_THEME[v]) document.body.classList.add(TAB_THEME[v]);
-    switchView(v);
-  });
+  item.addEventListener('click', () => switchView(item.dataset.view));
 });
 
 function switchView(name) {
+  activeView = name;
+  // Each tab wears its own theme; switching re-themes the whole view.
+  showTabTheme(name);
   navItems.forEach(i => i.classList.toggle('active', i.dataset.view === name));
   Object.entries(views).forEach(([k, el]) => el && el.classList.toggle('active', k === name));
   if (name === 'notes' && !notesLoaded) { notesLoaded = true; loadNoteList(); }

@@ -113,6 +113,62 @@ body.chat-theme-hearth::before {
     radial-gradient(ellipse 75% 55% at 50% 0%, rgba(255,138,61,0.14) 0%, transparent 60%),
     radial-gradient(ellipse 50% 45% at 15% 90%, rgba(245,177,75,0.08) 0%, transparent 60%);
 }
+body.chat-theme-forest {
+  --bg-deep:#08130d; --bg-mid:#0c1b13;
+  --accent-v:#43c59e; --accent-v-bright:#7be6c2;
+  --accent-v-dim:rgba(67,197,158,0.14); --accent-v-glow:rgba(67,197,158,0.24);
+  --accent-r:#a3e635; --accent-r-dim:rgba(163,230,53,0.10);
+  --border-accent:rgba(67,197,158,0.28);
+  --text-1:#d8efe4; --text-2:#8db8a6; --text-3:#42604f;
+  --orb-rgb:67,197,158; --orb-core:150,235,205; --orb-deep:20,120,90;
+}
+body.chat-theme-forest::before {
+  background:
+    radial-gradient(ellipse 75% 55% at 50% 0%, rgba(67,197,158,0.12) 0%, transparent 62%),
+    radial-gradient(ellipse 50% 45% at 15% 90%, rgba(163,230,53,0.06) 0%, transparent 60%);
+}
+body.chat-theme-rose {
+  --bg-deep:#160810; --bg-mid:#200b17;
+  --accent-v:#f472b6; --accent-v-bright:#fba5d3;
+  --accent-v-dim:rgba(244,114,182,0.15); --accent-v-glow:rgba(244,114,182,0.26);
+  --accent-r:#fb7185; --accent-r-dim:rgba(251,113,133,0.12);
+  --border-accent:rgba(244,114,182,0.30);
+  --text-1:#f6dce9; --text-2:#c89ab2; --text-3:#7a4760;
+  --orb-rgb:244,114,182; --orb-core:252,205,228; --orb-deep:157,23,98;
+}
+body.chat-theme-rose::before {
+  background:
+    radial-gradient(ellipse 70% 55% at 12% 18%, rgba(219,39,119,0.12) 0%, transparent 65%),
+    radial-gradient(ellipse 50% 40% at 88% 82%, rgba(251,113,133,0.07) 0%, transparent 60%);
+}
+body.chat-theme-ocean {
+  --bg-deep:#061413; --bg-mid:#0a1d1c;
+  --accent-v:#2dd4bf; --accent-v-bright:#6ee7d8;
+  --accent-v-dim:rgba(45,212,191,0.14); --accent-v-glow:rgba(45,212,191,0.24);
+  --accent-r:#38bdf8; --accent-r-dim:rgba(56,189,248,0.10);
+  --border-accent:rgba(45,212,191,0.28);
+  --text-1:#d3eeea; --text-2:#86b4ad; --text-3:#3c5f59;
+  --orb-rgb:45,212,191; --orb-core:150,237,225; --orb-deep:13,118,108;
+}
+body.chat-theme-ocean::before {
+  background:
+    radial-gradient(ellipse 80% 55% at 50% 0%, rgba(45,212,191,0.11) 0%, transparent 62%),
+    radial-gradient(ellipse 50% 45% at 12% 88%, rgba(56,189,248,0.06) 0%, transparent 60%);
+}
+body.chat-theme-mono {
+  --bg-deep:#0b0d12; --bg-mid:#11141b;
+  --accent-v:#9aa7b8; --accent-v-bright:#c5cedb;
+  --accent-v-dim:rgba(154,167,184,0.13); --accent-v-glow:rgba(154,167,184,0.20);
+  --accent-r:#94a3b8; --accent-r-dim:rgba(148,163,184,0.10);
+  --border-accent:rgba(154,167,184,0.24);
+  --text-1:#dfe4ec; --text-2:#9aa5b5; --text-3:#525c6c;
+  --orb-rgb:154,167,184; --orb-core:205,213,224; --orb-deep:90,100,116;
+}
+body.chat-theme-mono::before {
+  background:
+    radial-gradient(ellipse 70% 55% at 12% 18%, rgba(148,163,184,0.08) 0%, transparent 65%),
+    radial-gradient(ellipse 50% 40% at 88% 82%, rgba(120,135,160,0.05) 0%, transparent 60%);
+}
 
 html, body {
   height: 100%;
@@ -680,8 +736,8 @@ body::before {
 /* ─── Settings tabs ─────────────────────────────────────────────────── */
 .modal-tabs {
   display: flex;
-  gap: 4px;
-  padding: 0 22px;
+  gap: 2px;
+  padding: 0 14px;
   margin-bottom: 6px;
   border-bottom: 1px solid var(--border-soft);
   position: relative;
@@ -692,13 +748,15 @@ body::before {
   border: none;
   color: var(--text-3);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.02em;
-  padding: 9px 14px;
+  letter-spacing: 0.01em;
+  padding: 9px 10px;
   cursor: pointer;
   border-radius: 8px 8px 0 0;
   position: relative;
+  white-space: nowrap;
+  flex: 0 1 auto;
   transition: color 0.15s, background 0.15s;
 }
 .modal-tab:hover { color: var(--text-1); background: var(--bg-hover); }
@@ -747,6 +805,61 @@ body::before {
 .tc-moody   { background: radial-gradient(circle at 35% 30%, #9fb6e6, #3c5096 55%, #05060d); }
 .tc-magma   { background: radial-gradient(circle at 35% 30%, #fda4af, #be123c 55%, #140609); }
 .tc-hearth  { background: radial-gradient(circle at 35% 30%, #ffd98a, #e8b558 50%, #1a1206); }
+.tc-forest  { background: radial-gradient(circle at 35% 30%, #7be6c2, #1f9c78 55%, #08130d); }
+.tc-rose    { background: radial-gradient(circle at 35% 30%, #fba5d3, #db2777 55%, #160810); }
+.tc-ocean   { background: radial-gradient(circle at 35% 30%, #6ee7d8, #0d9488 55%, #061413); }
+.tc-mono    { background: radial-gradient(circle at 35% 30%, #c5cedb, #64748b 55%, #0b0d12); }
+
+/* ─── Appearance: per-tab "binder bookmark" picker ─────────────────── */
+.theme-binder {
+  display: flex;
+  gap: 0;
+  padding-left: 2px;
+  margin-bottom: 2px;
+}
+.binder-tab {
+  position: relative;
+  background: var(--bg-mid);
+  border: 1px solid var(--border-soft);
+  border-bottom: none;
+  color: var(--text-3);
+  font-family: var(--font);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 7px 13px 9px;
+  margin-right: -1px;
+  cursor: pointer;
+  border-radius: 9px 9px 0 0;
+  transition: background 0.15s, color 0.15s, transform 0.12s;
+}
+.binder-tab::before {
+  content: '';
+  position: absolute;
+  top: 4px; left: 9px; right: 9px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--bt-color, var(--accent-v));
+  opacity: 0.7;
+}
+.binder-tab:hover { color: var(--text-1); }
+.binder-tab.active {
+  background: var(--bg-hover);
+  color: var(--text-1);
+  transform: translateY(-1px);
+  z-index: 2;
+  box-shadow: 0 -3px 10px rgba(0,0,0,0.25);
+}
+.binder-tab.active::before { opacity: 1; box-shadow: 0 0 8px var(--bt-color, var(--accent-v)); }
+.binder-body {
+  border: 1px solid var(--border-soft);
+  border-radius: 0 10px 10px 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background: rgba(255,255,255,0.012);
+}
 
 .color-row { display: flex; gap: 14px; }
 .color-pick {
@@ -1624,18 +1737,23 @@ body.theme-magma::before {
     radial-gradient(ellipse 50% 40% at 88% 82%, rgba(251, 146, 60, 0.08) 0%, transparent 60%),
     radial-gradient(ellipse 40% 30% at 50% 50%, rgba(244, 63, 94, 0.04) 0%, transparent 70%);
 }
-/* orb glows crimson in magma mode */
-body.theme-magma .orb {
+/* orb glows crimson in magma mode (legacy view class + the magma preset) */
+body.theme-magma .orb,
+body.chat-theme-magma .orb {
   background:
     radial-gradient(circle at 50% 110%, rgba(254,205,211,0.9) 0%, rgba(244,63,94,0.45) 11%, rgba(159,18,57,0.2) 26%, rgba(14,5,8,0) 44%),
     radial-gradient(circle at 50% 33%, #1f0e14 0%, #0d0508 58%, #060203 100%);
 }
-body.theme-magma .orb-inner {
+body.theme-magma .orb-inner,
+body.chat-theme-magma .orb-inner {
   background: radial-gradient(circle at 50% 72%, rgba(254,205,211,0.45) 0%, rgba(225,29,72,0.18) 30%, transparent 58%);
 }
 body.theme-magma .welcome-orb,
 body.theme-magma .assist-orb,
-body.theme-magma .magma-spark {
+body.theme-magma .magma-spark,
+body.chat-theme-magma .welcome-orb,
+body.chat-theme-magma .assist-orb,
+body.chat-theme-magma .magma-spark {
   background: radial-gradient(circle at 38% 32%, #fda4af, #be123c) !important;
 }
 .clock-day { transition: color 0.5s; }

@@ -115,8 +115,8 @@
         </div>
         <div class="modal-tabs" id="modal-tabs">
           <button class="modal-tab active" data-tab="general">General</button>
-          <button class="modal-tab" data-tab="behavior">Behavior</button>
           <button class="modal-tab" data-tab="appearance">Appearance</button>
+          <button class="modal-tab" data-tab="behavior">Behavior</button>
           <button class="modal-tab" data-tab="memories">Memories</button>
           <button class="modal-tab" data-tab="chats">Chats</button>
         </div>
@@ -226,39 +226,55 @@
           <!-- Appearance -->
           <div class="modal-tabpane" data-pane="appearance">
             <div class="field">
-              <label>Theme</label>
-              <div class="field-hint">The big look of the chat. Aitha can change this too — and you'll both see it instantly, with each of you knowing who did it.</div>
-              <div class="theme-presets" id="theme-presets">
-                <button class="theme-card" data-preset="default">
-                  <span class="tc-swatch tc-default"></span><span>Default</span>
-                </button>
-                <button class="theme-card" data-preset="sky">
-                  <span class="tc-swatch tc-sky"></span><span>Sky</span>
-                </button>
-                <button class="theme-card" data-preset="warm">
-                  <span class="tc-swatch tc-warm"></span><span>Warm</span>
-                </button>
-                <button class="theme-card" data-preset="moody">
-                  <span class="tc-swatch tc-moody"></span><span>Moody</span>
-                </button>
-                <button class="theme-card" data-preset="magma">
-                  <span class="tc-swatch tc-magma"></span><span>Magma</span>
-                </button>
-                <button class="theme-card" data-preset="hearth">
-                  <span class="tc-swatch tc-hearth"></span><span>Hearth</span>
-                </button>
+              <label>Per-tab look</label>
+              <div class="field-hint">Each tab keeps its own theme — pick a bookmark, then a preset or custom colors, and that view re-themes. <strong>Sky</strong> is shared with Aitha: she can change it too, and you'll both see it. The other tabs are yours alone.</div>
+              <div class="theme-binder" id="theme-binder">
+                <button class="binder-tab active" data-tabtarget="chat"   style="--bt-color:#a78bfa">Sky</button>
+                <button class="binder-tab"        data-tabtarget="mantle" style="--bt-color:#6d8bd0">Mantle</button>
+                <button class="binder-tab"        data-tabtarget="notes"  style="--bt-color:#f43f5e">Magma</button>
+                <button class="binder-tab"        data-tabtarget="hearth" style="--bt-color:#f5b14b">Hearth</button>
+              </div>
+              <div class="binder-body">
+                <div class="theme-presets" id="theme-presets">
+                  <button class="theme-card" data-preset="default">
+                    <span class="tc-swatch tc-default"></span><span>Default</span>
+                  </button>
+                  <button class="theme-card" data-preset="sky">
+                    <span class="tc-swatch tc-sky"></span><span>Sky</span>
+                  </button>
+                  <button class="theme-card" data-preset="warm">
+                    <span class="tc-swatch tc-warm"></span><span>Warm</span>
+                  </button>
+                  <button class="theme-card" data-preset="moody">
+                    <span class="tc-swatch tc-moody"></span><span>Moody</span>
+                  </button>
+                  <button class="theme-card" data-preset="magma">
+                    <span class="tc-swatch tc-magma"></span><span>Magma</span>
+                  </button>
+                  <button class="theme-card" data-preset="hearth">
+                    <span class="tc-swatch tc-hearth"></span><span>Hearth</span>
+                  </button>
+                  <button class="theme-card" data-preset="forest">
+                    <span class="tc-swatch tc-forest"></span><span>Forest</span>
+                  </button>
+                  <button class="theme-card" data-preset="rose">
+                    <span class="tc-swatch tc-rose"></span><span>Rose</span>
+                  </button>
+                  <button class="theme-card" data-preset="ocean">
+                    <span class="tc-swatch tc-ocean"></span><span>Ocean</span>
+                  </button>
+                  <button class="theme-card" data-preset="mono">
+                    <span class="tc-swatch tc-mono"></span><span>Mono</span>
+                  </button>
+                </div>
+                <div class="color-row">
+                  <label class="color-pick"><input type="color" id="theme-accent" /><span>Accent</span></label>
+                  <label class="color-pick"><input type="color" id="theme-bg" /><span>Background</span></label>
+                  <label class="color-pick"><input type="color" id="theme-orb" /><span>Her sphere</span></label>
+                </div>
+                <button class="mem-clear" id="theme-reset">Restore this tab's default</button>
               </div>
             </div>
-            <div class="field">
-              <label>Fine-tune</label>
-              <div class="field-hint">Nudge a preset to taste. Leave these to let the preset decide.</div>
-              <div class="color-row">
-                <label class="color-pick"><input type="color" id="theme-accent" /><span>Accent</span></label>
-                <label class="color-pick"><input type="color" id="theme-bg" /><span>Background</span></label>
-                <label class="color-pick"><input type="color" id="theme-orb" /><span>Her sphere</span></label>
-              </div>
-            </div>
-            <button class="mem-clear" id="theme-reset">Reset fine-tuning</button>
           </div>
 
           <!-- Memories -->
