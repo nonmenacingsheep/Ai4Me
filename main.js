@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, screen } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const http = require('http');
@@ -11,6 +11,35 @@ let tray;
 
 const BACKEND_PORT = 7823;
 const BACKEND_HOST = '127.0.0.1';
+
+/* ─── Window size/position memory ──────────────────────────────────── */
+const WINDOW_STATE_FILE = path.join(app.getPath('userData'), 'window-state.json');
+
+function loadWindowState() {
+  try { return JSON.parse(fs.readFileSync(WINDOW_STATE_FILE, 'utf8')); }
+  catch (_) { return null; }
+}
+
+function saveWindowState() {
+  if (!mainWindow) return;
+  try {
+    // getNormalBounds() is the un-maximized size, so we restore to the right
+    // dimensions even if it was closed while maximized.
+    const b = mainWindow.getNormalBounds();
+    const state = { ...b, maximized: mainWindow.isMaximized() };
+    fs.writeFileSync(WINDOW_STATE_FILE, JSON.stringify(state));
+  } catch (_) {}
+}
+
+// Guard against restoring onto a monitor that's no longer attached.
+function isVisibleOnSomeDisplay(b) {
+  if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) return false;
+  return screen.getAllDisplays().some(d => {
+    const a = d.workArea;
+    return b.x < a.x + a.width && b.x + b.width > a.x &&
+           b.y < a.y + a.height && b.y + b.height > a.y;
+  });
+}
 
 // Voice changer (MMVCServerSIO) — optional. Point VOICE_CHANGER_BAT in your .env
 // at its start_http.bat to have Ai4Me launch it for you; otherwise this is skipped.
@@ -114,9 +143,16 @@ function startBackend() {
 
 /* ─── Create window ────────────────────────────────────────────────── */
 function createWindow() {
+  const saved = loadWindowState();
+  const bounds = { width: 900, height: 660 };
+  if (saved && Number.isFinite(saved.width) && Number.isFinite(saved.height)) {
+    bounds.width = Math.max(680, saved.width);
+    bounds.height = Math.max(480, saved.height);
+    if (isVisibleOnSomeDisplay(saved)) { bounds.x = saved.x; bounds.y = saved.y; }
+  }
+
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 660,
+    ...bounds,
     minWidth: 680,
     minHeight: 480,
     frame: false,
@@ -146,8 +182,17 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => {
+    if (saved && saved.maximized) mainWindow.maximize();
     mainWindow.show();
   });
+
+  // Remember size/position. Debounced so we're not writing on every pixel of a
+  // drag, plus a final save as it closes.
+  let saveTimer = null;
+  const scheduleSave = () => { clearTimeout(saveTimer); saveTimer = setTimeout(saveWindowState, 400); };
+  mainWindow.on('resize', scheduleSave);
+  mainWindow.on('move', scheduleSave);
+  mainWindow.on('close', saveWindowState);
 
   mainWindow.on('closed', () => {
     mainWindow = null;
