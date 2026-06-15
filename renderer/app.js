@@ -1772,6 +1772,37 @@ function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Electron disables window.prompt(), so we roll our own small text dialog.
+// Returns a Promise that resolves to the entered string, or null if cancelled.
+function inlinePrompt(title, { label = '', value = '', placeholder = '', ok = 'OK' } = {}) {
+  return new Promise(resolve => {
+    const back = document.createElement('div');
+    back.className = 'inq-backdrop';
+    back.innerHTML =
+      `<div class="inq-card">
+         <div class="inq-title">${escapeHtml(title)}</div>
+         ${label ? `<div class="inq-label">${escapeHtml(label)}</div>` : ''}
+         <input class="inq-input" type="text" placeholder="${escapeHtml(placeholder)}" />
+         <div class="inq-actions">
+           <button class="btn-secondary inq-cancel">Cancel</button>
+           <button class="btn-primary inq-ok">${escapeHtml(ok)}</button>
+         </div>
+       </div>`;
+    document.body.appendChild(back);
+    const input = back.querySelector('.inq-input');
+    input.value = value;
+    const done = (val) => { back.remove(); resolve(val); };
+    back.querySelector('.inq-cancel').addEventListener('click', () => done(null));
+    back.querySelector('.inq-ok').addEventListener('click', () => done(input.value.trim() || null));
+    back.addEventListener('mousedown', e => { if (e.target === back) done(null); });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); done(input.value.trim() || null); }
+      if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    });
+    requestAnimationFrame(() => { back.classList.add('open'); input.focus(); input.select(); });
+  });
+}
+
 /* ── hearth wiring ────────────────────────────────────────────────── */
 document.querySelectorAll('.hearth-tool[data-panel]').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -1786,7 +1817,9 @@ document.querySelectorAll('.seat-edit').forEach(b =>
   b.addEventListener('click', () => panelSheet(b.dataset.who)));
 $h('hearth-panel-close').addEventListener('click', closePanel);
 $h('hearth-new-camp').addEventListener('click', async () => {
-  const name = prompt('Name your campaign:', 'A New Tale');
+  const name = await inlinePrompt('New campaign', {
+    label: 'Name your campaign:', value: 'A New Tale', placeholder: 'A New Tale', ok: 'Create',
+  });
   if (name) await hpost('/api/hearth/campaign/new', { name });
 });
 $h('hearth-campaign').addEventListener('change', e =>

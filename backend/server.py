@@ -703,6 +703,37 @@ async def _resolve_round(force_first: bool = False):
             await _run_dm("(Respond to the latest moment in the scene.)")
 
 
+# Auto-summary: regenerate a campaign's synopsis in the background once enough new
+# play has accrued. Manual edits still win (saving via the panel resets the mark).
+SUMMARY_EVERY = int(os.getenv("AITHA_HEARTH_SUMMARY_EVERY", "6"))
+
+
+async def _auto_summarize():
+    async with _dnd_lock:
+        camp = dnd_store.active_campaign(dnd_state)
+        if not camp:
+            return
+        log = camp.get("log", [])
+        mark = camp.get("_summary_mark", 0)
+        if len(log) - mark < SUMMARY_EVERY:
+            return
+        cid = camp["id"]
+        prev = camp.get("summary", "")
+        transcript = dnd_store.recent_log_text(camp, limit=40)
+    try:
+        new_sum = await brain.summarize_campaign(prev, transcript)
+    except Exception as e:
+        print(f"[hearth] auto-summary failed: {e}")
+        return
+    async with _dnd_lock:
+        camp = dnd_store.active_campaign(dnd_state)
+        if camp and camp.get("id") == cid and (new_sum or "").strip():
+            camp["summary"] = new_sum.strip()
+            camp["_summary_mark"] = len(camp.get("log", []))
+            dnd_store.save(dnd_state)
+    await _broadcast_hearth()
+
+
 async def hearth_play(player_line: str):
     """A player turn: log it, then let the Orchestrator decide how the scene unfolds
     from there — who responds first, who follows — until it's the player's turn again."""
@@ -714,12 +745,14 @@ async def hearth_play(player_line: str):
         dnd_store.save(dnd_state)
     await _broadcast_hearth()
     await _resolve_round()
+    asyncio.create_task(_auto_summarize())
 
 
 async def hearth_continue():
     """Player yields the floor — let the DM & Aitha carry on (e.g. keep building
     Aitha's character)."""
     await _resolve_round(force_first=True)
+    asyncio.create_task(_auto_summarize())
 
 
 @app.get("/api/hearth")
@@ -778,6 +811,7 @@ async def api_hearth_summary(req: Request):
         camp = dnd_store.active_campaign(dnd_state)
         if camp:
             camp["summary"] = (body.get("summary") or "").strip()
+            camp["_summary_mark"] = len(camp.get("log", []))  # don't auto-clobber a manual edit
             dnd_store.save(dnd_state)
     await _broadcast_hearth()
     return {"ok": True}

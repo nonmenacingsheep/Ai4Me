@@ -664,12 +664,16 @@ class AithaBrain:
             f"You are {dm.get('name','The Keeper')}, the Dungeon Master of a Dungeons & Dragons game "
             f"played by him and his companion {CHAR_NAME} (a real person at the table, not a tool).\n\n"
             f"Your style: {dm.get('persona','')}\n\n" + RULES_PRIMER + "\n\n"
-            "You narrate the world, voice NPCs and enemies, adjudicate the rules fairly, and keep the "
-            "story moving. HARD LIMIT: 1-2 sentences, ~40 words MAX. Talk in the clipped, fast way a real "
-            "DM talks at the table. Do NOT voice long NPC speeches, do NOT pile on adjectives, do NOT "
-            "describe every detail — give only the essentials and stop, handing the moment back to the "
-            "players. If you're tempted to write a third sentence, cut it. Brevity is the rule, never the "
-            "exception. Never speak or decide FOR the players — give them room to act.\n\n"
+            "YOU ARE A PERSON AT THE TABLE, NOT A NARRATION ENGINE. Most of the time you're just TALKING "
+            "with them — answering a question, clarifying a rule, riffing on their idea, reacting, joking, "
+            "checking what they want to do. Talk WITH the players, like a friend running the game.\n"
+            "Only slip into scene DESCRIPTION when the story actually calls for it: a new place, the outcome "
+            "of an action, an NPC speaking, a reveal. The rest of the time, just be conversational. If a "
+            "player ASKS you something (a rule, what they see, a 'can I…?'), answer it directly and plainly "
+            "as yourself — do NOT reply to a simple question with a paragraph of purple prose.\n"
+            "HARD LIMIT: 1-2 sentences, ~40 words MAX, in the clipped, fast way a real DM talks. No long NPC "
+            "monologues, no piling on adjectives. Give the essentials and hand the moment back. Never speak "
+            "or decide FOR the players.\n\n"
             "CONTROL TAGS — use anywhere; the system strips them from what's shown and acts on them:\n"
             "<roll reason=\"why\">2d6+3</roll>  — YOUR own roll (enemy attack, secret check). System computes it.\n"
             "<ask who=\"me|aitha\">what to roll, e.g. a DC 15 Dexterity (Stealth) check</ask>  — call on a player to roll.\n"
@@ -995,6 +999,22 @@ class AithaBrain:
         user = f"Previous summary:\n{prev_summary or '(none yet)'}\n\nNew conversation:\n{transcript}\n\nUpdated summary:"
         try:
             return await self._complete(system, user, max_tokens=350)
+        except Exception:
+            return prev_summary
+
+    async def summarize_campaign(self, prev_summary: str, transcript: str) -> str:
+        """Keep a running, third-person synopsis of a D&D campaign's story so far."""
+        system = (
+            "You keep a running synopsis of a Dungeons & Dragons campaign — the story so far. Given the "
+            "previous synopsis and recent play at the table, return an updated synopsis: where the party "
+            "is, what's happened, key NPCs and enemies, the current goal or threat, and any unresolved "
+            "threads. Third person, concise, under 150 words. Just the story state — no commentary, no "
+            "first person, no stage directions."
+        )
+        user = (f"Previous synopsis:\n{prev_summary or '(none yet)'}\n\n"
+                f"Recent play:\n{transcript}\n\nUpdated synopsis:")
+        try:
+            return (await self._complete(system, user, max_tokens=260)).strip()
         except Exception:
             return prev_summary
 

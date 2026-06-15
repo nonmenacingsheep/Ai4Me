@@ -2086,10 +2086,15 @@ body.theme-mantle::before {
   white-space: nowrap;
 }
 
-.hearth-mid { flex: 1; display: grid; grid-template-columns: 230px 1fr 230px; gap: 14px; overflow: hidden; }
+.hearth-mid {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 230px 1fr 230px; grid-template-rows: minmax(0, 1fr);
+  gap: 14px; overflow: hidden;
+}
 
 .seat {
-  display: flex; flex-direction: column; gap: 8px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  min-height: 0; overflow-y: auto;
   background: var(--bg-surface); border: 1px solid var(--border-soft);
   border-radius: var(--radius-md); padding: 12px;
 }
@@ -2207,12 +2212,43 @@ body.theme-mantle::before {
 .hp-field input, .hp-field textarea, .hp-field select {
   background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: 6px;
   padding: 7px 9px; color: var(--text-1); font-family: var(--font); font-size: 12.5px; outline: none; }
-.hp-field input:focus, .hp-field textarea:focus { border-color: var(--gold); }
+.hp-field input:focus, .hp-field textarea:focus, .hp-field select:focus { border-color: var(--gold); }
+/* Native option lists default to white-on-white on Windows — theme them so the
+   open dropdown is readable. */
+.hp-field select option, .select option, .hearth-select option {
+  background: var(--bg-mid); color: var(--text-1);
+}
 .hp-stats-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 8px; }
 .hp-row { display: flex; gap: 8px; }
 .hp-row .hp-field { flex: 1; }
 .hp-save { background: var(--gold); color: #1a1206; border: none; border-radius: 7px; padding: 9px;
   font-weight: 700; cursor: pointer; }
+
+/* ─── Inline text-prompt dialog (Electron has no window.prompt) ──────── */
+.inq-backdrop {
+  position: fixed; inset: 0; z-index: 300;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(4,4,9,0.6); backdrop-filter: blur(3px);
+  opacity: 0; transition: opacity 0.15s ease;
+}
+.inq-backdrop.open { opacity: 1; }
+.inq-card {
+  width: min(380px, 90vw);
+  background: var(--bg-mid); border: 1px solid var(--border-accent);
+  border-radius: var(--radius-md); padding: 20px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  transform: translateY(6px) scale(0.98); transition: transform 0.15s ease;
+}
+.inq-backdrop.open .inq-card { transform: translateY(0) scale(1); }
+.inq-title { font-size: 15px; font-weight: 600; color: var(--text-1); margin-bottom: 4px; }
+.inq-label { font-size: 12.5px; color: var(--text-3); margin-bottom: 10px; }
+.inq-input {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: 7px;
+  padding: 9px 11px; color: var(--text-1); font-family: var(--font); font-size: 13.5px; outline: none;
+}
+.inq-input:focus { border-color: var(--accent-v); }
+.inq-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 .hp-list-item { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between;
   background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: 7px;
   padding: 8px 10px; font-size: 12.5px; color: var(--text-2); }
