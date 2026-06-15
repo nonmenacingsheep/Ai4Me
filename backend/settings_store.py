@@ -27,6 +27,61 @@ def default_theme() -> dict:
     return {"preset": "default", "accent": None, "bg": None, "orb": None}
 
 
+def _env_flag(name: str, default: str = "1") -> bool:
+    return os.getenv(name, default).lower() not in ("0", "false", "no")
+
+
+def default_behavior() -> dict:
+    """Her self-directed drives. Toggles are hard on/off; the *_freq values scale
+    how eagerly each drive fires (she still decides) — lower = fewer tokens.
+    heartbeat_seconds is how often she even considers acting."""
+    return {
+        "proactive": _env_flag("AITHA_PROACTIVE"),   # reaching out to him unprompted
+        "journaling": True,                          # writing private journal entries
+        "curiosity": _env_flag("AITHA_CURIOSITY"),   # going off to explore / pursue
+        "speak_freq": 1.0,
+        "journal_freq": 1.0,
+        "curiosity_freq": 1.0,
+        "heartbeat_seconds": int(os.getenv("AITHA_HEARTBEAT", "40")),
+    }
+
+
+def get_behavior() -> dict:
+    """Behavior settings merged over defaults, with every value validated/clamped."""
+    b = default_behavior()
+    saved = load().get("behavior") or {}
+    if isinstance(saved, dict):
+        for k in b:
+            if k in saved:
+                b[k] = saved[k]
+    for k in ("proactive", "journaling", "curiosity"):
+        b[k] = bool(b[k])
+    for k in ("speak_freq", "journal_freq", "curiosity_freq"):
+        try:
+            b[k] = max(0.0, min(3.0, float(b[k])))
+        except (TypeError, ValueError):
+            b[k] = 1.0
+    try:
+        b["heartbeat_seconds"] = max(15, min(600, int(b["heartbeat_seconds"])))
+    except (TypeError, ValueError):
+        b["heartbeat_seconds"] = 40
+    return b
+
+
+def save_behavior(beh: dict) -> dict:
+    """Merge & persist behavior settings without disturbing the rest. Returns the
+    validated result."""
+    cur = get_behavior()
+    if isinstance(beh, dict):
+        for k in cur:
+            if k in beh:
+                cur[k] = beh[k]
+    s = load()
+    s["behavior"] = cur
+    save(s)
+    return get_behavior()
+
+
 def defaults() -> dict:
     return {
         # Default to the cloud model; local Ollama models still appear if Ollama is
@@ -38,6 +93,7 @@ def defaults() -> dict:
         "tts_device": os.getenv("TTS_OUTPUT_DEVICE", "CABLE Input (VB-Audio Virtual Cable)"),
         "theme": default_theme(),
         "char_name": os.getenv("AITHA_NAME", "Aitha"),
+        "behavior": default_behavior(),
     }
 
 

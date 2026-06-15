@@ -133,6 +133,10 @@ async def apply_settings(new: dict) -> dict:
     if "char_name" in new and (new["char_name"] or "").strip():
         settings["char_name"] = new["char_name"].strip()
         brain_set_name(settings["char_name"])
+    if "behavior" in new and isinstance(new["behavior"], dict):
+        # Persist + take effect live; the inner-life loop reads settings["behavior"]
+        # on every pulse, so no restart needed.
+        settings["behavior"] = settings_store.save_behavior(new["behavior"])
 
     settings_store.save(settings)
     if changed_model:
@@ -205,6 +209,7 @@ async def rollover_summary(old_messages: list[dict]):
 async def lifespan(app: FastAPI):
     global brain, memory, settings
     settings = settings_store.load()
+    settings["behavior"] = settings_store.get_behavior()  # normalize/fill sub-keys
     brain = AithaBrain(model=settings["model"])
     brain.num_ctx = settings["num_ctx"]
     brain_set_name(settings.get("char_name", "Aitha"))
@@ -1303,7 +1308,9 @@ async def ws_endpoint(websocket: WebSocket):
 
         # A web outing she decided to launch — run it in the background.
         explore_reqs = hfilter.explore_requests()
-        if explore_reqs and CURIOSITY_ENABLED and (
+        if explore_reqs and CURIOSITY_ENABLED and (settings.get("behavior") or {}).get(
+            "curiosity", True
+        ) and (
             not proactive_task or proactive_task.done()
         ):
             proactive_task = asyncio.create_task(handle_curiosity(explore_reqs[0]))
@@ -1661,7 +1668,14 @@ async def ws_endpoint(websocket: WebSocket):
         and after she acts she gets another turn right away (see inner_life_loop),
         so she can flow from one thing to the next instead of waiting for a timer."""
         nonlocal proactive_task
-        if not (PROACTIVE_ENABLED or CURIOSITY_ENABLED):
+        # His live controls (Settings → Behavior). Toggles are hard on/off; the
+        # *_freq values scale each drive's eagerness — she still decides, but he
+        # biases how often, which is how he saves tokens on pricier models.
+        beh = settings.get("behavior") or {}
+        want_speak = PROACTIVE_ENABLED and beh.get("proactive", True)
+        want_explore = CURIOSITY_ENABLED and beh.get("curiosity", True)
+        want_journal = beh.get("journaling", True)
+        if not (want_speak or want_explore or want_journal):
             return False
         # Never talk over a reply she's giving him, or an action already underway.
         if current_task and not current_task.done():
@@ -1677,23 +1691,23 @@ async def ws_endpoint(websocket: WebSocket):
 
         action = None
         # Reaching out to him — only when he's actually here at the keyboard.
-        if PROACTIVE_ENABLED and idle <= 240:
+        if want_speak and idle <= 240:
             ref = last_chat_ts if last_chat_ts else session_start_ts
             p, _ = speak_probability((now - ref) / 60.0,
                                      (now - last_self_ts) / 60.0, idle, hour)
-            if random.random() < p:
+            if random.random() < p * beh.get("speak_freq", 1.0):
                 action = handle_proactive()
         # Going off to do something of her own — research, develop an idea, or
         # prep something for him. She picks; showing him is optional.
-        if action is None and CURIOSITY_ENABLED:
+        if action is None and want_explore:
             p, _ = curiosity_pressure((now - last_explore_ts) / 60.0, idle, hour)
-            if random.random() < p:
+            if random.random() < p * beh.get("curiosity_freq", 1.0):
                 action = handle_pursuit()
         # Her inner monologue — journaling a thought, alone or quietly nearby.
-        if action is None and PROACTIVE_ENABLED:
+        if action is None and want_journal:
             p, _ = journal_pressure((now - last_journal_ts) / 60.0,
                                     journal_material, idle, hour)
-            if random.random() < p:
+            if random.random() < p * beh.get("journal_freq", 1.0):
                 action = handle_journal()
 
         if action is None:
@@ -1712,7 +1726,10 @@ async def ws_endpoint(websocket: WebSocket):
         drives settle, so she's never stuck waiting out a timer mid-stride."""
         await asyncio.sleep(25)  # settle after connect/greeting
         while True:
-            await asyncio.sleep(HEARTBEAT_SECONDS)
+            # Read the cadence live so changes in Settings → Behavior take hold
+            # without a restart.
+            hb = (settings.get("behavior") or {}).get("heartbeat_seconds", HEARTBEAT_SECONDS)
+            await asyncio.sleep(hb)
             acted = await _consider_and_act()
             flows = 0
             while acted and flows < MAX_FLOW_BURST:

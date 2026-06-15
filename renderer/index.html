@@ -115,6 +115,7 @@
         </div>
         <div class="modal-tabs" id="modal-tabs">
           <button class="modal-tab active" data-tab="general">General</button>
+          <button class="modal-tab" data-tab="behavior">Behavior</button>
           <button class="modal-tab" data-tab="appearance">Appearance</button>
           <button class="modal-tab" data-tab="memories">Memories</button>
           <button class="modal-tab" data-tab="chats">Chats</button>
@@ -170,6 +171,55 @@
                 <div class="field-hint">Reveal the raw &lt;note&gt;, &lt;deletenote&gt;, &lt;journal&gt; and &lt;explore&gt; blocks she emits, for debugging.</div>
               </div>
               <button class="pill-toggle off" id="set-tags-toggle"><span>Off</span></button>
+            </div>
+          </div>
+
+          <!-- Behavior -->
+          <div class="modal-tabpane" data-pane="behavior">
+            <div class="field">
+              <div class="field-hint">Control what Aitha does on her own and how often. Turning a drive off stops it entirely; the frequency sets how eagerly she acts when it's on — she still chooses, you just bias it. Lower frequencies (or a slower check-in) mean fewer background LLM calls, which saves tokens on pricier models.</div>
+            </div>
+
+            <div class="field toggle-field">
+              <div>
+                <label>Reach out unprompted</label>
+                <div class="field-hint">She starts conversations on her own when you're at the keyboard.</div>
+              </div>
+              <button class="pill-toggle" id="beh-proactive-toggle"><span>On</span></button>
+            </div>
+            <div class="field">
+              <label for="beh-speak-freq">How often she reaches out <span class="field-val" id="beh-speak-freq-val">100%</span></label>
+              <input type="range" id="beh-speak-freq" class="range" min="25" max="200" step="5" value="100" />
+            </div>
+
+            <div class="field toggle-field">
+              <div>
+                <label>Keep a private journal</label>
+                <div class="field-hint">She writes private entries to herself (you can read them in Mantle).</div>
+              </div>
+              <button class="pill-toggle" id="beh-journal-toggle"><span>On</span></button>
+            </div>
+            <div class="field">
+              <label for="beh-journal-freq">How often she journals <span class="field-val" id="beh-journal-freq-val">100%</span></label>
+              <input type="range" id="beh-journal-freq" class="range" min="25" max="200" step="5" value="100" />
+            </div>
+
+            <div class="field toggle-field">
+              <div>
+                <label>Explore &amp; pursue her own things</label>
+                <div class="field-hint">She wanders off to research, develop a note, or prep something for you. This is the most token-hungry drive.</div>
+              </div>
+              <button class="pill-toggle" id="beh-curiosity-toggle"><span>On</span></button>
+            </div>
+            <div class="field">
+              <label for="beh-curiosity-freq">How often she explores <span class="field-val" id="beh-curiosity-freq-val">100%</span></label>
+              <input type="range" id="beh-curiosity-freq" class="range" min="25" max="200" step="5" value="100" />
+            </div>
+
+            <div class="field">
+              <label for="beh-heartbeat">Check-in cadence <span class="field-val" id="beh-heartbeat-val">40s</span></label>
+              <div class="field-hint">How often she even considers acting. Longer = calmer and cheaper; shorter = more responsive and more frequent.</div>
+              <input type="range" id="beh-heartbeat" class="range" min="20" max="300" step="5" value="40" />
             </div>
           </div>
 

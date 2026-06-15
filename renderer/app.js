@@ -134,6 +134,11 @@ function populateSettings(data) {
   setTtsToggle.classList.toggle('off', !pendingTts);
   setTtsToggle.querySelector('span').textContent = pendingTts ? 'On' : 'Off';
 
+  if (cur.behavior && typeof cur.behavior === 'object') {
+    Object.assign(pendingBehavior, cur.behavior);
+    applyBehaviorUI();
+  }
+
   if (cur.char_name) applyCharName(cur.char_name);
 }
 
@@ -155,6 +160,62 @@ setTtsToggle.addEventListener('click', () => {
   setTtsToggle.querySelector('span').textContent = pendingTts ? 'On' : 'Off';
 });
 
+/* ═══ Behavior tab — her self-directed drives (staged; sent on Save) ═══
+   Toggles are hard on/off; *_freq are percent multipliers on her eagerness.
+   heartbeat is the check-in cadence in seconds. */
+const pendingBehavior = {
+  proactive: true, journaling: true, curiosity: true,
+  speak_freq: 1.0, journal_freq: 1.0, curiosity_freq: 1.0, heartbeat_seconds: 40,
+};
+const behToggles = {
+  proactive: document.getElementById('beh-proactive-toggle'),
+  journaling: document.getElementById('beh-journal-toggle'),
+  curiosity: document.getElementById('beh-curiosity-toggle'),
+};
+const behFreqs = {
+  speak_freq:     { el: document.getElementById('beh-speak-freq'),     val: document.getElementById('beh-speak-freq-val') },
+  journal_freq:   { el: document.getElementById('beh-journal-freq'),   val: document.getElementById('beh-journal-freq-val') },
+  curiosity_freq: { el: document.getElementById('beh-curiosity-freq'), val: document.getElementById('beh-curiosity-freq-val') },
+};
+const behHeartbeat    = document.getElementById('beh-heartbeat');
+const behHeartbeatVal = document.getElementById('beh-heartbeat-val');
+
+function applyBehaviorUI() {
+  for (const [key, btn] of Object.entries(behToggles)) {
+    if (!btn) continue;
+    const on = pendingBehavior[key];
+    btn.classList.toggle('off', !on);
+    btn.querySelector('span').textContent = on ? 'On' : 'Off';
+  }
+  for (const [key, { el, val }] of Object.entries(behFreqs)) {
+    if (!el) continue;
+    const pct = Math.round(pendingBehavior[key] * 100);
+    el.value = pct;
+    if (val) val.textContent = pct + '%';
+  }
+  if (behHeartbeat) {
+    behHeartbeat.value = pendingBehavior.heartbeat_seconds;
+    if (behHeartbeatVal) behHeartbeatVal.textContent = pendingBehavior.heartbeat_seconds + 's';
+  }
+}
+
+for (const [key, btn] of Object.entries(behToggles)) {
+  btn?.addEventListener('click', () => {
+    pendingBehavior[key] = !pendingBehavior[key];
+    applyBehaviorUI();
+  });
+}
+for (const [key, { el, val }] of Object.entries(behFreqs)) {
+  el?.addEventListener('input', () => {
+    pendingBehavior[key] = parseInt(el.value, 10) / 100;
+    if (val) val.textContent = el.value + '%';
+  });
+}
+behHeartbeat?.addEventListener('input', () => {
+  pendingBehavior.heartbeat_seconds = parseInt(behHeartbeat.value, 10);
+  if (behHeartbeatVal) behHeartbeatVal.textContent = behHeartbeat.value + 's';
+});
+
 document.getElementById('settings-save').addEventListener('click', () => {
   const payload = {
     model: setModel.value,
@@ -163,6 +224,7 @@ document.getElementById('settings-save').addEventListener('click', () => {
     tts_device: setDevice.value,
     tts_enabled: pendingTts,
     char_name: (document.getElementById('set-name')?.value || '').trim() || undefined,
+    behavior: { ...pendingBehavior },
   };
   if (connected && ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'set_settings', settings: payload }));
