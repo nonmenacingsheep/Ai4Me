@@ -1274,9 +1274,11 @@ async def ws_endpoint(websocket: WebSocket):
             ],
         })
 
-    # Welcome-back greeting — once per app launch, not on every reconnect.
+    # Welcome-back greeting — once per app launch, not on every reconnect. We only
+    # commit the once-per-launch flag AFTER the greeting actually streamed to this
+    # client; if the socket drops mid-stream or the model errors, the flag stays
+    # down so the next (visible) connection re-greets instead of silently losing it.
     if not _greeted:
-        _greeted = True
         async with _memory_lock:
             greet_block = mem_store.render_block(memory)
             absence = mem_store.absence_phrase(memory)
@@ -1284,14 +1286,17 @@ async def ws_endpoint(websocket: WebSocket):
         gctx["minutes_since_chat"] = None
         recent_tail = _recent_exchanges_text(conversation, limit=6)
         greeting = ""
+        delivered = True
         try:
             async for token in brain.stream_greeting(gctx, greet_block, absence, recent_tail):
                 greeting += token
                 await websocket.send_json({"type": "token", "content": token})
             await websocket.send_json({"type": "done"})
         except Exception as e:
+            delivered = False
             print(f"[greeting] {e}")
-        if greeting.strip():
+        if greeting.strip() and delivered:
+            _greeted = True
             conversation.append({"role": "assistant", "content": greeting})
             mem_store.save_conversation(conversation)
             tts.speak(greeting)
