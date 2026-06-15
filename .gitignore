@@ -1,0 +1,35 @@
+# ─── Secrets & local config ───────────────────────────────
+.env
+.env.local
+*.key
+
+# ─── Node / Electron ──────────────────────────────────────
+node_modules/
+dist/
+build/
+out/
+*.log
+npm-debug.log*
+
+# ─── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+
+# ─── Editor / OS / tooling ────────────────────────────────
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ─── Models / large local artifacts (downloaded on first run) ─
+*.onnx
+*.bin
+*.pt
+*.safetensors

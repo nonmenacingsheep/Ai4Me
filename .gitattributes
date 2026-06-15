@@ -1,0 +1,13 @@
+# Normalize line endings: Git stores LF, checks out native per-OS.
+* text=auto
+
+# Keep Windows batch files as CRLF so they always run correctly.
+*.bat text eol=crlf
+
+# Treat these as binary (no line-ending munging, no diffs).
+*.ico binary
+*.png binary
+*.onnx binary
+*.bin binary
+*.pt binary
+*.safetensors binary

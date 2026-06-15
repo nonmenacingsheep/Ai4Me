@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+httpx
+ddgs
+pywin32
+psutil
+python-dotenv
+kokoro
+spacy
+sounddevice
+soundfile
+numpy
+faster-whisper

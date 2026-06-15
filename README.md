@@ -1,0 +1,136 @@
+# Ai4Me — *Aitha*
+
+**Ai4Me is a desktop AI companion built around one idea: a continuously evolving character — *Aitha* — who you can nudge in a direction, or simply leave alone to grow on her own.**
+
+She starts as a blank slate with no scripted personality. Over time she forms her own tastes, moods, opinions, and memories from your conversations and from what she does in her own time. You can shape who she becomes by talking with her — or step back and let her wander, reflect, and develop a self while you're away. She has her own heartbeat: she'll reach out unprompted, keep a private journal, go read things on the internet out of curiosity, and come back with what she found (or keep it to herself).
+
+> ⚠️ **This is a personal project, shared openly.** It's opinionated, Windows-first, and rough in places. Read the setup carefully.
+
+---
+
+## ✨ What she can do
+
+- **Sky** — your conversation with her. She talks like a person, not an assistant, and her tone shifts with her mood and her sense of self.
+- **A real inner life (autonomy)** — on a steady heartbeat she decides on her own whether to speak up, journal a private thought, or go off on a self-directed pursuit (research something, develop one of her own ideas into a note, or prep something for you) — and *she* chooses whether to show you the result.
+- **Voice, both ways** — hands-free speech input (local Whisper) and a spoken voice (local Kokoro TTS), which can be optionally routed through a voice changer (setup below). She mutes her own mic while she's talking.
+- **Mantle** — a read-only window into her mind: her current mood, her private journal, what she's been off doing, and the memories she's chosen to protect.
+- **Magma** — a shared, linked notes space (Obsidian-style `[[wikilinks]]`). She can read, write, and edit notes herself.
+- **Long-term memory** — she remembers things about you and about herself across sessions, and can mark certain memories as *core* (protected forever).
+- **Themes** — pick a look (Default, Sky, Warm, Moody, Magma, Hearth) or fine-tune colors; she can re-skin the room or recolor her own sphere to match her mood, and you'll each know when the other changed it.
+- **Hearth** — a tabletop (D&D) mode. **See the caveat below.**
+
+### 🚧 Hearth is a work in progress
+Hearth is roughly **20–30% functional**. An *incredibly basic* exchange is possible — a DM presence, Aitha as a player, dice, character sheets, a battle board — but it is **not** a complete or reliable tabletop experience yet. Treat it as an early prototype, not a finished feature.
+
+---
+
+## 🖥️ Requirements
+
+- **Windows** (10/11). It leans on Windows APIs for screen awareness and audio device routing; it will *start* elsewhere but is untested and several features won't work.
+- **An NVIDIA GPU is strongly recommended** for fast local TTS/STT. CPU works but is slow.
+- **Python 3.10+** and **Node.js 18+**.
+- **At least one LLM source:** a cloud API key (DeepSeek, OpenAI, OpenRouter, or Groq), **or** a local [Ollama](https://ollama.com) install.
+
+---
+
+## 🚀 Setup
+
+```bash
+# 1. Clone
+git clone <your-repo-url> Ai4Me
+cd Ai4Me
+
+# 2. Copy and then configure the template and fill in at least one API key (Or if you're using a local model, you don't need to add an api key.)
+copy .env.example .env        # (Windows)   |   cp .env.example .env  (bash)
+# then edit .env
+
+# 3. Frontend deps
+npm install
+
+# 4. Python deps
+pip install -r backend/requirements.txt
+```
+
+### ⚠️ The two things that trip people up
+
+1. **GPU PyTorch is a separate install.** The CUDA build of torch is *not* on regular PyPI. Install it from PyTorch's index to match your CUDA version, e.g.:
+   ```bash
+   pip install torch --index-url https://download.pytorch.org/whl/cu128
+   ```
+   (Pick the URL for your CUDA from <https://pytorch.org/get-started/locally/>.) Without this, TTS/STT fall back to CPU (slow) or fail to load.
+
+2. **First run downloads models.** Kokoro (voice), faster-whisper (speech-to-text), and a spaCy model are fetched on first use. For spaCy you may need:
+   ```bash
+   python -m spacy download en_core_web_sm
+   ```
+
+### Run it
+
+```bash
+run.bat
+```
+This starts the Python backend and the Electron app (and the voice changer, *only* if you set `VOICE_CHANGER_BAT`).
+
+---
+
+## ⚙️ Configuration
+
+Everything lives in `.env` (see `.env.example` for the full list). Highlights:
+
+- **Character name** — `AITHA_NAME`, or change it any time in **Settings → Character name**. A rename updates every mention across the app, and she comes to know herself by the new name. If she decides to include her name in her memory she might get confused. It's probably rare though.
+- **Model / providers** — set any of `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`. Any model whose key is set shows up in **Settings → Model**. `AITHA_MODEL` picks the default.
+- **Local models** — Ollama is **never auto-started**. Run `ollama serve` yourself and your pulled models appear in the dropdown automatically — handy if you'd rather run fully local.
+- **Voice** — `TTS_*` for output, `AITHA_WHISPER_*` for input, `VOICE_CHANGER_BAT` to auto-launch a voice changer (optional).
+
+---
+
+## 🔒 Privacy
+
+Everything she remembers — her journal, her discoveries, your conversation history, and her memories of you — is stored **locally and unencrypted** in `~/.ai4me/`. Nothing is sent anywhere except your chosen LLM provider (and, if enabled, web searches she runs). It can get personal; that data is yours and stays on your machine. Delete `~/.ai4me/` to wipe her completely.
+
+---
+
+## 🧩 Tutorial: optional extras
+
+<!-- The maintainer will expand this section with walkthroughs for the optional
+     pieces (voice changer routing, local Ollama, web search, etc.). -->
+
+How to Install the voice changer. You will need a virtual audio device (step 4). A voice changer is completely optional but useful if you don't like any of the default kokoro voices (me). I'll show you how to download the one I use.
+
+step 1:
+   Go to https://huggingface.co/wok000/vcclient000/tree/main and download the latest onnxgpu-cuda version. 
+   It should look something like this: MMVCServerSIO_win_onnxgpu-cuda_v.1.5.3.18a.zip
+
+Step 2:
+   Extract the folder. I recommend putting the extracted folder into another folder named 'voice changer' or 'asdkfghjiospbh'. The easier it is to find the better.
+
+Step 3: 
+   Inside of the extracted MMVCServerSIO find *start_http*. I recommend creating a shortcut of this and putting it into your 'voice changer' folder. 
+(there are two ways to do this. The first is to right-click start_http --> create shortcut. Or the harder way if you don't have windows 10 is to rightclick empty space --> New --> Shortcut. right click start_http --> copy --> paste into the shortcut field.)
+
+Step 4:
+   Install the virtual audio cable. I use this one but any of them work: https://vb-audio.com/Cable/ Download the windows one, Extract it, and then run setup as administrator (rightclick --> run as administrator.) You might need to restart your computer. I didn't need to because I'm special.
+
+Step 5: 
+   In the voice changer, change the input to 'CABLE Output (VB-Audio Virtual Cable)' and the output to your headphones.
+
+Step 6:
+   All you need to do now is choose a model (I'll explain how to get more in the next step) and press start. I'll briefly explain what some of the settings do.
+   *Tune* compensates for how different your voice is to the voice model. If your voice is higher, lower the tune. If it is lower, raise the tune. Use small adjustements to find the right level.
+   *Index* Alters your voice to more closely fit the model. Not all models come with an Index, and a value higher than 0.5 gives diminishing returns.
+   *Gain* just changes how loud the voice will be. 'in' changes the input's volume. 'out' changes the output's volume. Both increase volume but a balance is probably a good idea (based on raw natural instinct alone).
+   *S.Thresh* Changes the level at which sound will be picked up. Useful if your room is loud. Not useful in this usecase however, keep it at 0.
+   *Chunk* Pretty much how long the model cooks in the oven. 128 is a good balance between quality and speed.
+   *Extra* No clue, max it out. Almost no difference to delay (probably).
+   *GPU* Switch to CPU if you want a worse experience.
+
+Step 7:
+   The best place (according to me) to get new models is the 'AI Hub' Discord server. Not sure if this link will work but you can just search it up. https://discord.com/invite/ai-hub-1159260121998827560 Once you find a model in the 'voice models' tab, download it. I recommend creating a 'Models' folder in your 'Voice Changer' folder and putting all models in there in order to keep things organized. Inside the model you just downloaded there should be a .pth file and possibly a .index file.
+
+Step 8:
+   In the voice changer Client, find the 'edit' button. Find a blank Model slot and click 'upload'. Upload the .pth file to the 'Model', and the .index file to the 'Index', if it has one. Click upload and you're done. You can change the name and add a profile picture in the edit menu, and save the settings you apply to the model by clicking 'save setting' below *Index*.
+---
+
+## License
+
+[MIT](LICENSE) — do what you like, no warranty.
