@@ -155,24 +155,6 @@ setTtsToggle.addEventListener('click', () => {
   setTtsToggle.querySelector('span').textContent = pendingTts ? 'On' : 'Off';
 });
 
-const setMicGateToggle = document.getElementById('set-micgate-toggle');
-function applyMicGateUI() {
-  setMicGateToggle.classList.toggle('off', !micGate);
-  setMicGateToggle.querySelector('span').textContent = micGate ? 'On' : 'Off';
-}
-applyMicGateUI();
-setMicGateToggle.addEventListener('click', () => {
-  micGate = !micGate;
-  localStorage.setItem('micGate', micGate ? '1' : '0');
-  applyMicGateUI();
-  // Turning the gate off mid-speech should free the mic immediately.
-  if (!micGate && aithaSpeaking) {
-    if (speakingOffTimer) { clearTimeout(speakingOffTimer); speakingOffTimer = null; }
-    aithaSpeaking = false;
-    if (micOn && !recording) setVlState('idle');
-  }
-});
-
 document.getElementById('settings-save').addEventListener('click', () => {
   const payload = {
     model: setModel.value,
@@ -618,6 +600,28 @@ micToggle.addEventListener('click', async () => {
   localStorage.setItem('micOn', micOn ? '1' : '0');
   applyMicUI();
   if (micOn) await startMic(); else stopMic();
+});
+
+/* ─── Settings: "mute mic while she speaks" gate ───────────────────────
+   Lives here (not up in the settings block) so it runs after micGate and the
+   voice state above are initialized — referencing them earlier would throw. */
+const setMicGateToggle = document.getElementById('set-micgate-toggle');
+function applyMicGateUI() {
+  if (!setMicGateToggle) return;
+  setMicGateToggle.classList.toggle('off', !micGate);
+  setMicGateToggle.querySelector('span').textContent = micGate ? 'On' : 'Off';
+}
+applyMicGateUI();
+setMicGateToggle?.addEventListener('click', () => {
+  micGate = !micGate;
+  localStorage.setItem('micGate', micGate ? '1' : '0');
+  applyMicGateUI();
+  // Turning the gate off mid-speech should free the mic immediately.
+  if (!micGate && aithaSpeaking) {
+    if (speakingOffTimer) { clearTimeout(speakingOffTimer); speakingOffTimer = null; }
+    aithaSpeaking = false;
+    if (micOn && !recording) setVlState('idle');
+  }
 });
 
 async function populateMicDevices() {
