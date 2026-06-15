@@ -147,6 +147,8 @@ def _fmt_sheet(label: str, s: dict) -> str:
     st = s.get("stats", {})
     stat_line = " ".join(f"{k.upper()} {st.get(k, 10)}" for k in ("str", "dex", "con", "int", "wis", "cha"))
     hp = s.get("hp", {})
+    if not isinstance(hp, dict):  # tolerate a bare scalar hp so a malformed sheet
+        hp = {"cur": hp, "max": hp}  # degrades gracefully instead of killing the turn
     parts = [
         f"{label}: {s.get('name','?')} — {s.get('race','')} {s.get('class','')} (lvl {s.get('level',1)})",
         f"  {stat_line}",
