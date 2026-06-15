@@ -1274,11 +1274,14 @@ async def ws_endpoint(websocket: WebSocket):
             ],
         })
 
-    # Welcome-back greeting — once per app launch, not on every reconnect. We only
-    # commit the once-per-launch flag AFTER the greeting actually streamed to this
-    # client; if the socket drops mid-stream or the model errors, the flag stays
-    # down so the next (visible) connection re-greets instead of silently losing it.
+    # Welcome-back greeting — once per app launch, not on every reconnect. CLAIM the
+    # flag immediately (this check-and-set is atomic in single-threaded asyncio — no
+    # await between), so if two clients are connected at once only ONE greets. TTS is
+    # server-side and shared, so a double-greet would make the screen and audio voice
+    # two different generations. If delivery fails we release the flag below so a
+    # later connection can retry.
     if not _greeted:
+        _greeted = True
         async with _memory_lock:
             greet_block = mem_store.render_block(memory)
             absence = mem_store.absence_phrase(memory)
@@ -1309,12 +1312,13 @@ async def ws_endpoint(websocket: WebSocket):
             print(f"[greeting] empty (attempt {attempt + 1})")
             await asyncio.sleep(1.0)
         if greeting.strip() and not dropped:
-            _greeted = True
             conversation.append({"role": "assistant", "content": greeting})
             mem_store.save_conversation(conversation)
             tts.speak(greeting)
             last_self_ts = time.time()
             print("[greeting] delivered")
+        else:
+            _greeted = False  # nothing delivered — release the claim so a later connection retries
 
     async def apply_self_directives(hfilter):
         """Act on every directive she emitted this turn — journal, notes, core
