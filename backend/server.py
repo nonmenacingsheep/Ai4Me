@@ -1287,23 +1287,26 @@ async def ws_endpoint(websocket: WebSocket):
         recent_tail = _recent_exchanges_text(conversation, limit=6)
         greeting = ""
         dropped = False  # socket died mid-stream — stop entirely, don't burn the flag
-        # The model can transiently return nothing on a cold start; try twice before
-        # giving up so the welcome-back doesn't silently vanish on a fresh launch.
+        # The model can transiently return nothing on a cold start; retry only while
+        # NOTHING has been shown yet. Once any token reaches the screen we keep it —
+        # retrying after that would stream a second, different greeting that the
+        # renderer appends to the same bubble while TTS speaks only the last one
+        # (screen and audio would diverge).
         for attempt in range(2):
             greeting = ""
             try:
                 async for token in brain.stream_greeting(gctx, greet_block, absence, recent_tail):
                     greeting += token
                     await websocket.send_json({"type": "token", "content": token})
-                if greeting.strip():
-                    await websocket.send_json({"type": "done"})
-                    break
-                print(f"[greeting] empty (attempt {attempt + 1})")
             except (WebSocketDisconnect, RuntimeError):
                 dropped = True
                 break
             except Exception as e:
                 print(f"[greeting] error (attempt {attempt + 1}): {e}")
+            if greeting.strip():
+                await websocket.send_json({"type": "done"})
+                break  # showed something — accept it; never retry into a concatenated mix
+            print(f"[greeting] empty (attempt {attempt + 1})")
             await asyncio.sleep(1.0)
         if greeting.strip() and not dropped:
             _greeted = True
