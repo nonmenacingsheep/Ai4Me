@@ -95,11 +95,17 @@ pip install -r backend/requirements.txt
 
 6. **Backend won't start (`ERR_CONNECTION_REFUSED`, "Backend did not start within 30 seconds").** The Electron window loads but the Python backend died on launch. Two common causes:
    - **`Python was not found; ... install from the Microsoft Store`** — that's the Windows *App Execution Alias*, a fake `python.exe` stub, not real Python. Install Python from [python.org](https://www.python.org/downloads/) (tick **"Add to PATH"**), then turn the stub **OFF** in **Settings → Apps → Advanced app settings → App execution aliases** (toggle off `python.exe` and `python3.exe`). Reopen the terminal and confirm `python --version` prints a version instead of opening the Store.
-   - **`ModuleNotFoundError: No module named 'dotenv'`** (or any other dep) — the requirements installed into a *different* Python than the app runs, **or** the install aborted partway (one failed package on Python 3.14 rolls back the whole thing). Install into the exact interpreter you'll run, e.g. with the [py launcher](https://docs.python.org/3/using/windows.html#python-launcher-for-windows):
-     ```powershell
-     py -3.12 -m pip install -r backend\requirements.txt
-     ```
-     Make sure it ends with `Successfully installed …` (no red `ERROR:`). If it errors on `torch`/`kokoro`/`numpy`, you're on too-new a Python — switch to **3.12** (see Requirements).
+   - **`ModuleNotFoundError: No module named 'dotenv'`** (or any other dep). `run.bat` launches plain **`python`** — i.e. whatever Python is *first on your PATH* — so the packages must be installed into **that exact** interpreter. This breaks in two ways:
+     - **Multiple Pythons / wrong one is default.** If `python --version` reports a different version than the one you ran `pip` against, the app and your packages are looking at different interpreters. Check with `python --version` and `python -c "import dotenv"`. Install into the one the app actually uses:
+       ```powershell
+       python -m pip install -r backend\requirements.txt
+       ```
+     - **Default Python is 3.14 (or another too-new version).** Then the install above *fails* on `torch`/`kokoro`/`numpy` (no wheels yet) and pip rolls back **everything** — which is why `dotenv` keeps "disappearing." The clean fix that worked for others: **uninstall Python 3.14** (*Settings → Apps → Installed apps → Python 3.14 → Uninstall*) so plain `python` falls back to a working **3.10–3.12**, open a fresh terminal, confirm `python --version` is no longer 3.14, then:
+       ```powershell
+       python -m pip install -r backend\requirements.txt
+       run.bat
+       ```
+     The golden rule: **`python --version` (plain, no `py -3.x`) must report 3.10–3.12, and that same interpreter must hold the packages.** Tip: `py -3.12 -m pip install …` targets a specific version, but only helps if `run.bat`'s plain `python` *is* that version.
 
 ### Run it
 
