@@ -11,3 +11,4 @@ sounddevice
 soundfile
 numpy
 faster-whisper
+youtube-transcript-api

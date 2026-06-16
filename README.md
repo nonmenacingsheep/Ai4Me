@@ -16,6 +16,7 @@ She starts as a blank slate with no scripted personality. Over time she forms he
 - **Mantle** — a read-only window into her mind: her current mood, her private journal, what she's been off doing, and the memories she's chosen to protect.
 - **Magma** — a shared, linked notes space (Obsidian-style `[[wikilinks]]`). She can read, write, and edit notes herself.
 - **Long-term memory** — she remembers things about you and about herself across sessions, and can mark certain memories as *core* (protected forever).
+- **Live web & "watching" YouTube** — she can search the web mid-conversation, and she can *watch* a YouTube video by reading its transcript: paste a link and ask what's in it, or let her search, pick a video, and pull its transcript to react to it. Works on both the cloud and local model paths. (Most reliable when you hand her a direct link; the search-then-watch chain is best-effort and depends on a video having a transcript.)
 - **Themes** — pick a look (Default, Sky, Warm, Moody, Magma, Hearth) or fine-tune colors; she can re-skin the room or recolor her own sphere to match her mood, and you'll each know when the other changed it.
 - **Hearth** — a tabletop (D&D) mode. **See the caveat below.**
 

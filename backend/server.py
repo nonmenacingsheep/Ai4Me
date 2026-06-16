@@ -45,6 +45,9 @@ MAX_FLOW_BURST = int(os.getenv("AITHA_MAX_FLOW", "3"))
 # How many times she may open notes (<readnote>) and re-run within a single turn
 # before she must answer with what she's got — guards against a fetch loop.
 MAX_NOTE_FETCH = int(os.getenv("AITHA_MAX_NOTE_FETCH", "2"))
+# How many live-web fetches (<search> / <watch>) she may chain in one turn before she
+# must answer with what she's gathered — bounds token spend and fetch loops.
+MAX_WEB_FETCH = int(os.getenv("AITHA_MAX_WEB_FETCH", "3"))
 # How many AI turns (DM ↔ Aitha) may chain before pausing for the player.
 MAX_AI_VOLLEY = int(os.getenv("AITHA_HEARTH_VOLLEY", "8"))
 
@@ -994,6 +997,8 @@ _HIDDEN_SPECS = [
     ("explore", "<explore>", "</explore>", False),
     ("core", "<core", "</core>", True),
     ("readnote", "<readnote>", "</readnote>", False),  # request a note's body on demand
+    ("search", "<search>", "</search>", False),        # run a live web search this turn
+    ("watch", "<watch>", "</watch>", False),           # "watch" a youtube video (its transcript)
     ("theme", "<theme>", "</theme>", False),           # change the chat theme preset
     ("orb", "<orb>", "</orb>", False),                 # set her sphere colour (mood)
 ]
@@ -1096,6 +1101,14 @@ class _HiddenBlockFilter:
     def readnote_requests(self) -> list[str]:
         """Note titles she asked to open this turn ('all' = everything)."""
         return [t.strip() for n, t in self.captured if n == "readnote" and t.strip()]
+
+    def search_requests(self) -> list[str]:
+        """Web-search queries she fired this turn."""
+        return [t.strip() for n, t in self.captured if n == "search" and t.strip()]
+
+    def watch_requests(self) -> list[str]:
+        """YouTube videos (id or url) she chose to watch this turn."""
+        return [t.strip() for n, t in self.captured if n == "watch" and t.strip()]
 
     def theme_requests(self) -> list[str]:
         """Theme presets she chose this turn (last one wins)."""
@@ -1411,12 +1424,15 @@ async def ws_endpoint(websocket: WebSocket):
         # she's still generating the rest (no local model to contend for now).
         hfilter = None
         speak_buf = ""
-        for fetch_round in range(MAX_NOTE_FETCH + 1):
+        web_context = ""          # search results / video transcripts folded in across rounds
+        note_fetches = web_fetches = 0
+        fetched_q: set[str] = set()   # queries/videos already pulled this turn (dedupe re-asks)
+        for _ in range(MAX_NOTE_FETCH + MAX_WEB_FETCH + 1):
             hfilter = _HiddenBlockFilter()
             speak_buf = ""
             try:
                 async for token in brain.stream_chat(
-                    message, conversation, ctx, memory_block, notes_context
+                    message, conversation, ctx, memory_block, notes_context, web_context
                 ):
                     if token == "\x00SEARCHING\x00":
                         await websocket.send_json({"type": "searching"})
@@ -1439,12 +1455,62 @@ async def ws_endpoint(websocket: WebSocket):
                 await websocket.send_json({"type": "token", "content": tail})
                 speak_buf += tail
 
-            # If she asked to open a note (and said nothing aloud), fetch it and re-run
-            # silently — nothing has been spoken or 'done'-ed yet, so it's seamless.
-            reqs = hfilter.readnote_requests()
-            if reqs and fetch_round < MAX_NOTE_FETCH and not hfilter.shown.strip():
-                bodies = await asyncio.to_thread(notes_store.fetch_notes, reqs)
-                notes_context = await asyncio.to_thread(notes_store.notes_menu) + bodies
+            # Notes open silently: only re-run for <readnote> if she said nothing aloud,
+            # so a fetched note folds in seamlessly with no visible double-message.
+            if not hfilter.shown.strip():
+                reqs = hfilter.readnote_requests()
+                if reqs and note_fetches < MAX_NOTE_FETCH:
+                    note_fetches += 1
+                    bodies = await asyncio.to_thread(notes_store.fetch_notes, reqs)
+                    notes_context = await asyncio.to_thread(notes_store.notes_menu) + bodies
+                    continue
+
+            # Live web (search / watch): allow even after a spoken lead-in ("let me look…"),
+            # since she naturally narrates before reaching for it. We fetch, then re-run so
+            # she answers grounded in the results; the grounded pass streams after the lead-in.
+            # Only act on requests we haven't already fulfilled this turn. Dedupe a video by
+            # its canonical id (she may re-ask with the full URL one round and the bare id
+            # the next) and a search by its normalized text, so re-emitting the same thing
+            # doesn't loop — once the result is in her context, she just answers from it.
+            def _canon(v: str) -> str:
+                m = _re.search(brain._YT_ID, v)
+                return ("yt:" + m.group(1)) if m else ("q:" + " ".join(v.lower().split()))
+            raw_s, raw_w = hfilter.search_requests(), hfilter.watch_requests()
+            sreqs = [q for q in raw_s if _canon(q) not in fetched_q]
+            wreqs = [v for v in raw_w if _canon(v) not in fetched_q]
+            if sreqs or wreqs:
+                if web_fetches < MAX_WEB_FETCH:
+                    web_fetches += 1
+                    await websocket.send_json({"type": "searching"})
+                    for q in sreqs:
+                        fetched_q.add(_canon(q))
+                        res = await asyncio.to_thread(brain._ddg_search, q)
+                        web_context += f"\n\n[WEB SEARCH — {q}]\n{res}"
+                    for v in wreqs:
+                        fetched_q.add(_canon(v))
+                        tx = await asyncio.to_thread(brain._yt_transcript, v)
+                        web_context += f"\n\n[YOUTUBE TRANSCRIPT — {v}]\n{tx}"
+                    if hfilter.shown.strip():  # separate lead-in from the grounded answer
+                        await websocket.send_json({"type": "token", "content": "\n\n"})
+                    continue
+                # Out of lookups but she's still reaching for more — make her wrap up with
+                # what she has (or admit she couldn't find it) instead of ending on "let me
+                # look" with no real answer. One nudge, then we let the next pass stand.
+                if "No more lookups" not in web_context:
+                    web_context += ("\n\n(No more lookups available this turn — answer him now "
+                                    "from the results above, or tell him you couldn't find it. "
+                                    "Do not emit <search> or <watch> again.)")
+                    if hfilter.shown.strip():
+                        await websocket.send_json({"type": "token", "content": "\n\n"})
+                    continue
+            elif (raw_s or raw_w) and "already pulled" not in web_context:
+                # She re-asked for something already fetched (e.g. searched the same thing
+                # again) without answering — nudge her once to use it instead of looping.
+                web_context += ("\n\n(You already pulled what you asked for — it's in the "
+                                "results above. Answer him now from it; to learn what's IN a "
+                                "video, <watch> a specific video id from the search list.)")
+                if hfilter.shown.strip():
+                    await websocket.send_json({"type": "token", "content": "\n\n"})
                 continue
             break
 
