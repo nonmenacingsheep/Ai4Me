@@ -71,6 +71,28 @@ pip install -r backend/requirements.txt
    ```
    Press `Y` to confirm, then reopen your terminal. Or just run the commands from **Command Prompt (cmd.exe)** instead of PowerShell, which isn't affected.
 
+4. **`Error: Electron failed to install correctly, please delete node_modules/electron and try installing again`.** The `electron` package downloads its ~100 MB binary in a postinstall step; this error means that download never landed. Work through these in order:
+   ```powershell
+   # a) delete just electron and reinstall
+   Remove-Item -Recurse -Force node_modules\electron
+   npm install
+
+   # b) if that fails, run Electron's own installer to see the REAL error
+   node node_modules\electron\install.js
+
+   # c) full clean reinstall
+   Remove-Item -Recurse -Force node_modules
+   Remove-Item package-lock.json
+   npm install
+
+   # d) behind a proxy/firewall? pull the binary from a mirror, then reinstall
+   $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+   npm install
+   ```
+   If it *still* fails, it's almost always one of: **antivirus quarantining `node_modules\electron\dist\electron.exe`** (add an exclusion), a **proxy/corporate network** blocking the download, or scripts being skipped (`npm config get ignore-scripts` should be `false`; don't use `--ignore-scripts`). As a last resort, **`npm audit fix --force` has resolved it** by rebuilding the dependency tree — but it can pull in breaking changes, so only do this if the steps above didn't work, then confirm the app still launches.
+
+5. **`npm install` reports "N high severity vulnerabilities."** This is informational, not an error — your install still succeeded. The advisories are almost all in deep build-tool dependencies (e.g. `electron-builder`), which run locally at build time and pose little real-world risk for a desktop app. Run `npm audit` to see the details. Prefer `npm audit fix` (safe); use `npm audit fix --force` only deliberately, since it can install breaking major-version upgrades — re-test the app afterward.
+
 ### Run it
 
 ```bash
