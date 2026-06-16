@@ -29,6 +29,7 @@ Hearth is roughly **20–30% functional**. An *incredibly basic* exchange is pos
 - **Windows** (10/11). It leans on Windows APIs for screen awareness and audio device routing; it will *start* elsewhere but is untested and several features won't work.
 - **An NVIDIA GPU is strongly recommended** for fast local TTS/STT. CPU works but is slow.
 - **Python 3.10+** and **Node.js 18+**.
+- **[Git](https://git-scm.com/downloads)** — needed for the `git clone` step below. (No GitHub account required; or skip Git and use **Code → Download ZIP** on the repo page.)
 - **At least one LLM source:** a cloud API key (DeepSeek, OpenAI, OpenRouter, or Groq), **or** a local [Ollama](https://ollama.com) install.
 
 ---
