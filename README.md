@@ -52,7 +52,7 @@ npm install
 pip install -r backend/requirements.txt
 ```
 
-### ⚠️ The two things that trip people up
+### ⚠️ The things that trip people up
 
 1. **GPU PyTorch is a separate install.** The CUDA build of torch is *not* on regular PyPI. Install it from PyTorch's index to match your CUDA version, e.g.:
    ```bash
@@ -64,6 +64,12 @@ pip install -r backend/requirements.txt
    ```bash
    python -m spacy download en_core_web_sm
    ```
+
+3. **`npm install` says "running scripts is disabled on this system."** That's Windows PowerShell's execution policy blocking npm's script — not an npm error. Allow local scripts for your user (safe, one-time, no admin needed):
+   ```powershell
+   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+   ```
+   Press `Y` to confirm, then reopen your terminal. Or just run the commands from **Command Prompt (cmd.exe)** instead of PowerShell, which isn't affected.
 
 ### Run it
 
