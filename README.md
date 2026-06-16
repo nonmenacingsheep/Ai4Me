@@ -28,7 +28,7 @@ Hearth is roughly **20–30% functional**. An *incredibly basic* exchange is pos
 
 - **Windows** (10/11). It leans on Windows APIs for screen awareness and audio device routing; it will *start* elsewhere but is untested and several features won't work.
 - **An NVIDIA GPU is strongly recommended** for fast local TTS/STT. CPU works but is slow.
-- **Python 3.10+** and **Node.js 18+**.
+- **Python 3.10–3.12** (64-bit) and **Node.js 18+**. **Use 3.12** if you're installing fresh — [python.org/downloads/release/python-3129](https://www.python.org/downloads/release/python-3129/) (Windows installer 64-bit; tick **"Add python.exe to PATH"**). Avoid **3.14** for now: several ML dependencies (`torch`, `kokoro`, `faster-whisper`) don't have prebuilt wheels for it yet, so `pip install` fails.
 - **[Git](https://git-scm.com/downloads)** — needed for the `git clone` step below. (No GitHub account required; or skip Git and use **Code → Download ZIP** on the repo page.)
 - **At least one LLM source:** a cloud API key (DeepSeek, OpenAI, OpenRouter, or Groq), **or** a local [Ollama](https://ollama.com) install.
 
@@ -92,6 +92,14 @@ pip install -r backend/requirements.txt
    If it *still* fails, it's almost always one of: **antivirus quarantining `node_modules\electron\dist\electron.exe`** (add an exclusion), a **proxy/corporate network** blocking the download, or scripts being skipped (`npm config get ignore-scripts` should be `false`; don't use `--ignore-scripts`). As a last resort, **`npm audit fix --force` has resolved it** by rebuilding the dependency tree — but it can pull in breaking changes, so only do this if the steps above didn't work, then confirm the app still launches.
 
 5. **`npm install` reports "N high severity vulnerabilities."** This is informational, not an error — your install still succeeded. The advisories are almost all in deep build-tool dependencies (e.g. `electron-builder`), which run locally at build time and pose little real-world risk for a desktop app. Run `npm audit` to see the details. Prefer `npm audit fix` (safe); use `npm audit fix --force` only deliberately, since it can install breaking major-version upgrades — re-test the app afterward.
+
+6. **Backend won't start (`ERR_CONNECTION_REFUSED`, "Backend did not start within 30 seconds").** The Electron window loads but the Python backend died on launch. Two common causes:
+   - **`Python was not found; ... install from the Microsoft Store`** — that's the Windows *App Execution Alias*, a fake `python.exe` stub, not real Python. Install Python from [python.org](https://www.python.org/downloads/) (tick **"Add to PATH"**), then turn the stub **OFF** in **Settings → Apps → Advanced app settings → App execution aliases** (toggle off `python.exe` and `python3.exe`). Reopen the terminal and confirm `python --version` prints a version instead of opening the Store.
+   - **`ModuleNotFoundError: No module named 'dotenv'`** (or any other dep) — the requirements installed into a *different* Python than the app runs, **or** the install aborted partway (one failed package on Python 3.14 rolls back the whole thing). Install into the exact interpreter you'll run, e.g. with the [py launcher](https://docs.python.org/3/using/windows.html#python-launcher-for-windows):
+     ```powershell
+     py -3.12 -m pip install -r backend\requirements.txt
+     ```
+     Make sure it ends with `Successfully installed …` (no red `ERROR:`). If it errors on `torch`/`kokoro`/`numpy`, you're on too-new a Python — switch to **3.12** (see Requirements).
 
 ### Run it
 
