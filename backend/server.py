@@ -1427,7 +1427,20 @@ async def ws_endpoint(websocket: WebSocket):
         web_context = ""          # search results / video transcripts folded in across rounds
         note_fetches = web_fetches = 0
         fetched_q: set[str] = set()   # queries/videos already pulled this turn (dedupe re-asks)
-        for _ in range(MAX_NOTE_FETCH + MAX_WEB_FETCH + 1):
+        lead_in_shown = False         # a brief live "let me look" already went out this turn
+        web_debug: list[dict] = []    # background search/watch actions, surfaced in debug mode
+
+        def _canon(v: str) -> str:
+            # Dedupe a video by its canonical id (she may re-ask with the full URL one round
+            # and the bare id the next) and a search by its normalized text.
+            m = _re.search(brain._YT_ID, v)
+            return ("yt:" + m.group(1)) if m else ("q:" + " ".join(v.lower().split()))
+
+        for round_idx in range(MAX_NOTE_FETCH + MAX_WEB_FETCH + 1):
+            # Only the FIRST pass streams live. Re-runs (after a search/watch) buffer their
+            # text, so repeated "let me look" lead-ins don't pile up on screen — intermediate
+            # lead-ins are dropped and only the final grounded answer is flushed once below.
+            live = (round_idx == 0)
             hfilter = _HiddenBlockFilter()
             speak_buf = ""
             try:
@@ -1438,7 +1451,7 @@ async def ws_endpoint(websocket: WebSocket):
                         await websocket.send_json({"type": "searching"})
                         continue
                     visible = hfilter.feed(token)
-                    if visible:
+                    if visible and live:
                         await websocket.send_json({"type": "token", "content": visible})
                         speak_buf += visible
                         sentences, speak_buf = _take_sentences(speak_buf)
@@ -1451,9 +1464,14 @@ async def ws_endpoint(websocket: WebSocket):
                 raise
 
             tail = hfilter.finish()
-            if tail:
+            if tail and live:
                 await websocket.send_json({"type": "token", "content": tail})
                 speak_buf += tail
+            if live and hfilter.shown.strip():
+                lead_in_shown = True
+            if live and speak_buf.strip():
+                tts.speak(speak_buf)      # speak any trailing lead-in fragment now
+                speak_buf = ""
 
             # Notes open silently: only re-run for <readnote> if she said nothing aloud,
             # so a fetched note folds in seamlessly with no visible double-message.
@@ -1465,16 +1483,8 @@ async def ws_endpoint(websocket: WebSocket):
                     notes_context = await asyncio.to_thread(notes_store.notes_menu) + bodies
                     continue
 
-            # Live web (search / watch): allow even after a spoken lead-in ("let me look…"),
-            # since she naturally narrates before reaching for it. We fetch, then re-run so
-            # she answers grounded in the results; the grounded pass streams after the lead-in.
-            # Only act on requests we haven't already fulfilled this turn. Dedupe a video by
-            # its canonical id (she may re-ask with the full URL one round and the bare id
-            # the next) and a search by its normalized text, so re-emitting the same thing
-            # doesn't loop — once the result is in her context, she just answers from it.
-            def _canon(v: str) -> str:
-                m = _re.search(brain._YT_ID, v)
-                return ("yt:" + m.group(1)) if m else ("q:" + " ".join(v.lower().split()))
+            # Live web (search / watch): allow even after a spoken lead-in, then re-run so she
+            # answers grounded in the results. Only act on requests not already fulfilled.
             raw_s, raw_w = hfilter.search_requests(), hfilter.watch_requests()
             sreqs = [q for q in raw_s if _canon(q) not in fetched_q]
             wreqs = [v for v in raw_w if _canon(v) not in fetched_q]
@@ -1484,14 +1494,16 @@ async def ws_endpoint(websocket: WebSocket):
                     await websocket.send_json({"type": "searching"})
                     for q in sreqs:
                         fetched_q.add(_canon(q))
+                        web_debug.append({"kind": "search", "text": q})
                         res = await asyncio.to_thread(brain._ddg_search, q)
                         web_context += f"\n\n[WEB SEARCH — {q}]\n{res}"
                     for v in wreqs:
                         fetched_q.add(_canon(v))
+                        web_debug.append({"kind": "watch", "text": v})
                         tx = await asyncio.to_thread(brain._yt_transcript, v)
                         web_context += f"\n\n[YOUTUBE TRANSCRIPT — {v}]\n{tx}"
-                    if hfilter.shown.strip():  # separate lead-in from the grounded answer
-                        await websocket.send_json({"type": "token", "content": "\n\n"})
+                    # Surface what she did in the background so debug mode can show it live.
+                    await websocket.send_json({"type": "directives", "blocks": web_debug[-(len(sreqs) + len(wreqs)):]})
                     continue
                 # Out of lookups but she's still reaching for more — make her wrap up with
                 # what she has (or admit she couldn't find it) instead of ending on "let me
@@ -1500,8 +1512,6 @@ async def ws_endpoint(websocket: WebSocket):
                     web_context += ("\n\n(No more lookups available this turn — answer him now "
                                     "from the results above, or tell him you couldn't find it. "
                                     "Do not emit <search> or <watch> again.)")
-                    if hfilter.shown.strip():
-                        await websocket.send_json({"type": "token", "content": "\n\n"})
                     continue
             elif (raw_s or raw_w) and "already pulled" not in web_context:
                 # She re-asked for something already fetched (e.g. searched the same thing
@@ -1509,16 +1519,26 @@ async def ws_endpoint(websocket: WebSocket):
                 web_context += ("\n\n(You already pulled what you asked for — it's in the "
                                 "results above. Answer him now from it; to learn what's IN a "
                                 "video, <watch> a specific video id from the search list.)")
-                if hfilter.shown.strip():
-                    await websocket.send_json({"type": "token", "content": "\n\n"})
                 continue
+
+            # Final pass. If this was a buffered re-run, flush its text now — once — so the
+            # grounded answer appears cleanly after the single live lead-in.
+            if not live:
+                answer = hfilter.shown.strip()
+                if answer:
+                    if lead_in_shown:
+                        await websocket.send_json({"type": "token", "content": "\n\n"})
+                    await websocket.send_json({"type": "token", "content": answer})
+                    speak_buf = answer
             break
 
         await websocket.send_json({"type": "done"})
-        if speak_buf.strip():  # final partial sentence
+        if speak_buf.strip():  # final partial sentence / flushed grounded answer
             tts.speak(speak_buf)
 
         reply = hfilter.shown.strip()
+        if lead_in_shown and not reply:
+            reply = "(looked something up)"  # never store an empty assistant turn
 
         # Act on every directive she emitted (journal, notes, core memory, outing).
         await apply_self_directives(hfilter)
