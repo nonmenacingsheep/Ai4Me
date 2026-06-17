@@ -1162,8 +1162,17 @@ class AithaBrain:
                 data = YouTubeTranscriptApi.get_transcript(vid)
         except Exception as e:
             return f"No transcript available for that video ({type(e).__name__})."
-        text = re.sub(r'\s+', ' ', " ".join(d.get("text", "") for d in data)).strip()
-        LIMIT = 6000
+        # Keep periodic [m:ss] time markers (~every 20s) so she can answer "what's said
+        # around 2:30" instead of getting a flat wall of text with no timing at all.
+        parts, next_mark = [], 0
+        for d in data:
+            start = int(d.get("start", 0) or 0)
+            if start >= next_mark:
+                parts.append(f"[{start // 60}:{start % 60:02d}]")
+                next_mark = start + 20
+            parts.append(d.get("text", ""))
+        text = re.sub(r'\s+', ' ', " ".join(parts)).strip()
+        LIMIT = 8000
         if len(text) > LIMIT:
             text = text[:LIMIT] + " …(transcript truncated)"
         return text or "(the video has no spoken transcript)"

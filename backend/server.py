@@ -59,7 +59,8 @@ _WEB_RESULTS_HEADER = (
     "to <watch> one of the ids from the list — you have NOT seen a video just because it "
     "appeared in search.\n"
     "• A [YOUTUBE TRANSCRIPT] block IS the actual words of that video — you've now watched "
-    "it; answer from it directly and in your own voice."
+    "it; answer from it directly and in your own voice. It carries [m:ss] time markers, so "
+    "you can say roughly when something is said (the nearest marker before it)."
 )
 # She sometimes SAYS she'll look something up but forgets to emit the tag — catch that
 # intent so we can nudge her to actually do it instead of leaving him hanging.
