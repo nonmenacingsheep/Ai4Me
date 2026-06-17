@@ -2001,10 +2001,13 @@ body.theme-mantle::before {
     radial-gradient(ellipse 45% 40% at 86% 86%, rgba(46,150,110,0.06) 0%, transparent 65%);
 }
 
-.view-mantle { display: none; flex-direction: column; height: 100%; overflow: hidden; }
+.view-mantle { display: none; flex-direction: column; height: 100%; overflow: hidden; position: relative; }
 .view-mantle.active { display: flex; }
 
-.mantle-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 22px 24px 18px; }
+.mantle-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 22px 24px 18px;
+  transition: transform .55s cubic-bezier(.7,0,.2,1), opacity .45s ease; }
+/* When memory lane is open, the mind slides left and fades; the lane slides in from the right. */
+.view-mantle.lane-open .mantle-wrap { transform: translateX(-22%); opacity: 0; pointer-events: none; }
 .mantle-head { display: flex; align-items: center; gap: 16px; padding-bottom: 18px; }
 .mantle-head-orb { width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .mantle-head-orb .orb { width: 50px; height: 50px; }
@@ -2295,3 +2298,63 @@ body.theme-mantle::before {
 .hp-note-item { background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: 7px;
   padding: 9px 11px; font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
 .hp-note-item .hp-note-by { font-size: 10px; text-transform: uppercase; color: var(--ember); margin-bottom: 3px; }
+
+/* ═══ Memory Lane (Mantle overlay) ═══════════════════════════════════ */
+.memlane {
+  position: absolute; inset: 0; z-index: 5;
+  transform: translateX(100%); opacity: 0; pointer-events: none;
+  transition: transform .55s cubic-bezier(.7,0,.2,1), opacity .4s ease;
+  background: var(--bg-deep);
+  display: flex; overflow: hidden;
+}
+.view-mantle.lane-open .memlane { transform: translateX(0); opacity: 1; pointer-events: auto; }
+.memlane-matrix { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.16; pointer-events: none; }
+.memlane-inner { position: relative; z-index: 1; flex: 1; display: flex; flex-direction: column;
+  padding: 18px 22px 16px; min-height: 0; }
+
+.memlane-head { display: flex; align-items: center; gap: 14px; padding-bottom: 14px; flex-shrink: 0; }
+.memlane-back { width: 36px; height: 36px; flex-shrink: 0; border-radius: 9px; cursor: pointer;
+  background: var(--bg-surface); border: 1px solid var(--border-accent); color: var(--accent-v-bright);
+  font-size: 18px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  transition: background .15s, transform .15s; }
+.memlane-back:hover { background: var(--accent-v-dim); transform: translateX(-2px); }
+.memlane-title { font-size: 17px; font-weight: 600; color: var(--text-1); letter-spacing: .02em; }
+.memlane-sub { font-size: 12px; color: var(--accent-v-bright); margin-top: 2px; }
+
+.memlane-body { flex: 1; display: flex; gap: 16px; min-height: 0; }
+.memlane-lists { flex: 1.15; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; padding-right: 6px; }
+.memlane-group-title { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-3); margin-bottom: 8px; }
+.memlane-group-title b { color: var(--accent-v-bright); font-weight: 600; }
+.mem-row { display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; margin-bottom: 7px;
+  background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
+  border: 1px solid var(--border-soft); border-radius: 9px; transition: border-color .15s, opacity .3s, transform .3s; }
+.mem-row:hover { border-color: var(--border-accent); }
+.mem-row.core { border-color: var(--border-accent); background: var(--accent-v-dim); }
+.mem-row.removing { opacity: 0; transform: translateX(24px); }
+.mem-row .mem-text { flex: 1; font-size: 13px; line-height: 1.5; color: var(--text-2); min-width: 0; }
+.mem-row.core .mem-text { color: var(--text-1); }
+.mem-act { flex-shrink: 0; width: 26px; height: 26px; border-radius: 7px; cursor: pointer; font-size: 13px;
+  background: transparent; border: 1px solid transparent; color: var(--text-3); line-height: 1;
+  display: flex; align-items: center; justify-content: center; transition: all .15s; }
+.mem-act:hover { background: var(--bg-hover); }
+.mem-act.keep:hover { color: var(--gold-bright, #f5c451); border-color: var(--border-accent); }
+.mem-act.keep.on { color: var(--gold-bright, #f5c451); }
+.mem-act.del:hover { color: #fca5a5; border-color: rgba(239,68,68,.35); }
+.memlane-empty { font-size: 12.5px; color: var(--text-3); font-style: italic; padding: 4px 2px; }
+
+.memlane-chat { flex: 1; display: flex; flex-direction: column; min-width: 0;
+  background: color-mix(in srgb, var(--bg-deep) 55%, transparent);
+  border: 1px solid var(--border-soft); border-radius: 12px; overflow: hidden; }
+.memlane-thread { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.memlane-hint { font-size: 12px; color: var(--text-3); line-height: 1.6; font-style: italic; }
+.memlane-thread .message { max-width: 88%; }
+.memlane-composer { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border-soft); flex-shrink: 0; }
+.memlane-composer textarea { flex: 1; resize: none; max-height: 120px; background: var(--bg-surface);
+  border: 1px solid var(--border-soft); border-radius: 9px; color: var(--text-1); padding: 9px 11px;
+  font: inherit; font-size: 13px; line-height: 1.5; outline: none; }
+.memlane-composer textarea:focus { border-color: var(--border-accent); }
+.memlane-composer button { flex-shrink: 0; width: 40px; border-radius: 9px; cursor: pointer;
+  background: var(--accent-v); border: none; color: #fff; font-size: 15px;
+  transition: filter .15s; }
+.memlane-composer button:hover { filter: brightness(1.12); }

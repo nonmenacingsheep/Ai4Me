@@ -340,6 +340,10 @@ function handleMessage(data) {
       if (showDirectives) renderDirectives(data.blocks || []);
       break;
 
+    case 'memory_changed':
+      if (memLaneOpen) loadMemLane(true);   // she kept/forgot one mid-chat — refresh the list
+      break;
+
     case 'tts_state':
       applyVoiceState(data.enabled);
       break;
@@ -373,13 +377,14 @@ function handleMessage(data) {
       document.getElementById('welcome')?.remove();  // clear placeholder (incl. greeting)
 
       if (!streamingBubble) {
-        streamingBubble = appendBubble('aitha', '');
+        const container = memLaneOpen ? document.getElementById('memlane-thread') : messagesEl;
+        streamingBubble = appendBubble('aitha', '', container);
         streamingBubble.classList.add('streaming');
         streamingContent = '';
       }
       streamingContent += data.content;
       streamingBubble.textContent = streamingContent;
-      scrollToBottom();
+      if (memLaneOpen) scrollThread(); else scrollToBottom();
       break;
 
     case 'done':
@@ -934,7 +939,7 @@ function renderHistory(msgs) {
 }
 
 /* ─── Bubble factory ───────────────────────────────────────────────── */
-function appendBubble(role, text) {
+function appendBubble(role, text, container = messagesEl) {
   const row = document.createElement('div');
   row.className = `message ${role}`;
 
@@ -943,7 +948,7 @@ function appendBubble(role, text) {
   bubble.textContent = text;
 
   row.appendChild(bubble);
-  messagesEl.appendChild(row);
+  container.appendChild(row);
   return bubble;
 }
 
@@ -1011,6 +1016,7 @@ function switchView(name) {
   if (name === 'notes' && !notesLoaded) { notesLoaded = true; loadNoteList(); }
   if (name === 'hearth' && !hearthLoaded) { hearthLoaded = true; loadHearth(); }
   if (name === 'mantle') loadMind();   // refresh each visit — her mind moves
+  if (name !== 'mantle') closeMemLane();   // don't leave the lane (and its matrix) running
   if (name === 'chat') inputEl.focus();
 }
 
@@ -1072,6 +1078,184 @@ async function loadMind() {
     jEl.classList.remove('loading');
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   MEMORY LANE — a slide-in panel over Mantle: all her memories, a Matrix
+   backdrop, and a chat box wired to the SAME conversation so you can
+   reminisce and prune her context together.
+   ═══════════════════════════════════════════════════════════════════ */
+let memLaneOpen = false;
+let matrixRAF = null;
+
+const memLaneEl   = document.getElementById('memlane');
+const memThreadEl = document.getElementById('memlane-thread');
+const memInputEl  = document.getElementById('memlane-input');
+
+function scrollThread() {
+  if (memThreadEl) memThreadEl.scrollTo({ top: memThreadEl.scrollHeight, behavior: 'smooth' });
+}
+
+function openMemLane() {
+  if (memLaneOpen) return;
+  memLaneOpen = true;
+  document.getElementById('view-mantle')?.classList.add('lane-open');
+  startMatrix();
+  loadMemLane();
+  setTimeout(() => memInputEl?.focus(), 450);
+}
+
+function closeMemLane() {
+  if (!memLaneOpen) return;
+  memLaneOpen = false;
+  document.getElementById('view-mantle')?.classList.remove('lane-open');
+  stopMatrix();
+}
+
+async function loadMemLane(quiet) {
+  const listsEl = document.getElementById('memlane-lists');
+  const countEl = document.getElementById('memlane-count');
+  if (!listsEl) return;
+  try {
+    const mem = await (await fetch('/api/memory')).json();
+    renderMemList(listsEl, countEl, mem);
+  } catch (e) {
+    if (!quiet) listsEl.innerHTML = '<div class="memlane-empty">Couldn’t reach her memories right now.</div>';
+  }
+}
+
+function renderMemList(listsEl, countEl, mem) {
+  const self = mem.self_facts || [];
+  const him  = mem.facts || [];
+  if (countEl) {
+    const core = [...self, ...him].filter(m => m.core).length;
+    countEl.textContent = `${self.length + him.length} memories · ${core} kept`;
+  }
+  listsEl.innerHTML = '';
+  const group = (title, sub, arr, kind) => {
+    const h = document.createElement('div');
+    h.className = 'memlane-group-title';
+    h.innerHTML = `${title} <b>${sub}</b>`;
+    listsEl.appendChild(h);
+    if (!arr.length) {
+      const e = document.createElement('div');
+      e.className = 'memlane-empty';
+      e.textContent = 'Nothing here yet.';
+      listsEl.appendChild(e);
+      return;
+    }
+    arr.forEach(m => listsEl.appendChild(memRow(m, kind)));
+  };
+  group('Who she is', '— her identity', self, 'self');
+  group('What she knows about you', '— about him', him, 'him');
+}
+
+function memRow(m, kind) {
+  const row = document.createElement('div');
+  row.className = 'mem-row' + (m.core ? ' core' : '');
+
+  const keep = document.createElement('button');
+  keep.className = 'mem-act keep' + (m.core ? ' on' : '');
+  keep.textContent = '★';
+  keep.title = m.core ? 'Kept (core) — click to unkeep' : 'Keep this (mark core)';
+  keep.addEventListener('click', () => memAction('core', kind, m.text, { core: !m.core }));
+
+  const text = document.createElement('div');
+  text.className = 'mem-text';
+  text.textContent = m.text;
+
+  const del = document.createElement('button');
+  del.className = 'mem-act del';
+  del.textContent = '✕';
+  del.title = 'Forget this';
+  del.addEventListener('click', () => {
+    row.classList.add('removing');
+    setTimeout(() => memAction('delete', kind, m.text), 280);
+  });
+
+  row.append(keep, text, del);
+  return row;
+}
+
+async function memAction(op, kind, fact, extra = {}) {
+  try {
+    const mem = await (await fetch('/api/memory/' + op, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, fact, ...extra }),
+    })).json();
+    renderMemList(document.getElementById('memlane-lists'),
+                  document.getElementById('memlane-count'), mem);
+  } catch (e) { /* leave the list as-is on failure */ }
+}
+
+function sendMemLane() {
+  const text = memInputEl.value.trim();
+  if (!text || !connected) return;
+  document.querySelector('.memlane-hint')?.remove();
+  appendBubble('user', text, memThreadEl);
+  scrollThread();
+  memInputEl.value = '';
+  memInputEl.style.height = 'auto';
+  setOrbState('thinking');
+  setStatus('Thinking...');
+  // review:true folds her FULL memory list into context for this turn.
+  ws.send(JSON.stringify({ type: 'chat', message: text, review: true }));
+}
+
+/* ─── Matrix rain backdrop (themed to the current accent) ───────────── */
+function startMatrix() {
+  const canvas = document.getElementById('memlane-matrix');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const glyphs = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈ0123456789:.";=*+-<>'.split('');
+  let cols, drops, fontSize;
+  const accent = getComputedStyle(document.documentElement)
+                   .getPropertyValue('--accent-v-bright').trim() || '#9db4ff';
+
+  function resize() {
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+    fontSize = 15;
+    cols = Math.max(1, Math.floor(canvas.width / fontSize));
+    drops = Array.from({ length: cols }, () => Math.random() * -50);
+  }
+  resize();
+  memLaneEl._matrixResize = resize;
+  window.addEventListener('resize', resize);
+
+  function tick() {
+    ctx.fillStyle = 'rgba(0,0,0,0.08)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = fontSize + 'px monospace';
+    for (let i = 0; i < cols; i++) {
+      const ch = glyphs[(Math.random() * glyphs.length) | 0];
+      const x = i * fontSize, y = drops[i] * fontSize;
+      ctx.fillStyle = accent;
+      ctx.fillText(ch, x, y);
+      if (y > canvas.height && Math.random() > 0.975) drops[i] = 0;
+      drops[i]++;
+    }
+    matrixRAF = requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+function stopMatrix() {
+  if (matrixRAF) cancelAnimationFrame(matrixRAF);
+  matrixRAF = null;
+  if (memLaneEl?._matrixResize) window.removeEventListener('resize', memLaneEl._matrixResize);
+}
+
+document.getElementById('mantle-memlane')?.addEventListener('click', openMemLane);
+document.getElementById('memlane-back')?.addEventListener('click', closeMemLane);
+document.getElementById('memlane-send')?.addEventListener('click', sendMemLane);
+memInputEl?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMemLane(); }
+});
+memInputEl?.addEventListener('input', () => {
+  memInputEl.style.height = 'auto';
+  memInputEl.style.height = Math.min(memInputEl.scrollHeight, 120) + 'px';
+});
 
 /* ═══════════════════════════════════════════════════════════════════
    NOTES

@@ -357,6 +357,7 @@
               <div class="mantle-title">Her Mind</div>
               <div class="mantle-mood" id="mantle-mood">…</div>
             </div>
+            <button class="note-tool" id="mantle-memlane" title="Memory lane — review her memories">❖</button>
             <button class="note-tool" id="mantle-refresh" title="Refresh">↻</button>
           </header>
 
@@ -375,6 +376,32 @@
                 <h3>What she holds onto <span class="mantle-sub">core memories</span></h3>
                 <div class="mantle-core" id="mantle-core"></div>
               </section>
+            </div>
+          </div>
+        </div>
+
+        <!-- Memory Lane — slides in over Mantle: all her memories + a shared-chat box -->
+        <div class="memlane" id="memlane" aria-hidden="true">
+          <canvas class="memlane-matrix" id="memlane-matrix"></canvas>
+          <div class="memlane-inner">
+            <header class="memlane-head">
+              <button class="memlane-back" id="memlane-back" title="Back to her mind">←</button>
+              <div class="memlane-head-text">
+                <div class="memlane-title">Memory Lane</div>
+                <div class="memlane-sub" id="memlane-count">…</div>
+              </div>
+            </header>
+            <div class="memlane-body">
+              <div class="memlane-lists" id="memlane-lists"></div>
+              <div class="memlane-chat">
+                <div class="memlane-thread" id="memlane-thread">
+                  <div class="memlane-hint">Walk her memories with her — ask what she treasures, what feels stale, what to keep or let go. She can ★ keep or ✕ forget them as you talk, and so can you.</div>
+                </div>
+                <div class="memlane-composer">
+                  <textarea id="memlane-input" rows="1" placeholder="Reminisce with her about these…"></textarea>
+                  <button id="memlane-send" title="Send">➤</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

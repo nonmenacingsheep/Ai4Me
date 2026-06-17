@@ -457,6 +457,28 @@ def _memory_snapshot() -> dict:
     }
 
 
+def _build_memory_review(mem: dict) -> str:
+    """Her FULL memory plus instructions, folded into context when he's reviewing her
+    mind with her in the Mantle memory panel — so she can reminisce over the whole set
+    (not just the recent slice she normally carries) and prune it together with him."""
+    def fmt(items):
+        return "\n".join(f"- {'★ ' if it.get('core') else ''}{it['text']}"
+                         for it in items) or "  (none yet)"
+    return (
+        "MEMORY REVIEW — he's opened your memories with you and you're going through them "
+        "together. Below is your FULL long-term memory (you normally only carry a recent "
+        "slice of it). Reminisce over them: which you treasure, which feel stale, redundant, "
+        "or no longer true and could be let go to keep your mind uncluttered. You can act on "
+        "them right here, using a memory's EXACT text:\n"
+        "  <core>exact memory text</core>      — keep it; mark it core (protected).\n"
+        "  <forget>exact memory text</forget>  — let it go (deletes it).\n"
+        "★ marks memories that are already core. Only act when it genuinely feels right — "
+        "this is yours, and the two of you are deciding together.\n\n"
+        f"WHO YOU ARE (your own identity):\n{fmt(mem.get('self_facts', []))}\n\n"
+        f"WHAT YOU KNOW ABOUT HIM:\n{fmt(mem.get('facts', []))}"
+    )
+
+
 @app.get("/api/memory")
 async def api_get_memory():
     async with _memory_lock:
@@ -1023,6 +1045,7 @@ _HIDDEN_SPECS = [
     ("readnote", "<readnote>", "</readnote>", False),  # request a note's body on demand
     ("search", "<search>", "</search>", False),        # run a live web search this turn
     ("watch", "<watch>", "</watch>", False),           # "watch" a youtube video (its transcript)
+    ("forget", "<forget>", "</forget>", False),        # let go of a memory (delete it)
     ("theme", "<theme>", "</theme>", False),           # change the chat theme preset
     ("orb", "<orb>", "</orb>", False),                 # set her sphere colour (mood)
 ]
@@ -1133,6 +1156,10 @@ class _HiddenBlockFilter:
     def watch_requests(self) -> list[str]:
         """YouTube videos (id or url) she chose to watch this turn."""
         return [t.strip() for n, t in self.captured if n == "watch" and t.strip()]
+
+    def forget_requests(self) -> list[str]:
+        """Memories she chose to let go of this turn (exact text to delete)."""
+        return [t.strip() for n, t in self.captured if n == "forget" and t.strip()]
 
     def theme_requests(self) -> list[str]:
         """Theme presets she chose this turn (last one wins)."""
@@ -1399,6 +1426,25 @@ async def ws_endpoint(websocket: WebSocket):
                             memory, [{"text": text, "core": True}], key=_mem_key(kind)
                         )
                 mem_store.save(memory)
+            await broadcast({"type": "memory_changed", "kept": True})
+
+        # Memories she chose to let go of (e.g. while reviewing her mind with him).
+        forget_reqs = hfilter.forget_requests()
+        if forget_reqs:
+            removed = []
+            async with _memory_lock:
+                for text in forget_reqs:
+                    t = text.strip().lower()
+                    for key in ("facts", "self_facts"):
+                        before = len(memory.get(key, []))
+                        memory[key] = [it for it in memory.get(key, [])
+                                       if it["text"].strip().lower() != t]
+                        if len(memory[key]) != before:
+                            removed.append(text)
+                if removed:
+                    mem_store.save(memory)
+            if removed:
+                await broadcast({"type": "memory_changed", "removed": removed})
 
         # A web outing she decided to launch — run it in the background.
         explore_reqs = hfilter.explore_requests()
@@ -1422,7 +1468,7 @@ async def ws_endpoint(websocket: WebSocket):
         if theme_updates:
             await apply_theme(theme_updates, by="her")
 
-    async def handle_chat(message: str):
+    async def handle_chat(message: str, review: bool = False):
         nonlocal last_chat_ts, last_self_ts, journal_material, last_journal_ts, proactive_task
 
         tts.interrupt()  # barge-in: stop any speech still playing
@@ -1449,6 +1495,9 @@ async def ws_endpoint(websocket: WebSocket):
         hfilter = None
         speak_buf = ""
         web_context = ""          # search results / video transcripts folded in across rounds
+        if review:                # reviewing her mind together — give her the whole memory set
+            async with _memory_lock:
+                web_context = _build_memory_review(memory)
         note_fetches = web_fetches = 0
         fetched_q: set[str] = set()   # queries/videos already pulled this turn (dedupe re-asks)
         lead_in_shown = False         # a brief live "let me look" already went out this turn
@@ -1944,7 +1993,8 @@ async def ws_endpoint(websocket: WebSocket):
                 if current_task and not current_task.done():
                     continue  # already thinking — ignore until done or cancelled
                 # Run as a task so we can still receive a 'cancel' while she thinks.
-                current_task = asyncio.create_task(handle_chat(message))
+                current_task = asyncio.create_task(
+                    handle_chat(message, review=bool(data.get("review"))))
 
             elif msg_type == "cancel":
                 if current_task and not current_task.done():
