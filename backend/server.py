@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import random
+import re as _re
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -48,6 +49,25 @@ MAX_NOTE_FETCH = int(os.getenv("AITHA_MAX_NOTE_FETCH", "2"))
 # How many live-web fetches (<search> / <watch>) she may chain in one turn before she
 # must answer with what she's gathered — bounds token spend and fetch loops.
 MAX_WEB_FETCH = int(os.getenv("AITHA_MAX_WEB_FETCH", "3"))
+
+# Prepended to her context once she's actually fetched something, so she reads the
+# results right (a search is just pointers; a transcript is the real video contents).
+_WEB_RESULTS_HEADER = (
+    "WEB RESULTS YOU PULLED THIS TURN (don't re-pull the same item):\n"
+    "• A [WEB SEARCH] block is just a LIST OF POINTERS — titles, snippets, and video ids. "
+    "It is NOT the contents of any page or video. To learn what's IN a video you still have "
+    "to <watch> one of the ids from the list — you have NOT seen a video just because it "
+    "appeared in search.\n"
+    "• A [YOUTUBE TRANSCRIPT] block IS the actual words of that video — you've now watched "
+    "it; answer from it directly and in your own voice."
+)
+# She sometimes SAYS she'll look something up but forgets to emit the tag — catch that
+# intent so we can nudge her to actually do it instead of leaving him hanging.
+_LOOKUP_INTENT = _re.compile(
+    r"\b(?:let me|i'?ll|i will|gonna|going to|hang on|hold on|give me a|one)\b[^.!?\n]{0,40}"
+    r"\b(?:look|search|check|find|google|watch|pull up|see what|dig up|track down)\b",
+    _re.I,
+)
 # How many AI turns (DM ↔ Aitha) may chain before pausing for the player.
 MAX_AI_VOLLEY = int(os.getenv("AITHA_HEARTH_VOLLEY", "8"))
 
@@ -1492,6 +1512,8 @@ async def ws_endpoint(websocket: WebSocket):
                 if web_fetches < MAX_WEB_FETCH:
                     web_fetches += 1
                     await websocket.send_json({"type": "searching"})
+                    if not web_context:           # first fetch — explain how to read results
+                        web_context = _WEB_RESULTS_HEADER
                     for q in sreqs:
                         fetched_q.add(_canon(q))
                         web_debug.append({"kind": "search", "text": q})
@@ -1519,6 +1541,17 @@ async def ws_endpoint(websocket: WebSocket):
                 web_context += ("\n\n(You already pulled what you asked for — it's in the "
                                 "results above. Answer him now from it; to learn what's IN a "
                                 "video, <watch> a specific video id from the search list.)")
+                continue
+            elif (web_fetches == 0 and not hfilter.readnote_requests()
+                  and "didn't actually" not in web_context
+                  and len(hfilter.shown.strip()) < 160          # a short lead-in, not a real reply
+                  and _LOOKUP_INTENT.search(hfilter.shown)):
+                # She told him she'd look it up but never emitted a tag — so nothing happened.
+                # Nudge her once to really do it instead of leaving him hanging on a promise.
+                web_context += ("(You just told him you'd look something up, but you didn't "
+                                "actually emit a <search> or <watch> tag — so nothing was looked "
+                                "up and you still don't know the answer. Emit the right tag NOW, "
+                                "in this next reply, to really do it.)")
                 continue
 
             # Final pass. If this was a buffered re-run, flush its text now — once — so the

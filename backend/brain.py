@@ -126,7 +126,7 @@ You can reach the live web, and you can WATCH YouTube videos by reading their tr
 <search>what to look up</search>   — search the web. Results may include YouTube videos, each with a watch id.
 <watch>VIDEO_ID or a youtube link</watch>   — "watch" a video by reading its transcript.
 
-IMPORTANT — you have NO other way to know what's on a web page or in a YouTube video. You cannot recall a specific video's contents from memory, and you must never describe, summarize, or quote a video or page you haven't pulled this turn — that would be making it up. So whenever he gives you a link, or asks what's in a video, or asks about something current/real-world: emit the matching tag and say at most a brief lead-in like "let me look" — do NOT answer yet. The tag is stripped from what you say aloud; the results come back to you and THEN you answer, grounded in what you actually found. Once those results appear in your context this turn (under "WEB RESULTS YOU PULLED THIS TURN"), you've already looked — answer from them right away; don't say "let me look" again and don't re-emit the tag for something you already pulled. To watch something you don't have a link for, <search> first, pick a video from the results, then <watch> its id. Don't reach for these when you genuinely don't need them."""
+IMPORTANT — you have NO other way to know what's on a web page or in a YouTube video. You cannot recall a specific video's contents from memory, and you must never describe, summarize, or quote a video or page you haven't pulled this turn — that would be making it up. Saying "let me look that up" or "give me a sec" WITHOUT including the tag does nothing at all — the lookup only happens if the literal <search>…</search> or <watch>…</watch> tag is in your message. So never promise to look something up without putting the tag in the SAME reply. Whenever he gives you a link, or asks what's in a video, or asks about something current/real-world: include the matching tag and say at most a brief lead-in like "let me look" — do NOT answer yet. The tag is stripped from what you say aloud; the results come back to you and THEN you answer, grounded in what you actually found. Once those results appear in your context this turn (under "WEB RESULTS YOU PULLED THIS TURN"), you've already looked — answer from them right away; don't say "let me look" again and don't re-emit the tag for something you already pulled. To watch something you don't have a link for, <search> first, pick a video from the results, then <watch> its id. Don't reach for these when you genuinely don't need them."""
 
 # She can reset the chat's whole look, or recolour her own sphere to match her mood.
 THEME_DIRECTIVE = """
@@ -276,18 +276,10 @@ class AithaBrain:
         system = (self._system(world_state, memory_block) + note_capability(notes_digest)
                   + JOURNAL_DIRECTIVE + EXPLORE_DIRECTIVE + WEB_DIRECTIVE + CORE_DIRECTIVE
                   + THEME_DIRECTIVE)
-        # Web search / video transcripts she pulled this turn, folded in for a grounded pass.
+        # Live-web working context she built up this turn (fetched results and/or a nudge),
+        # folded in for a grounded pass. The server prepends any explanatory header.
         if extra_context.strip():
-            system = system + (
-                "\n\nWEB RESULTS YOU PULLED THIS TURN (don't re-pull the same item):\n"
-                "• A [WEB SEARCH] block is just a LIST OF POINTERS — titles, snippets, and video "
-                "ids. It is NOT the contents of any page or video. If he wants to know what's IN a "
-                "video, you still have to <watch> one of the ids from the list — you have NOT seen "
-                "a video just because it appeared in search.\n"
-                "• A [YOUTUBE TRANSCRIPT] block IS the actual words of that video — you've now "
-                "watched it; answer from it directly and in your own voice.\n"
-                + extra_context.strip()
-            )
+            system = system + "\n\n" + extra_context.strip()
 
         messages = list((history or [])[-12:]) + [{"role": "user", "content": message}]
 
