@@ -1365,7 +1365,7 @@ function scheduleSave() {
 noteContentEl.addEventListener('input', scheduleSave);
 noteTitleEl.addEventListener('change', saveNote);
 
-document.getElementById('note-delete').addEventListener('click', async () => {
+async function deleteCurrentNote() {
   if (!currentNote) return;
   if (!confirm(`Delete "${currentNote}"?`)) return;
   try { await fetch('/api/notes/' + encodeURIComponent(currentNote), { method: 'DELETE' }); } catch {}
@@ -1373,6 +1373,19 @@ document.getElementById('note-delete').addEventListener('click', async () => {
   notePaneEl.style.display = 'none';
   noteEmptyEl.style.display = 'flex';
   loadNoteList();
+}
+
+document.getElementById('note-delete').addEventListener('click', deleteCurrentNote);
+
+// Delete key removes the open note — but only when you're not typing in a field
+// (title, body, or the assist box), so Delete still edits text while editing.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Delete' || activeView !== 'notes' || !currentNote) return;
+  const a = document.activeElement;
+  const editing = a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable);
+  if (editing) return;
+  e.preventDefault();
+  deleteCurrentNote();
 });
 
 /* edit / preview */
