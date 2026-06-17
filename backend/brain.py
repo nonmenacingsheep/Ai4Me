@@ -1148,20 +1148,51 @@ class AithaBrain:
         v = (video or "").strip()
         m = re.search(AithaBrain._YT_ID, v)
         vid = m.group(1) if m else (v if re.fullmatch(r'[A-Za-z0-9_-]{11}', v) else None)
+        # When we can't get a transcript, hand back a loud INSTRUCTION (not a vague note)
+        # so she tells him she couldn't watch it instead of inventing the contents.
+        def _cant(reason: str) -> str:
+            reason = " ".join(reason.split())[:120]   # first line, kept short
+            print(f"[watch] {vid}: NO transcript — {reason}")
+            return (f"(NO TRANSCRIPT AVAILABLE for this video — you could NOT watch it ({reason}). "
+                    "Tell him plainly you couldn't pull the captions for this one. Do NOT invent, "
+                    "guess, summarize, or quote anything about the video — you have not seen it.)")
         if not vid:
-            return f"Couldn't find a YouTube video id in '{video}'."
+            return _cant(f"no video id in '{video}'")
         try:
             from youtube_transcript_api import YouTubeTranscriptApi
         except ImportError:
-            return "Transcript unavailable (youtube-transcript-api not installed)."
+            return _cant("youtube-transcript-api isn't installed on the backend")
+
+        # Pull the real caption track. Prefer a human-made transcript (cleaner, punctuated)
+        # over YouTube's auto-generated one; fall back across API versions.
+        data, kind = None, "?"
         try:
             api = YouTubeTranscriptApi()
-            if hasattr(api, "fetch"):            # youtube-transcript-api >= 1.0
-                data = api.fetch(vid).to_raw_data()
-            else:                                # older API
-                data = YouTubeTranscriptApi.get_transcript(vid)
+            if hasattr(api, "list"):             # youtube-transcript-api >= 1.0
+                tl = api.list(vid)
+                tr = None
+                for find in (
+                    lambda: tl.find_manually_created_transcript(["en", "en-US", "en-GB"]),
+                    lambda: tl.find_generated_transcript(["en", "en-US", "en-GB"]),
+                ):
+                    try:
+                        tr = find()
+                        break
+                    except Exception:
+                        pass
+                if tr is None:
+                    tr = next(iter(tl), None)    # any language we can get
+                if tr is not None:
+                    kind = "auto" if getattr(tr, "is_generated", False) else "manual"
+                    fetched = tr.fetch()
+                    data = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else fetched
+            if data is None:
+                data = YouTubeTranscriptApi.get_transcript(vid)  # older API path
         except Exception as e:
-            return f"No transcript available for that video ({type(e).__name__})."
+            return _cant(f"{type(e).__name__}: {e}".strip())
+        if not data:
+            return _cant("the caption track came back empty")
+
         # Keep periodic [m:ss] time markers (~every 20s) so she can answer "what's said
         # around 2:30" instead of getting a flat wall of text with no timing at all.
         parts, next_mark = [], 0
@@ -1175,4 +1206,5 @@ class AithaBrain:
         LIMIT = 8000
         if len(text) > LIMIT:
             text = text[:LIMIT] + " …(transcript truncated)"
-        return text or "(the video has no spoken transcript)"
+        print(f"[watch] {vid}: {len(data)} caption lines ({kind}), {len(text)} chars")
+        return text or _cant("the caption track had no text")
