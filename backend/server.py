@@ -62,11 +62,14 @@ _WEB_RESULTS_HEADER = (
     "it; answer from it directly and in your own voice. It carries [m:ss] time markers, so "
     "you can say roughly when something is said (the nearest marker before it)."
 )
-# She sometimes SAYS she'll look something up but forgets to emit the tag — catch that
-# intent so we can nudge her to actually do it instead of leaving him hanging.
-_LOOKUP_INTENT = _re.compile(
-    r"\b(?:let me|i'?ll|i will|gonna|going to|hang on|hold on|give me a|one)\b[^.!?\n]{0,40}"
-    r"\b(?:look|search|check|find|google|watch|pull up|see what|dig up|track down)\b",
+# She sometimes makes a PROMISE ("let me look it up", "let me grab it") without
+# following through — either forgetting to emit the tag, or, after she's fetched,
+# saying she'll report back without actually reporting. Catch the promise so we can
+# nudge her to follow through instead of leaving him hanging.
+_PROMISE_INTENT = _re.compile(
+    r"\b(?:let me|lemme|i'?ll|i will|gonna|going to|hang on|hold on|give me a|one (?:sec|second|moment))\b"
+    r"[^.!?\n]{0,40}"
+    r"\b(?:look|search|check|find|google|watch|pull|grab|get|see|share|tell you|report|read|dig|track)\b",
     _re.I,
 )
 # How many AI turns (DM ↔ Aitha) may chain before pausing for the player.
@@ -1546,13 +1549,22 @@ async def ws_endpoint(websocket: WebSocket):
             elif (web_fetches == 0 and not hfilter.readnote_requests()
                   and "didn't actually" not in web_context
                   and len(hfilter.shown.strip()) < 160          # a short lead-in, not a real reply
-                  and _LOOKUP_INTENT.search(hfilter.shown)):
+                  and _PROMISE_INTENT.search(hfilter.shown)):
                 # She told him she'd look it up but never emitted a tag — so nothing happened.
                 # Nudge her once to really do it instead of leaving him hanging on a promise.
                 web_context += ("(You just told him you'd look something up, but you didn't "
                                 "actually emit a <search> or <watch> tag — so nothing was looked "
                                 "up and you still don't know the answer. Emit the right tag NOW, "
                                 "in this next reply, to really do it.)")
+                continue
+            elif (web_fetches > 0 and "say what you found" not in web_context
+                  and len(hfilter.shown.strip()) < 160          # only a "let me grab it" lead-in
+                  and _PROMISE_INTENT.search(hfilter.shown)):
+                # She's already pulled the results, but only said she'd report back instead of
+                # actually reporting. Nudge her once to say what she found.
+                web_context += ("(You've already pulled the results above — now actually say what "
+                                "you found. Don't just promise to; tell him concretely what the "
+                                "transcript / results say, in your own voice.)")
                 continue
 
             # Final pass. If this was a buffered re-run, flush its text now — once — so the
