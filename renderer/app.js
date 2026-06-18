@@ -927,13 +927,14 @@ const PRESET_DEFAULTS = {
   warm:    { accent: '#f5b14b', bg: '#140a06', orb: '#f5b14b' },
   moody:   { accent: '#6d8bd0', bg: '#05060d', orb: '#6d8bd0' },
   magma:   { accent: '#f43f5e', bg: '#140609', orb: '#f43f5e' },
+  forge:   { accent: '#ff7a18', bg: '#0d0a08', orb: '#ff7a18' },
   hearth:  { accent: '#f5b14b', bg: '#140d05', orb: '#f5b14b' },
   forest:  { accent: '#43c59e', bg: '#08130d', orb: '#43c59e' },
   rose:    { accent: '#f472b6', bg: '#160810', orb: '#f472b6' },
   ocean:   { accent: '#2dd4bf', bg: '#061413', orb: '#2dd4bf' },
   mono:    { accent: '#9aa7b8', bg: '#0b0d12', orb: '#9aa7b8' },
 };
-const ALL_PRESET_CLASSES = ['sky', 'warm', 'moody', 'magma', 'hearth', 'forest', 'rose', 'ocean', 'mono']
+const ALL_PRESET_CLASSES = ['sky', 'warm', 'moody', 'magma', 'forge', 'hearth', 'forest', 'rose', 'ocean', 'mono']
   .map(p => 'chat-theme-' + p);
 
 // Each app-tab remembers its own full theme. Sky (chat) mirrors the backend —
@@ -942,9 +943,10 @@ const TAB_DEFAULTS = {
   chat:   { preset: 'default', accent: null, bg: null, orb: null },
   mantle: { preset: 'moody',   accent: null, bg: null, orb: null },
   notes:  { preset: 'magma',   accent: null, bg: null, orb: null },
+  forge:  { preset: 'forge',   accent: null, bg: null, orb: null },
   hearth: { preset: 'hearth',  accent: null, bg: null, orb: null },
 };
-const VIEW_ORDER = ['chat', 'mantle', 'notes', 'hearth'];
+const VIEW_ORDER = ['chat', 'mantle', 'notes', 'forge', 'hearth'];
 
 function emptyTheme() { return { preset: 'default', accent: null, bg: null, orb: null }; }
 
@@ -1360,6 +1362,7 @@ const views = {
   chat: document.getElementById('view-chat'),
   mantle: document.getElementById('view-mantle'),
   notes: document.getElementById('view-notes'),
+  forge: document.getElementById('view-forge'),
   hearth: document.getElementById('view-hearth'),
 };
 let notesLoaded = false;
@@ -1377,11 +1380,58 @@ function switchView(name) {
   Object.entries(views).forEach(([k, el]) => el && el.classList.toggle('active', k === name));
   if (name === 'notes' && !notesLoaded) { notesLoaded = true; loadNoteList(); }
   if (name === 'hearth' && !hearthLoaded) { hearthLoaded = true; loadHearth(); }
+  if (name === 'forge') loadForge();   // refresh each visit — her workspace changes
   if (name === 'mantle') loadMind();   // refresh each visit — her mind moves
   if (name !== 'mantle') closeMemLane();   // don't leave the lane (and its matrix) running
   if (name !== 'notes') closeBedrock();    // leaving Magma closes the calendar slide-over
   if (name === 'chat') inputEl.focus();
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   FORGE — everything she's making in her code workspace
+   ═══════════════════════════════════════════════════════════════════ */
+function forgeBytes(n) { n = n || 0; return n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB'; }
+function forgeWhen(sec) {
+  if (!sec) return '';
+  return new Date(sec * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+async function loadForge() {
+  const wrap = document.getElementById('forge-files');
+  const sub = document.getElementById('forge-sub');
+  if (!wrap) return;
+  wrap.classList.add('loading');
+  try {
+    const data = await (await fetch('/api/forge')).json();
+    wrap.innerHTML = '';
+    if (!data.enabled) {
+      wrap.innerHTML = '<div class="forge-empty">Her code workspace is off.<br>Turn on <strong>Code workspace</strong> in Settings → Behavior → Capabilities to let her build things here.</div>';
+      if (sub) sub.textContent = 'workspace off';
+      return;
+    }
+    const files = data.files || [];
+    if (sub) sub.textContent = files.length ? `${files.length} file${files.length > 1 ? 's' : ''}` : 'nothing forged yet';
+    if (!files.length) {
+      wrap.innerHTML = '<div class="forge-empty">Nothing forged yet.<br>When she writes and runs code, it’ll appear here.</div>';
+      return;
+    }
+    files.forEach(f => {
+      const card = document.createElement('div'); card.className = 'forge-card';
+      const head = document.createElement('div'); head.className = 'forge-card-head';
+      const name = document.createElement('span'); name.className = 'forge-name'; name.textContent = f.name;
+      const meta = document.createElement('span'); meta.className = 'forge-meta';
+      meta.textContent = `${forgeBytes(f.size)} · ${forgeWhen(f.mtime)}`;
+      head.append(name, meta);
+      const pre = document.createElement('pre'); pre.className = 'forge-code';
+      pre.textContent = f.content || '(empty)';
+      card.append(head, pre); wrap.appendChild(card);
+    });
+  } catch (_) {
+    wrap.innerHTML = '<div class="forge-empty">Couldn’t load the workspace.</div>';
+  } finally {
+    wrap.classList.remove('loading');
+  }
+}
+document.getElementById('forge-refresh')?.addEventListener('click', loadForge);
 
 /* ═══════════════════════════════════════════════════════════════════
    MANTLE — a read-only window into her inner life (mood, thoughts, etc.)

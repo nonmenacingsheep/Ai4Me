@@ -80,6 +80,37 @@ def list_files() -> str:
     return "\n".join(out) if out else "  (empty — nothing built yet)"
 
 
+def manifest() -> list[dict]:
+    """All workspace files with metadata + text content, newest first — for the
+    Forge view (everything she's making/made)."""
+    root = _root()
+    out = []
+    for dp, _dn, fn in os.walk(root):
+        for f in sorted(fn):
+            full = os.path.join(dp, f)
+            try:
+                st = os.stat(full)
+                size, mtime = st.st_size, st.st_mtime
+            except OSError:
+                size, mtime = 0, 0.0
+            content = ""
+            if 0 < size <= MAX_FILE:
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                        content = fh.read()
+                except OSError:
+                    content = ""
+            out.append({
+                "name": os.path.relpath(full, root).replace("\\", "/"),
+                "size": size,
+                "mtime": mtime,
+                "lang": os.path.splitext(f)[1].lstrip(".").lower(),
+                "content": content,
+            })
+    out.sort(key=lambda d: d["mtime"], reverse=True)
+    return out
+
+
 def run_file(name: str) -> str:
     """Run a Python file in the workspace; return a captured result block. The run is
     confined to the workspace cwd, isolated (-I), and hard-killed after TIMEOUT."""

@@ -19,7 +19,7 @@ KOKORO_VOICES = [
 ]
 
 
-PRESETS = ["default", "sky", "warm", "moody", "magma", "hearth",
+PRESETS = ["default", "sky", "warm", "moody", "magma", "forge", "hearth",
            "forest", "rose", "ocean", "mono"]
 
 

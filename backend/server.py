@@ -473,6 +473,15 @@ async def api_mind():
     }
 
 
+# ─── Forge API (her code workspace) ──────────────────────────────────────
+@app.get("/api/forge")
+async def api_forge():
+    """Everything the Forge tab shows: the files in her Python workspace."""
+    files = await asyncio.to_thread(coder.manifest)
+    enabled = bool((settings.get("capabilities") or {}).get("coding", False))
+    return {"enabled": enabled, "files": files}
+
+
 # ─── Notes API ──────────────────────────────────────────────────────────
 @app.get("/api/notes")
 async def api_list_notes():

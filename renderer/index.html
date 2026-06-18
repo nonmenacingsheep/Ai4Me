@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=24" />
+  <link rel="stylesheet" href="style.css?v=25" />
 </head>
 <body>
 
@@ -56,6 +56,10 @@
         <button class="nav-item" data-view="notes" id="nav-magma">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2c1 4 4 5 4 9a4 4 0 0 1-8 0c0-1 .5-2 1-2.5C9 11 10 12 11 12c-1-2 0-4 1-6 0 2 2 2 2 4"/><path d="M5 16a7 7 0 0 0 14 0"/></svg>
           <span>Magma</span>
+        </button>
+        <button class="nav-item" data-view="forge" id="nav-forge">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9h6l2-3 7 3 3 4-4 2-2-2"/><path d="M5 9v7a2 2 0 0 0 2 2h3"/><path d="M9 22h6"/><path d="M12 18v4"/></svg>
+          <span>Forge</span>
         </button>
         <button class="nav-item" data-view="hearth" id="nav-hearth">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M9 21v-6a3 3 0 0 1 6 0v6"/></svg>
@@ -290,6 +294,7 @@
                 <button class="binder-tab active" data-tabtarget="chat"   style="--bt-color:#a78bfa">Sky</button>
                 <button class="binder-tab"        data-tabtarget="mantle" style="--bt-color:#6d8bd0">Mantle</button>
                 <button class="binder-tab"        data-tabtarget="notes"  style="--bt-color:#f43f5e">Magma</button>
+                <button class="binder-tab"        data-tabtarget="forge"  style="--bt-color:#ff7a18">Forge</button>
                 <button class="binder-tab"        data-tabtarget="hearth" style="--bt-color:#f5b14b">Hearth</button>
               </div>
               <div class="binder-body">
@@ -308,6 +313,9 @@
                   </button>
                   <button class="theme-card" data-preset="magma">
                     <span class="tc-swatch tc-magma"></span><span>Magma</span>
+                  </button>
+                  <button class="theme-card" data-preset="forge">
+                    <span class="tc-swatch tc-forge"></span><span>Forge</span>
                   </button>
                   <button class="theme-card" data-preset="hearth">
                     <span class="tc-swatch tc-hearth"></span><span>Hearth</span>
@@ -599,6 +607,21 @@
         </div>
       </section>
 
+      <!-- Forge view — everything she's making in her code workspace -->
+      <section class="view view-forge" id="view-forge">
+        <div class="forge-wrap">
+          <header class="forge-head">
+            <div class="mantle-head-orb"><div class="orb mantle-orb"><div class="orb-inner"></div><div class="orb-shimmer"></div></div></div>
+            <div class="mantle-head-text">
+              <div class="mantle-title">The Forge</div>
+              <div class="mantle-mood" id="forge-sub">what she's making</div>
+            </div>
+            <button class="note-tool" id="forge-refresh" title="Refresh">↻</button>
+          </header>
+          <div class="forge-files" id="forge-files"></div>
+        </div>
+      </section>
+
       <!-- Hearth (D&D) view -->
       <section class="view view-hearth" id="view-hearth">
         <div class="hearth-topbar">
@@ -692,6 +715,6 @@
     <div class="pt-hint" id="pt-hint">double-click her to hide the conversation</div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=25"></script>
 </body>
 </html>
