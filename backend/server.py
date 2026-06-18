@@ -21,7 +21,7 @@ from context import (
     speak_probability, PROACTIVE_TICK_SECONDS,
     journal_pressure, JOURNAL_TICK_SECONDS,
     curiosity_pressure, CURIOSITY_TICK_SECONDS,
-    _derive_mood,
+    _derive_mood, _derive_mood_key, mood_is_late,
 )
 import memory as mem_store
 import notes as notes_store
@@ -148,6 +148,18 @@ def settings_payload() -> dict:
     }
 
 
+def _apply_voice_expression(beh: dict) -> None:
+    """Push the voice-presence toggles from a behavior dict into the TTS engine."""
+    if not isinstance(beh, dict):
+        return
+    tts.set_expression(
+        mood_map=beh.get("voice_mood_map"),
+        prosody=beh.get("voice_prosody"),
+        micro_pauses=beh.get("voice_micro_pauses"),
+        whisper=beh.get("voice_whisper"),
+    )
+
+
 async def apply_settings(new: dict) -> dict:
     """Validate + apply incoming settings, persist, and re-warm if the model changed."""
     changed_model = False
@@ -193,6 +205,7 @@ async def apply_settings(new: dict) -> dict:
         # Persist + take effect live; the inner-life loop reads settings["behavior"]
         # on every pulse, so no restart needed.
         settings["behavior"] = settings_store.save_behavior(new["behavior"])
+        _apply_voice_expression(settings["behavior"])
 
     settings_store.save(settings)
     if changed_model:
@@ -205,6 +218,12 @@ async def context_poll_loop():
     while True:
         ctx = gather_context()
         ctx["model"] = MODEL
+        # Feed her emotional state to the voice engine so speech can take on the
+        # matching voice/prosody (voice presence, #8). Cheap; affects next utterance.
+        try:
+            tts.set_mood(_derive_mood_key(ctx), late=mood_is_late(ctx))
+        except Exception:
+            pass
         async with _context_lock:
             _context_cache = ctx
         await broadcast({"type": "context_update", "context": ctx})
@@ -275,6 +294,7 @@ async def lifespan(app: FastAPI):
     tts.enabled = settings["tts_enabled"]
     tts.voice = settings["tts_voice"]
     tts.device_name = settings["tts_device"]
+    _apply_voice_expression(settings["behavior"])
     memory = mem_store.load()
     global theme_state
     theme_state = settings_store.get_theme()

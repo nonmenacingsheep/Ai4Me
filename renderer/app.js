@@ -190,11 +190,16 @@ setTtsToggle.addEventListener('click', () => {
 const pendingBehavior = {
   proactive: true, journaling: true, curiosity: true,
   speak_freq: 1.0, journal_freq: 1.0, curiosity_freq: 1.0, heartbeat_seconds: 40,
+  voice_mood_map: true, voice_prosody: true, voice_micro_pauses: true, voice_whisper: false,
 };
 const behToggles = {
   proactive: document.getElementById('beh-proactive-toggle'),
   journaling: document.getElementById('beh-journal-toggle'),
   curiosity: document.getElementById('beh-curiosity-toggle'),
+  voice_mood_map: document.getElementById('beh-voice-moodmap-toggle'),
+  voice_prosody: document.getElementById('beh-voice-prosody-toggle'),
+  voice_micro_pauses: document.getElementById('beh-voice-pauses-toggle'),
+  voice_whisper: document.getElementById('beh-voice-whisper-toggle'),
 };
 const behFreqs = {
   speak_freq:     { el: document.getElementById('beh-speak-freq'),     val: document.getElementById('beh-speak-freq-val') },

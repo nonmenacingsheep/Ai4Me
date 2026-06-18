@@ -122,6 +122,16 @@ run.bat
 ```
 This starts the Python backend and the Electron app (and the voice changer, *only* if you set `VOICE_CHANGER_BAT`).
 
+### Optional: a desktop shortcut
+
+Want to launch her like a normal app? Double-click **`create-desktop-shortcut.bat`** (or run `npm run shortcut`) to drop an **Ai4Me** shortcut on your Desktop, complete with the app icon. It points at `run.bat` (console starts minimized), auto-detects the project folder so it still works if you move the repo, and is safe to re-run anytime — it just refreshes the same shortcut instead of making duplicates.
+
+### Updating
+
+Double-click **`update.bat`**. It fully stops any running instance (only *this* app — it won't touch other Electron apps), pulls the latest code, reinstalls Python/Node deps **only if they changed**, and relaunches her. Your `.env` and all of her data are untouched.
+
+> Her memories, journals, notes, projects, calendar and settings live in **`%USERPROFILE%\.ai4me\`**, *outside* this folder — so updating (or even deleting and re-downloading the app) never affects them. Only deleting `.ai4me` itself would wipe her; back that folder up now and then.
+
 ---
 
 ## ⚙️ Configuration
@@ -132,6 +142,11 @@ Everything lives in `.env` (see `.env.example` for the full list). Highlights:
 - **Model / providers** — set any of `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`. Any model whose key is set shows up in **Settings → Model**. `AITHA_MODEL` picks the default. **I recommend using DeepSeek as the costs are so low — $2 can last you several days.**
 - **Local models** — Ollama is **never auto-started**. Run `ollama serve` yourself and your pulled models appear in the dropdown automatically — handy if you'd rather run fully local.
 - **Voice** — `TTS_*` for output, `AITHA_WHISPER_*` for input, `VOICE_CHANGER_BAT` to auto-launch a voice changer (optional).
+- **Voice presence** — her speech takes on her mood: a mood-matched voice, pace/pitch/volume shaping, natural breath between sentences, and a real late-night whisper (via eSpeak NG, routed through the voice changer so it stays her voice). Each is an independent toggle in **Settings → Behavior → Voice presence**; `ESPEAK_WHISPER_*` tunes the whisper.
+- **Vision ("her eyes")** — she sees images through a *separate* model, so your main chat model can stay text-only. Pick one in **Settings → General → Her eyes** (it lists your installed Ollama models). Pull a multimodal model first, e.g. `ollama pull llava`. *Note:* `llama3.2-vision` needs a **recent Ollama build** — older ones fail to load it with `unknown model architecture: 'mllama'`; if you hit that, update Ollama or just use `llava`. With no vision model set, she'll honestly tell you she can't make out an image. Set a default with `AITHA_VISION_MODEL`.
+- **Spotify** — optional music control; set `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, and `SPOTIFY_REDIRECT_URI`. See the **Connecting Spotify** tutorial below.
+- **Folders she can read** — granted from the **"+" menu in the chat composer**, not `.env`. She gets *read-only* access to exactly the folders you add there and nothing else.
+- **Capabilities** — toggle individual features (notes, projects, calendar, files, images, web, themes, music) on/off in **Settings → Behavior**. Turning one off both disables it and trims her prompt.
 
 ---
 

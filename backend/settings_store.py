@@ -44,6 +44,11 @@ def default_behavior() -> dict:
         "journal_freq": 1.0,
         "curiosity_freq": 1.0,
         "heartbeat_seconds": int(os.getenv("AITHA_HEARTBEAT", "40")),
+        # Voice presence (#8) — how expressive her speech is. All independent.
+        "voice_mood_map": True,      # speak in a mood-matched voice
+        "voice_prosody": True,       # vary pace / pitch / volume by mood
+        "voice_micro_pauses": True,  # breathe between sentences
+        "voice_whisper": False,      # soften to a near-whisper late at night
     }
 
 
@@ -81,7 +86,8 @@ def get_behavior() -> dict:
         for k in b:
             if k in saved:
                 b[k] = saved[k]
-    for k in ("proactive", "journaling", "curiosity"):
+    for k in ("proactive", "journaling", "curiosity",
+              "voice_mood_map", "voice_prosody", "voice_micro_pauses", "voice_whisper"):
         b[k] = bool(b[k])
     for k in ("speak_freq", "journal_freq", "curiosity_freq"):
         try:

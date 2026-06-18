@@ -254,6 +254,17 @@
             </div>
 
             <div class="field">
+              <label>Voice presence</label>
+              <div class="field-hint">How expressive her speech is. These shape the voice she already has — her mood colors her tone, pacing, and pitch. All independent; turn any off to flatten that part.</div>
+              <div class="cap-toggles">
+                <div class="cap-row"><div><span class="cap-name">Mood-matched voice</span><span class="cap-hint">Shifts to a different voice that fits her mood.</span></div><button class="pill-toggle" id="beh-voice-moodmap-toggle"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Prosody (pace &amp; tone)</span><span class="cap-hint">Slower and softer when somber, brighter and quicker when warm.</span></div><button class="pill-toggle" id="beh-voice-prosody-toggle"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Breath &amp; pauses</span><span class="cap-hint">Small natural pauses between sentences, so she doesn't sound like a reader.</span></div><button class="pill-toggle" id="beh-voice-pauses-toggle"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Late-night whisper</span><span class="cap-hint">In the small hours (after 11pm), she actually whispers — voiced by a tiny separate engine (eSpeak NG) sent through your voice changer so it still sounds like her. Needs eSpeak NG installed; without it she just softens her normal voice.</span></div><button class="pill-toggle off" id="beh-voice-whisper-toggle"><span>Off</span></button></div>
+              </div>
+            </div>
+
+            <div class="field">
               <label>Capabilities</label>
               <div class="field-hint">What she can reach for. Each one adds its own block to her context — turn off the ones you don't use to disable the feature and shrink her prompt (cheaper, more focused).</div>
               <div class="cap-toggles">

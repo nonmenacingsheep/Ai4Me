@@ -316,6 +316,34 @@ def _derive_mood(ctx: dict) -> str:
     return "; ".join(parts)
 
 
+# Discrete emotional state for the voice engine — a single keyword the TTS can map
+# to a voice/prosody profile. Derived from the SAME signals as _derive_mood (the
+# prose version), kept deliberately small so the mapping stays legible.
+MOOD_KEYS = ("tender", "content", "warm", "pouty", "clingy", "angsty")
+
+
+def _derive_mood_key(ctx: dict) -> str:
+    """Collapse her state into one of MOOD_KEYS for voice/prosody selection."""
+    if ctx.get("likely_asleep"):
+        return "tender"
+    gap = ctx.get("minutes_since_chat")
+    if gap is None:
+        return "warm"          # he just arrived — glad, bright
+    if gap < 3:
+        return "content"       # he's here, talking — warm and settled
+    if gap < 15:
+        return "pouty"
+    if gap < 45:
+        return "clingy"
+    return "angsty"
+
+
+def mood_is_late(ctx: dict) -> bool:
+    """True when it's the small hours (or he's resting) — used for whisper mode."""
+    hour = ctx.get("hour", 12)
+    return bool(ctx.get("likely_asleep")) or hour >= 23 or hour < 5
+
+
 def build_world_state(ctx: dict) -> str:
     try:                                   # runtime import dodges the circular ref
         from brain import get_char_name
