@@ -81,9 +81,15 @@ def list_files() -> str:
     return "\n".join(out) if out else "  (empty — nothing built yet)"
 
 
+IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"}
+HTML_EXTS = {"html", "htm"}
+
+
 def manifest() -> list[dict]:
-    """All workspace files with metadata + text content, newest first — for the
-    Forge view (everything she's making/made)."""
+    """All workspace files with metadata, newest first — for the Forge view. Each
+    file is tagged with a 'kind' so the UI knows how to show it: 'image' and 'html'
+    render visually; everything else shows its text. Binary/image content isn't read
+    as text (the UI fetches it raw via /api/forge/raw)."""
     root = _root()
     out = []
     for dp, _dn, fn in os.walk(root):
@@ -94,8 +100,11 @@ def manifest() -> list[dict]:
                 size, mtime = st.st_size, st.st_mtime
             except OSError:
                 size, mtime = 0, 0.0
+            ext = os.path.splitext(f)[1].lstrip(".").lower()
+            kind = "image" if ext in IMAGE_EXTS else "html" if ext in HTML_EXTS else "text"
             content = ""
-            if 0 < size <= MAX_FILE:
+            # Read text for everything except images (the UI shows those via <img>).
+            if kind != "image" and 0 < size <= MAX_FILE:
                 try:
                     with open(full, "r", encoding="utf-8", errors="replace") as fh:
                         content = fh.read()
@@ -105,7 +114,8 @@ def manifest() -> list[dict]:
                 "name": os.path.relpath(full, root).replace("\\", "/"),
                 "size": size,
                 "mtime": mtime,
-                "lang": os.path.splitext(f)[1].lstrip(".").lower(),
+                "lang": ext,
+                "kind": kind,
                 "content": content,
             })
     out.sort(key=lambda d: d["mtime"], reverse=True)

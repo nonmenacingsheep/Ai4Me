@@ -482,6 +482,20 @@ async def api_forge():
     return {"enabled": enabled, "files": files}
 
 
+@app.get("/api/forge/raw/{name:path}")
+async def api_forge_raw(name: str):
+    """Serve a raw workspace file (e.g. an image she generated) for the Forge view.
+    Path-confined to the workspace."""
+    from fastapi.responses import FileResponse, PlainTextResponse
+    try:
+        full = coder._safe_path(name)
+    except ValueError:
+        return PlainTextResponse("bad path", status_code=400)
+    if not os.path.isfile(full):
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(full)
+
+
 @app.post("/api/forge/run")
 async def api_forge_run(req: Request):
     """Run one of her workspace files yourself, from the Forge tab. Honors the same

@@ -1421,21 +1421,37 @@ async function loadForge() {
       const meta = document.createElement('span'); meta.className = 'forge-meta';
       meta.textContent = `${forgeBytes(f.size)} · ${forgeWhen(f.mtime)}`;
       head.append(name, meta);
-      // Only .py files are runnable (that's all her workspace executes).
+      card.append(head);
+
+      if (f.kind === 'image') {
+        // Something she drew/rendered — show it.
+        const img = document.createElement('img'); img.className = 'forge-media';
+        img.src = '/api/forge/raw/' + encodeURIComponent(f.name) + '?t=' + Math.floor(f.mtime || 0);
+        img.alt = f.name;
+        card.append(img);
+      } else if (f.kind === 'html') {
+        // A live visual/animation — render it sandboxed so it can run JS but can't
+        // touch the app (no same-origin).
+        const frame = document.createElement('iframe'); frame.className = 'forge-media forge-frame';
+        frame.setAttribute('sandbox', 'allow-scripts');
+        frame.srcdoc = f.content || '';
+        card.append(frame);
+      } else {
+        const pre = document.createElement('pre'); pre.className = 'forge-code';
+        pre.textContent = f.content || '(empty)';
+        card.append(pre);
+      }
+
+      // .py files get a Run button + inline output.
       if (/\.py$/i.test(f.name)) {
         const run = document.createElement('button'); run.className = 'forge-run';
         run.textContent = '▸ Run';
         const out = document.createElement('pre'); out.className = 'forge-output'; out.style.display = 'none';
         run.addEventListener('click', () => runForgeFile(f.name, run, out));
         head.append(run);
-        const pre = document.createElement('pre'); pre.className = 'forge-code';
-        pre.textContent = f.content || '(empty)';
-        card.append(head, pre, out); wrap.appendChild(card);
-      } else {
-        const pre = document.createElement('pre'); pre.className = 'forge-code';
-        pre.textContent = f.content || '(empty)';
-        card.append(head, pre); wrap.appendChild(card);
+        card.append(out);
       }
+      wrap.appendChild(card);
     });
   } catch (_) {
     wrap.innerHTML = '<div class="forge-empty">Couldn’t load the workspace.</div>';

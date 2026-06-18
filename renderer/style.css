@@ -825,10 +825,15 @@ body::before {
 .forge-wrap { max-width: 1000px; margin: 0 auto; padding: 28px 26px; height: 100%;
   display: flex; flex-direction: column; overflow: hidden; }
 .forge-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
-.forge-files { flex: 1; overflow-y: auto; display: flex; flex-direction: column;
-  gap: 14px; padding-right: 6px; }
+/* Cards flow left-to-right and wrap to the next row, like reading. */
+.forge-files { flex: 1; overflow-y: auto; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px; padding-right: 6px; align-content: start; align-items: start; }
 .forge-card { background: var(--bg-mid); border: 1px solid var(--border-accent);
-  border-radius: 14px; overflow: hidden; }
+  border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+.forge-media { width: 100%; display: block; background: #000; }
+.forge-frame { height: 280px; border: 0; }
+img.forge-media { max-height: 360px; object-fit: contain; }
 .forge-card-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
   border-bottom: 1px solid var(--border-accent); }
 .forge-name { font-weight: 600; color: var(--text-1); font-size: 0.92rem;
