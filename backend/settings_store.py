@@ -64,6 +64,7 @@ def default_capabilities() -> dict:
         "web": True,        # live web search + watching YouTube
         "themes": True,     # letting her re-skin the room / her sphere
         "music": True,      # Spotify: see/control his music, build playlists
+        "coding": False,    # her own Python workspace — write & run code (off by default)
     }
 
 

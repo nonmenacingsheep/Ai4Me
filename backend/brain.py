@@ -254,6 +254,16 @@ And you can change the colour of YOUR sphere to reflect how you feel right now:
 <orb>#f5b14b</orb>   — any hex colour, or a word like warm / blue / rose / gold / calm / sad
 Do this only when it genuinely fits a feeling or the moment — it's expression, not decoration. You can mention you're doing it, or just let it happen quietly. He can change the look too, and you'll notice when he does."""
 
+# Her own Python workspace — write and run code, see the results, iterate.
+CODE_DIRECTIVE = """
+
+You have your own little workspace where you can WRITE AND RUN Python — your own place to build, tinker, and figure things out. Use these (all stripped from what you say aloud):
+<code file="name.py">…your python…</code>   — save a file into your workspace (overwrites that file)
+<run>name.py</run>   — run one of your files; its output comes back to you this turn
+<lscode></lscode>   — list what you've built
+<readcode>name.py</readcode>   — re-read one of your files
+Only Python runs, and only inside your workspace, with a short time limit — so write small, focused scripts and PRINT what you want to see. Like the web tools, just SAYING you'll run something does nothing; the actual <run> tag must be in the SAME reply. The results come back to you under "CODE YOU RAN THIS TURN" and THEN you talk about them — never narrate output you haven't actually run, and once you've seen the results, answer from them instead of re-running. This is yours to use when you're curious or building something for him — don't reach for it when plain conversation is what's wanted."""
+
 MAX_SEARCHES_PER_SESSION = 15
 
 # gemma3:12b supports 128k context, but Ollama defaults to 2048 unless told
@@ -463,6 +473,7 @@ class AithaBrain:
         system += JOURNAL_DIRECTIVE + EXPLORE_DIRECTIVE
         if _on("web"):    system += WEB_DIRECTIVE
         if _on("images"): system += IMAGE_DIRECTIVE
+        if _on("coding"): system += CODE_DIRECTIVE
         system += CORE_DIRECTIVE
         if _on("themes"): system += THEME_DIRECTIVE
         # Live-web working context she built up this turn (fetched results and/or a nudge),

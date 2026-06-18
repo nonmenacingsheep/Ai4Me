@@ -146,7 +146,8 @@ Everything lives in `.env` (see `.env.example` for the full list). Highlights:
 - **Vision ("her eyes")** — she sees images through a *separate* model, so your main chat model can stay text-only. Pick one in **Settings → General → Her eyes** (it lists your installed Ollama models). Pull a multimodal model first, e.g. `ollama pull llava`. *Note:* `llama3.2-vision` needs a **recent Ollama build** — older ones fail to load it with `unknown model architecture: 'mllama'`; if you hit that, update Ollama or just use `llava`. With no vision model set, she'll honestly tell you she can't make out an image. Set a default with `AITHA_VISION_MODEL`.
 - **Spotify** — optional music control; set `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, and `SPOTIFY_REDIRECT_URI`. See the **Connecting Spotify** tutorial below.
 - **Folders she can read** — granted from the **"+" menu in the chat composer**, not `.env`. She gets *read-only* access to exactly the folders you add there and nothing else.
-- **Capabilities** — toggle individual features (notes, projects, calendar, files, images, web, themes, music) on/off in **Settings → Behavior**. Turning one off both disables it and trims her prompt.
+- **Capabilities** — toggle individual features (notes, projects, calendar, files, images, web, themes, music, code workspace) on/off in **Settings → Behavior**. Turning one off both disables it and trims her prompt.
+- **Code workspace** *(off by default)* — gives her, her own Python sandbox at `~/.ai4me/workspace` where she can write and run scripts and read the results back. Runs are confined to that folder and hard-killed after a short timeout (`AITHA_CODE_TIMEOUT`). **Python only** — a deliberate safety choice; shell/Node would let a single stray line do real damage on your machine. Treat it as trusted local execution, not a hardened jail.
 
 ---
 

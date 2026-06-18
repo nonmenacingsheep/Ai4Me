@@ -31,6 +31,7 @@ import events as events_store
 import spotify as spotify_store
 import settings_store
 import dnd as dnd_store
+import coder
 from tts import engine as tts
 from stt import engine as stt
 
@@ -57,6 +58,9 @@ MAX_WEB_FETCH = int(os.getenv("AITHA_MAX_WEB_FETCH", "3"))
 MAX_FILE_FETCH = int(os.getenv("AITHA_MAX_FILE_FETCH", "4"))
 # How many music lookups (<music>) she may chain in one turn.
 MAX_MUSIC_FETCH = int(os.getenv("AITHA_MAX_MUSIC_FETCH", "3"))
+# How many code rounds (<code>/<run>/<lscode>/<readcode>) she may chain in one turn
+# before she must answer with what she found — bounds run loops.
+MAX_CODE_RUNS = int(os.getenv("AITHA_MAX_CODE_RUNS", "4"))
 
 # Memory upkeep (runs in her idle loop). Decay-pruning is cheap and runs hourly;
 # the LLM consolidation pass is gated: only when he's been away a while, only every
@@ -77,6 +81,14 @@ _WEB_RESULTS_HEADER = (
     "• A [YOUTUBE TRANSCRIPT] block IS the actual words of that video — you've now watched "
     "it; answer from it directly and in your own voice. It carries [m:ss] time markers, so "
     "you can say roughly when something is said (the nearest marker before it)."
+)
+_CODE_RESULTS_HEADER = (
+    "CODE YOU RAN THIS TURN (in your own Python workspace):\n"
+    "• [WROTE name] confirms a file was saved. [RAN name] shows its exit code and "
+    "captured stdout/stderr — that IS what actually happened, so answer from it. If it "
+    "errored, read the traceback, fix the file with <code>, and <run> it again.\n"
+    "• Once you've seen the output, tell him what you found or built in your own voice — "
+    "don't just say you'll run it, and don't re-run something that already worked."
 )
 # She sometimes makes a PROMISE ("let me look it up", "let me grab it") without
 # following through — either forgetting to emit the tag, or, after she's fetched,
@@ -1357,7 +1369,16 @@ _HIDDEN_SPECS = [
     ("playlists", "<playlists>", "</playlists>", False),  # easy: list his playlists + descriptions
     ("playlist", "<playlist", "</playlist>", True),    # build a playlist
     ("addto", "<addto", "</addto>", True),             # add songs to an existing playlist
+    ("code", "<code", "</code>", True),                # write a file into her workspace
+    ("run", "<run>", "</run>", False),                 # run a workspace python file
+    ("lscode", "<lscode>", "</lscode>", False),        # list her workspace files
+    ("readcode", "<readcode>", "</readcode>", False),  # re-read a workspace file
 ]
+
+# <code file="name.py">…python…</code> — parse the filename + body out of the block.
+_CODE_DIRECTIVE = _re.compile(
+    rf'<code\s+file\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]\s*>(.*?)</code\s*>', _re.S | _re.I,
+)
 
 
 def _safe_image_url(url: str) -> str:
@@ -1520,6 +1541,22 @@ class _HiddenBlockFilter:
     def playlists_requested(self) -> bool:
         """She emitted the easy <playlists> tag (list his playlists + descriptions)."""
         return any(n == "playlists" for n, _ in self.captured)
+
+    def code_blocks(self) -> str:
+        """Raw <code file=…> blocks she emitted (files to write into her workspace)."""
+        return "".join(t for n, t in self.captured if n == "code")
+
+    def run_requests(self) -> list[str]:
+        """Workspace files she asked to run this turn."""
+        return [t.strip() for n, t in self.captured if n == "run" and t.strip()]
+
+    def lscode_requested(self) -> bool:
+        """She asked to list her workspace files this turn."""
+        return any(n == "lscode" for n, _ in self.captured)
+
+    def readcode_requests(self) -> list[str]:
+        """Workspace files she asked to re-read this turn."""
+        return [t.strip() for n, t in self.captured if n == "readcode" and t.strip()]
 
     def playback_actions(self) -> list[tuple[str, str]]:
         """Playback control actions she emitted: (action, arg). arg used for <play>."""
@@ -1912,7 +1949,8 @@ async def ws_endpoint(websocket: WebSocket):
         if review:                # reviewing her mind together — give her the whole memory set
             async with _memory_lock:
                 web_context = _build_memory_review(memory)
-        note_fetches = web_fetches = file_fetches = music_fetches = 0
+        note_fetches = web_fetches = file_fetches = music_fetches = code_runs = 0
+        code_acted = False            # whether the code-results header is in context yet
         fetched_q: set[str] = set()   # queries/videos already pulled this turn (dedupe re-asks)
         fetched_files: set[str] = set()  # folders/files already opened this turn (dedupe re-asks)
         fetched_music: set[str] = set()  # music lookups already pulled this turn
@@ -1957,7 +1995,8 @@ async def ws_endpoint(websocket: WebSocket):
         def _canon_path(p: str) -> str:
             return os.path.normcase(os.path.normpath(p.strip().strip('"').strip("'")))
 
-        for round_idx in range(MAX_NOTE_FETCH + MAX_WEB_FETCH + MAX_FILE_FETCH + MAX_MUSIC_FETCH + 1):
+        for round_idx in range(MAX_NOTE_FETCH + MAX_WEB_FETCH + MAX_FILE_FETCH
+                               + MAX_MUSIC_FETCH + MAX_CODE_RUNS + 1):
             # Only the FIRST pass streams live. Re-runs (after a search/watch) buffer their
             # text, so repeated "let me look" lead-ins don't pile up on screen — intermediate
             # lead-ins are dropped and only the final grounded answer is flushed once below.
@@ -2040,6 +2079,48 @@ async def ws_endpoint(websocket: WebSocket):
                     web_context += f"\n\n{res}"
                 await websocket.send_json({"type": "directives", "blocks": web_debug[-len(mreqs):]})
                 continue
+
+            # Her own code workspace (<code>/<run>/<lscode>/<readcode>): write files,
+            # run them, fold the results in, and re-run so she can react to what happened.
+            if caps.get("coding", False):
+                code_raw = hfilter.code_blocks()
+                run_reqs = hfilter.run_requests()
+                read_reqs = hfilter.readcode_requests()
+                ls_req = hfilter.lscode_requested()
+                if (code_raw or run_reqs or read_reqs or ls_req):
+                    if code_runs < MAX_CODE_RUNS:
+                        code_runs += 1
+                        before = len(web_debug)
+                        if not code_acted:
+                            web_context += ("\n\n" + _CODE_RESULTS_HEADER) if web_context else _CODE_RESULTS_HEADER
+                            code_acted = True
+                        # 1) write any code files first, so a <run> in the same reply finds them
+                        for cm in _CODE_DIRECTIVE.finditer(code_raw or ""):
+                            fn, body = cm.group(1).strip(), cm.group(2)
+                            res = await asyncio.to_thread(coder.write_file, fn, body)
+                            web_debug.append({"kind": "code", "text": f"{fn}: {res}"})
+                            web_context += f"\n\n[WROTE {fn}] {res}"
+                        # 2) list / read / run
+                        if ls_req:
+                            listing = await asyncio.to_thread(coder.list_files)
+                            web_debug.append({"kind": "code", "text": "list workspace"})
+                            web_context += f"\n\n[WORKSPACE FILES]\n{listing}"
+                        for r in read_reqs:
+                            body = await asyncio.to_thread(coder.read_file, r)
+                            web_debug.append({"kind": "code", "text": f"read {r}"})
+                            web_context += f"\n\n[FILE {r}]\n{body}"
+                        for r in run_reqs:
+                            await websocket.send_json({"type": "searching"})
+                            res = await asyncio.to_thread(coder.run_file, r)
+                            web_debug.append({"kind": "run", "text": f"{r}\n{res}"})
+                            web_context += f"\n\n[RAN {r}]\n{res}"
+                        await websocket.send_json({"type": "directives", "blocks": web_debug[before:]})
+                        continue
+                    if "No more code runs" not in web_context:
+                        web_context += ("\n\n(No more code runs available this turn — tell him "
+                                        "now what you found or built from the output above. Don't "
+                                        "emit <code> or <run> again.)")
+                        continue
 
             # Live web (search / watch): allow even after a spoken lead-in, then re-run so she
             # answers grounded in the results. Only act on requests not already fulfilled.

@@ -1,0 +1,110 @@
+"""
+Aitha's own little workspace where she can write and run Python — a place to
+build, tinker, and figure things out for herself.
+
+MVP safety model: scripts run from ~/.ai4me/workspace/ with the interpreter in
+isolated mode (-I), a hard timeout, and captured, size-capped output. File writes
+are jailed to the workspace (no traversal / absolute paths). This bounds runtime
+and keeps her files contained — it is NOT a full OS sandbox (a running script can
+still touch absolute paths or the network), which is acceptable for a trusted,
+single-user, local machine. Gated behind the "coding" capability toggle, which is
+OFF by default.
+"""
+
+import os
+import subprocess
+import sys
+
+_DIR = os.path.join(os.path.expanduser("~"), ".ai4me", "workspace")
+TIMEOUT = int(os.getenv("AITHA_CODE_TIMEOUT", "10"))           # seconds per run
+MAX_OUTPUT = int(os.getenv("AITHA_CODE_MAX_OUTPUT", "8000"))   # chars fed back to her
+MAX_FILE = 200_000                                             # bytes per written file
+
+
+def _root() -> str:
+    os.makedirs(_DIR, exist_ok=True)
+    return os.path.normpath(_DIR)
+
+
+def _safe_path(name: str) -> str:
+    """Resolve a filename to an absolute path INSIDE the workspace, or raise. Blocks
+    traversal (..) and absolute paths so writes/reads can't escape the workspace."""
+    name = (name or "").strip().strip('"').strip("'").replace("\\", "/")
+    if not name:
+        raise ValueError("no filename given")
+    root = _root()
+    full = os.path.normpath(os.path.join(root, name))
+    if full != root and not full.startswith(root + os.sep):
+        raise ValueError("path escapes the workspace")
+    return full
+
+
+def write_file(name: str, content: str) -> str:
+    """Write a file into the workspace (overwrites). Returns a short status line."""
+    try:
+        full = _safe_path(name)
+    except ValueError as e:
+        return f"error: {e}"
+    if len((content or "").encode("utf-8", "ignore")) > MAX_FILE:
+        return f"error: file too large (>{MAX_FILE} bytes)"
+    try:
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as f:
+            f.write(content or "")
+        rel = os.path.relpath(full, _root())
+        return f"wrote {rel} ({len((content or '').splitlines())} lines)"
+    except OSError as e:
+        return f"error: {e}"
+
+
+def read_file(name: str) -> str:
+    try:
+        full = _safe_path(name)
+        with open(full, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(MAX_FILE)
+    except (ValueError, OSError) as e:
+        return f"error: {e}"
+
+
+def list_files() -> str:
+    root = _root()
+    out = []
+    for dp, _dn, fn in os.walk(root):
+        for f in sorted(fn):
+            p = os.path.join(dp, f)
+            try:
+                sz = os.path.getsize(p)
+            except OSError:
+                sz = 0
+            out.append(f"  {os.path.relpath(p, root)} ({sz} B)")
+    return "\n".join(out) if out else "  (empty — nothing built yet)"
+
+
+def run_file(name: str) -> str:
+    """Run a Python file in the workspace; return a captured result block. The run is
+    confined to the workspace cwd, isolated (-I), and hard-killed after TIMEOUT."""
+    try:
+        full = _safe_path(name)
+    except ValueError as e:
+        return f"error: {e}"
+    if not os.path.isfile(full):
+        return f"error: no such file '{name}' — write it first"
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", full],
+            cwd=_root(), capture_output=True, text=True, timeout=TIMEOUT,
+        )
+        out = (proc.stdout or "")[:MAX_OUTPUT]
+        err = (proc.stderr or "")[:MAX_OUTPUT]
+        parts = [f"exit={proc.returncode}"]
+        if out:
+            parts.append(f"stdout:\n{out}")
+        if err:
+            parts.append(f"stderr:\n{err}")
+        if not out and not err:
+            parts.append("(no output)")
+        return "\n".join(parts)
+    except subprocess.TimeoutExpired:
+        return f"error: timed out after {TIMEOUT}s (killed)"
+    except Exception as e:
+        return f"error: {e}"

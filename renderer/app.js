@@ -246,7 +246,7 @@ behHeartbeat?.addEventListener('input', () => {
 });
 
 /* ═══ Capability toggles — what's fed into her context (staged, sent on Save) ═══ */
-const CAP_KEYS = ['notes', 'projects', 'calendar', 'files', 'images', 'web', 'themes', 'music'];
+const CAP_KEYS = ['notes', 'projects', 'calendar', 'files', 'images', 'web', 'themes', 'music', 'coding'];
 let pendingCaps = Object.fromEntries(CAP_KEYS.map(k => [k, true]));
 const capToggles = document.querySelectorAll('[data-cap]');
 
