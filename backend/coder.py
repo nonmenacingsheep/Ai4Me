@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 _DIR = os.path.join(os.path.expanduser("~"), ".ai4me", "workspace")
-TIMEOUT = int(os.getenv("AITHA_CODE_TIMEOUT", "10"))           # seconds per run
+TIMEOUT = int(os.getenv("AITHA_CODE_TIMEOUT", "600"))          # seconds per run (10 min)
 MAX_OUTPUT = int(os.getenv("AITHA_CODE_MAX_OUTPUT", "8000"))   # chars fed back to her
 MAX_FILE = 200_000                                             # bytes per written file
 

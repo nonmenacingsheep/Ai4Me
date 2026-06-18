@@ -1421,14 +1421,46 @@ async function loadForge() {
       const meta = document.createElement('span'); meta.className = 'forge-meta';
       meta.textContent = `${forgeBytes(f.size)} · ${forgeWhen(f.mtime)}`;
       head.append(name, meta);
-      const pre = document.createElement('pre'); pre.className = 'forge-code';
-      pre.textContent = f.content || '(empty)';
-      card.append(head, pre); wrap.appendChild(card);
+      // Only .py files are runnable (that's all her workspace executes).
+      if (/\.py$/i.test(f.name)) {
+        const run = document.createElement('button'); run.className = 'forge-run';
+        run.textContent = '▸ Run';
+        const out = document.createElement('pre'); out.className = 'forge-output'; out.style.display = 'none';
+        run.addEventListener('click', () => runForgeFile(f.name, run, out));
+        head.append(run);
+        const pre = document.createElement('pre'); pre.className = 'forge-code';
+        pre.textContent = f.content || '(empty)';
+        card.append(head, pre, out); wrap.appendChild(card);
+      } else {
+        const pre = document.createElement('pre'); pre.className = 'forge-code';
+        pre.textContent = f.content || '(empty)';
+        card.append(head, pre); wrap.appendChild(card);
+      }
     });
   } catch (_) {
     wrap.innerHTML = '<div class="forge-empty">Couldn’t load the workspace.</div>';
   } finally {
     wrap.classList.remove('loading');
+  }
+}
+async function runForgeFile(name, btn, out) {
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = '… running';
+  out.style.display = 'block';
+  out.textContent = 'running…';
+  try {
+    const r = await fetch('/api/forge/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const data = await r.json();
+    out.textContent = data.result || '(no output)';
+  } catch (_) {
+    out.textContent = "couldn't run it.";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
   }
 }
 document.getElementById('forge-refresh')?.addEventListener('click', loadForge);

@@ -837,6 +837,16 @@ body::before {
 .forge-code { margin: 0; padding: 14px; max-height: 360px; overflow: auto;
   font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.82rem;
   line-height: 1.5; color: var(--text-2); white-space: pre; background: rgba(0,0,0,0.18); }
+.forge-run { margin-left: 10px; padding: 4px 12px; border-radius: 8px; cursor: pointer;
+  font-size: 0.78rem; font-weight: 600; color: var(--accent-v-bright);
+  background: var(--accent-v-dim); border: 1px solid var(--border-accent);
+  transition: background .15s, color .15s; }
+.forge-run:hover:not(:disabled) { background: var(--accent-v-glow); color: var(--text-1); }
+.forge-run:disabled { opacity: .6; cursor: default; }
+.forge-output { margin: 0; padding: 12px 14px; max-height: 280px; overflow: auto;
+  font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.8rem;
+  line-height: 1.5; color: var(--text-1); white-space: pre-wrap;
+  border-top: 1px dashed var(--border-accent); background: rgba(0,0,0,0.30); }
 .forge-empty { color: var(--text-3); text-align: center; padding: 60px 22px; line-height: 1.6; }
 .tc-forest  { background: radial-gradient(circle at 35% 30%, #7be6c2, #1f9c78 55%, #08130d); }
 .tc-rose    { background: radial-gradient(circle at 35% 30%, #fba5d3, #db2777 55%, #160810); }

@@ -482,6 +482,17 @@ async def api_forge():
     return {"enabled": enabled, "files": files}
 
 
+@app.post("/api/forge/run")
+async def api_forge_run(req: Request):
+    """Run one of her workspace files yourself, from the Forge tab. Honors the same
+    coding capability toggle and the AITHA_CODE_TIMEOUT limit she's bound by."""
+    if not (settings.get("capabilities") or {}).get("coding", False):
+        return {"ok": False, "result": "Code workspace is off — enable it in Settings → Behavior."}
+    body = await req.json()
+    result = await asyncio.to_thread(coder.run_file, (body.get("name") or "").strip())
+    return {"ok": True, "result": result}
+
+
 # ─── Notes API ──────────────────────────────────────────────────────────
 @app.get("/api/notes")
 async def api_list_notes():
