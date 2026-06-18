@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=13" />
+  <link rel="stylesheet" href="style.css?v=24" />
 </head>
 <body>
 
@@ -63,6 +63,16 @@
         </button>
       </nav>
 
+      <!-- Now playing (Spotify) — shown only while something's loaded -->
+      <div class="nowplaying" id="nowplaying" style="display:none">
+        <div class="np-track" id="np-track">—</div>
+        <div class="np-controls">
+          <button class="np-btn" id="np-prev" title="Previous">⏮</button>
+          <button class="np-btn" id="np-playpause" title="Play / pause">⏯</button>
+          <button class="np-btn" id="np-next" title="Next">⏭</button>
+        </div>
+      </div>
+
       <div class="sidebar-bottom">
         <button class="mic-toggle off" id="mic-toggle" title="Hands-free voice — let Aitha hear you">
           <svg class="ico-on" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -92,6 +102,13 @@
             <line x1="17" y1="9" x2="23" y2="15"></line>
           </svg>
           <span id="voice-label">Voice</span>
+        </button>
+        <button class="passthrough-btn" id="passthrough-btn" title="Passthrough — just her and the conversation">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 3H5a2 2 0 0 0-2 2v3"></path><path d="M16 3h3a2 2 0 0 1 2 2v3"></path>
+            <path d="M8 21H5a2 2 0 0 1-2-2v-3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path>
+          </svg>
+          <span>Passthrough</span>
         </button>
         <button class="settings-btn" id="settings-btn" title="Settings">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -134,6 +151,11 @@
               <select id="set-model" class="select"></select>
             </div>
             <div class="field">
+              <label for="set-vision-model">Her eyes (vision model)</label>
+              <div class="field-hint">A separate model that describes images you share, so she can "see" them even when her main model can't. She decides what to look for, it describes the image, and she replies from that. Pick a multimodal model (e.g. llava); leave on "None" to disable.</div>
+              <select id="set-vision-model" class="select"></select>
+            </div>
+            <div class="field">
               <label for="set-ctx">Context size <span class="field-val" id="set-ctx-val">4096</span></label>
               <div class="field-hint">Local-model memory window. 4096 keeps a 12GB GPU fully on-GPU with a voice changer. Ignored for DeepSeek.</div>
               <input type="range" id="set-ctx" class="range" min="2048" max="12288" step="1024" value="4096" />
@@ -171,6 +193,15 @@
                 <div class="field-hint">Reveal the raw &lt;note&gt;, &lt;journal&gt;, &lt;explore&gt; blocks she emits, plus the background &lt;search&gt; / &lt;watch&gt; lookups she runs, for debugging.</div>
               </div>
               <button class="pill-toggle off" id="set-tags-toggle"><span>Off</span></button>
+            </div>
+            <div class="field">
+              <label>Music (Spotify)</label>
+              <div class="field-hint">Connect your Spotify so Aitha can see what you're into and play things for you. Full playback control needs Spotify Premium.</div>
+              <div class="spotify-row">
+                <span class="spotify-status" id="spotify-status">Checking…</span>
+                <button class="mem-add-btn" id="spotify-connect">Connect</button>
+                <button class="mem-clear" id="spotify-disconnect" style="display:none">Disconnect</button>
+              </div>
             </div>
           </div>
 
@@ -220,6 +251,21 @@
               <label for="beh-heartbeat">Check-in cadence <span class="field-val" id="beh-heartbeat-val">40s</span></label>
               <div class="field-hint">How often she even considers acting. Longer = calmer and cheaper; shorter = more responsive and more frequent.</div>
               <input type="range" id="beh-heartbeat" class="range" min="20" max="300" step="5" value="40" />
+            </div>
+
+            <div class="field">
+              <label>Capabilities</label>
+              <div class="field-hint">What she can reach for. Each one adds its own block to her context — turn off the ones you don't use to disable the feature and shrink her prompt (cheaper, more focused).</div>
+              <div class="cap-toggles">
+                <div class="cap-row"><div><span class="cap-name">Notes (Magma)</span><span class="cap-hint">See and write your linked notes.</span></div><button class="pill-toggle" data-cap="notes"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Her projects</span><span class="cap-hint">Keep her own goals and progress.</span></div><button class="pill-toggle" data-cap="projects"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Calendar (Bedrock)</span><span class="cap-hint">Know what's on your schedule.</span></div><button class="pill-toggle" data-cap="calendar"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Read your files</span><span class="cap-hint">Look in folders you've shared.</span></div><button class="pill-toggle" data-cap="files"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Images</span><span class="cap-hint">See images you send; share web images.</span></div><button class="pill-toggle" data-cap="images"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Web &amp; YouTube</span><span class="cap-hint">Search the web and watch videos.</span></div><button class="pill-toggle" data-cap="web"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Change the theme</span><span class="cap-hint">Re-skin the room and her sphere.</span></div><button class="pill-toggle" data-cap="themes"><span>On</span></button></div>
+                <div class="cap-row"><div><span class="cap-name">Music (Spotify)</span><span class="cap-hint">See and control your music, build playlists.</span><span class="cap-note" id="music-cap-note"></span></div><button class="pill-toggle" data-cap="music"><span>On</span></button></div>
+              </div>
             </div>
           </div>
 
@@ -336,7 +382,36 @@
             <div class="vl-bars" id="vl-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
             <span class="vl-label" id="vl-label">Listening…</span>
           </div>
+          <div class="attach-tray" id="attach-tray" style="display:none"></div>
           <div class="input-wrapper" id="input-wrapper">
+            <input type="file" id="attach-input" accept="image/*" multiple hidden />
+            <div class="composer-add-wrap" id="composer-add-wrap">
+              <button class="attach-btn" id="composer-add" title="Add" aria-haspopup="true" aria-expanded="false">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+              </button>
+              <div class="composer-menu" id="composer-menu" aria-hidden="true">
+                <button class="cmenu-item" id="cmenu-image">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2.5"></rect>
+                    <circle cx="8.5" cy="8.5" r="1.6"></circle>
+                    <path d="M21 15l-5-5L5 21"></path>
+                  </svg>
+                  <span>Show her an image</span>
+                </button>
+                <div class="cmenu-sep"></div>
+                <div class="cmenu-label">Folders she can read</div>
+                <div class="cmenu-roots" id="cmenu-roots"></div>
+                <button class="cmenu-item cmenu-add" id="cmenu-addfolder">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                    <line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line>
+                  </svg>
+                  <span>Add a folder…</span>
+                </button>
+              </div>
+            </div>
             <textarea id="chat-input" class="chat-input" placeholder="Say something..." rows="1"></textarea>
             <button class="send-btn" id="send-btn" title="Send">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -368,6 +443,10 @@
             </section>
 
             <div class="mantle-side">
+              <section class="mantle-card">
+                <h3>What she's working on <span class="mantle-sub">her own projects</span></h3>
+                <div class="mantle-projects" id="mantle-projects"></div>
+              </section>
               <section class="mantle-card">
                 <h3>Lately <span class="mantle-sub">where she wandered</span></h3>
                 <div class="mantle-discoveries" id="mantle-discoveries"></div>
@@ -413,9 +492,14 @@
         <div class="notes-list">
           <div class="notes-list-head">
             <span>Notes</span>
-            <button class="note-new-btn" id="note-new" title="New note">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            </button>
+            <div class="notes-head-tools">
+              <button class="note-new-btn" id="bedrock-open" title="Bedrock — your calendar">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+              </button>
+              <button class="note-new-btn" id="note-new" title="New note">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+            </div>
           </div>
           <input class="notes-search" id="notes-search" placeholder="Search notes..." />
           <div class="notes-items" id="notes-items"></div>
@@ -467,6 +551,39 @@
             </button>
           </div>
         </div>
+        </div>
+
+        <!-- Bedrock — slides in over Magma: a shared calendar -->
+        <div class="bedrock" id="bedrock" aria-hidden="true">
+          <div class="bedrock-inner">
+            <header class="bedrock-head">
+              <button class="memlane-back" id="bedrock-back" title="Back to notes">←</button>
+              <div class="bedrock-head-text">
+                <div class="memlane-title">Bedrock</div>
+                <div class="memlane-sub" id="bedrock-monthlabel">…</div>
+              </div>
+              <button class="note-tool" id="bedrock-prev" title="Previous month">‹</button>
+              <button class="note-tool" id="bedrock-today" title="Jump to today">●</button>
+              <button class="note-tool" id="bedrock-next" title="Next month">›</button>
+            </header>
+            <div class="bedrock-body">
+              <div class="cal-cal">
+                <div class="cal-dow"><span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
+                <div class="cal-grid" id="cal-grid"></div>
+              </div>
+              <div class="cal-side">
+                <div class="cal-day-title" id="cal-day-title">Pick a day</div>
+                <div class="cal-day-events" id="cal-day-events"></div>
+                <div class="cal-add" id="cal-add" style="display:none">
+                  <input id="cal-add-title" class="cal-input" placeholder="Add an event…" />
+                  <div class="cal-add-row">
+                    <input id="cal-add-time" class="cal-input cal-time" type="time" />
+                    <button id="cal-add-btn" class="cal-add-btn">Add</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -533,6 +650,34 @@
       </section>
 
     </main>
+
+    <!-- Passthrough mode — ambient floating controls (just her ball + the chat) -->
+    <div class="pt-bar" id="pt-bar" aria-hidden="true">
+      <button class="pt-btn" id="pt-mic" title="Microphone — let her hear you">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path class="mic-body" d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+          <line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line>
+          <line class="mic-slash" x1="2" y1="2" x2="22" y2="22"></line>
+        </svg>
+      </button>
+      <button class="pt-btn" id="pt-voice" title="Her voice">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+          <path class="snd-wave" d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+          <path class="snd-wave" d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+          <line class="snd-slash" x1="17" y1="9" x2="23" y2="15"></line>
+          <line class="snd-slash" x1="23" y1="9" x2="17" y2="15"></line>
+        </svg>
+      </button>
+      <span class="pt-sep"></span>
+      <button class="pt-btn pt-exit" id="pt-exit" title="Leave passthrough (Esc)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 9 4 4M9 9V5M9 9H5M15 9l5-5M15 9V5M15 9h4M9 15l-5 5M9 15v4M9 15H5M15 15l5 5M15 15v4M15 15h4"></path>
+        </svg>
+      </button>
+    </div>
+    <div class="pt-hint" id="pt-hint">double-click her to hide the conversation</div>
   </div>
 
   <script src="app.js"></script>

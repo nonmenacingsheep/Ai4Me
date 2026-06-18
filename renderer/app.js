@@ -32,6 +32,7 @@ function applyVoiceState(on) {
   ttsEnabled = on;
   voiceToggle.classList.toggle('muted', !on);
   voiceLabel.textContent = on ? 'Voice' : 'Muted';
+  syncPassthroughControls();
 }
 voiceToggle.addEventListener('click', () => {
   const next = !ttsEnabled;
@@ -45,6 +46,7 @@ voiceToggle.addEventListener('click', () => {
 const settingsBtn    = document.getElementById('settings-btn');
 const settingsModal  = document.getElementById('settings-modal');
 const setModel       = document.getElementById('set-model');
+const setVisionModel = document.getElementById('set-vision-model');
 const setCtx         = document.getElementById('set-ctx');
 const setCtxVal      = document.getElementById('set-ctx-val');
 const setVoice       = document.getElementById('set-voice');
@@ -98,6 +100,7 @@ function openSettings() {
     ws.send(JSON.stringify({ type: 'get_settings' }));
   }
   loadMemory();
+  refreshSpotify();   // keep the Music capability connection note current
   // Point the Appearance editor at the tab you're currently looking at.
   editTarget = activeView;
   syncThemeControls();
@@ -127,6 +130,16 @@ function populateSettings(data) {
 
   const models = opt.models?.length ? opt.models : [cur.model];
   fillSelect(setModel, models, cur.model);
+  if (setVisionModel) {
+    setVisionModel.innerHTML = '';
+    for (const item of ['', ...(opt.vision_models || [])]) {
+      const o = document.createElement('option');
+      o.value = item;
+      o.textContent = item ? shortModel(item) : 'None — she can’t see images';
+      if (item === (cur.vision_model || '')) o.selected = true;
+      setVisionModel.appendChild(o);
+    }
+  }
   fillSelect(setVoice, opt.voices || [cur.tts_voice], cur.tts_voice);
   fillSelect(setDevice, opt.devices?.length ? opt.devices : [cur.tts_device], cur.tts_device);
 
@@ -141,6 +154,14 @@ function populateSettings(data) {
     Object.assign(pendingBehavior, cur.behavior);
     applyBehaviorUI();
   }
+
+  if (cur.capabilities && typeof cur.capabilities === 'object') {
+    pendingCaps = { ...pendingCaps, ...cur.capabilities };
+  }
+  applyCapsUI();
+
+  pendingFileRoots = Array.isArray(cur.file_roots) ? [...cur.file_roots] : [];
+  renderFileRoots();
 
   if (cur.char_name) applyCharName(cur.char_name);
 }
@@ -219,15 +240,39 @@ behHeartbeat?.addEventListener('input', () => {
   if (behHeartbeatVal) behHeartbeatVal.textContent = behHeartbeat.value + 's';
 });
 
+/* ═══ Capability toggles — what's fed into her context (staged, sent on Save) ═══ */
+const CAP_KEYS = ['notes', 'projects', 'calendar', 'files', 'images', 'web', 'themes', 'music'];
+let pendingCaps = Object.fromEntries(CAP_KEYS.map(k => [k, true]));
+const capToggles = document.querySelectorAll('[data-cap]');
+
+function applyCapsUI() {
+  capToggles.forEach(btn => {
+    const on = pendingCaps[btn.dataset.cap] !== false;
+    btn.classList.toggle('off', !on);
+    btn.querySelector('span').textContent = on ? 'On' : 'Off';
+  });
+  // Hide the image item in the composer menu when images are off.
+  const imgItem = document.getElementById('cmenu-image');
+  if (imgItem) imgItem.style.display = pendingCaps.images === false ? 'none' : '';
+}
+capToggles.forEach(btn => btn.addEventListener('click', () => {
+  const k = btn.dataset.cap;
+  pendingCaps[k] = pendingCaps[k] === false;   // flip
+  applyCapsUI();
+}));
+
 document.getElementById('settings-save').addEventListener('click', () => {
   const payload = {
     model: setModel.value,
+    vision_model: setVisionModel ? setVisionModel.value : '',
     num_ctx: parseInt(setCtx.value, 10),
     tts_voice: setVoice.value,
     tts_device: setDevice.value,
     tts_enabled: pendingTts,
     char_name: (document.getElementById('set-name')?.value || '').trim() || undefined,
     behavior: { ...pendingBehavior },
+    capabilities: { ...pendingCaps },
+    file_roots: [...pendingFileRoots],
   };
   if (connected && ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'set_settings', settings: payload }));
@@ -235,6 +280,125 @@ document.getElementById('settings-save').addEventListener('click', () => {
   applyVoiceState(pendingTts);
   closeSettings();
 });
+
+/* ═══ Folders she can read (scoped, opt-in; lives in the composer + menu) ═══
+   Changes here persist immediately (the menu isn't behind the Settings Save). */
+let pendingFileRoots = [];
+const cmenuRootsEl = document.getElementById('cmenu-roots');
+
+function renderFileRoots() {
+  if (!cmenuRootsEl) return;
+  cmenuRootsEl.innerHTML = '';
+  if (!pendingFileRoots.length) {
+    cmenuRootsEl.innerHTML = '<div class="cmenu-empty">None yet — she can’t see your files.</div>';
+    return;
+  }
+  pendingFileRoots.forEach((path, i) => {
+    const row = document.createElement('div'); row.className = 'cmenu-root';
+    const name = path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
+    const p = document.createElement('span'); p.className = 'cmenu-root-name'; p.textContent = name; p.title = path;
+    const rm = document.createElement('button'); rm.className = 'cmenu-root-rm'; rm.textContent = '✕';
+    rm.title = 'Stop sharing this folder';
+    rm.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pendingFileRoots.splice(i, 1); renderFileRoots(); saveFileRoots();
+    });
+    row.append(p, rm); cmenuRootsEl.appendChild(row);
+  });
+}
+
+function addFileRoot(path) {
+  path = (path || '').trim().replace(/[\\/]+$/, '');
+  if (!path) return;
+  if (!pendingFileRoots.some(p => p.toLowerCase() === path.toLowerCase())) {
+    pendingFileRoots.push(path);
+    saveFileRoots();
+  }
+  renderFileRoots();
+}
+
+function saveFileRoots() {
+  if (connected && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'set_settings', settings: { file_roots: [...pendingFileRoots] } }));
+  }
+}
+
+/* ═══ Spotify — connect, status, and the now-playing widget ═══ */
+const npEl       = document.getElementById('nowplaying');
+const npTrack    = document.getElementById('np-track');
+const spotStatus = document.getElementById('spotify-status');
+const spotConnect = document.getElementById('spotify-connect');
+const spotDisc   = document.getElementById('spotify-disconnect');
+const musicCapNote = document.getElementById('music-cap-note');
+let spotConnected = false;
+
+async function refreshSpotify() {
+  try {
+    const s = await (await fetch('/api/spotify/status')).json();
+    spotConnected = !!s.connected;
+    if (spotStatus) {
+      spotStatus.textContent = !s.configured ? 'Not configured (set keys in .env)'
+        : s.connected ? 'Connected ✓' : 'Not connected';
+    }
+    if (spotConnect) spotConnect.style.display = s.connected ? 'none' : '';
+    if (spotDisc) spotDisc.style.display = s.connected ? '' : 'none';
+    // Tell him whether the Music capability is actually live: she only sees the
+    // music tags in her context when Spotify is connected.
+    if (musicCapNote) {
+      if (!s.configured) {
+        musicCapNote.textContent = '⚠ Spotify not configured — set keys in .env.';
+        musicCapNote.className = 'cap-note warn';
+      } else if (!s.connected) {
+        musicCapNote.textContent = '⚠ Spotify not connected — she can’t see music yet. Connect it in General.';
+        musicCapNote.className = 'cap-note warn';
+      } else if (s.premium) {
+        musicCapNote.textContent = 'Spotify Premium connected ✓ — she can see, control, and build playlists.';
+        musicCapNote.className = 'cap-note ok';
+      } else {
+        musicCapNote.textContent = 'Spotify connected ✓ (Free account) — she can see your taste and build playlists, but can’t control playback.';
+        musicCapNote.className = 'cap-note warn';
+      }
+    }
+    // Now-playing widget
+    const np = s.now_playing;
+    if (npEl) {
+      if (s.connected && np) {
+        npEl.style.display = '';
+        if (npTrack) npTrack.textContent = np.text || '—';
+        npEl.classList.toggle('paused', !np.playing);
+      } else {
+        npEl.style.display = 'none';
+      }
+    }
+  } catch { /* backend not up yet */ }
+}
+
+spotConnect?.addEventListener('click', () => {
+  window.open('/spotify/login');   // opens in the system browser (handled in main.js)
+  // Poll for a bit so the UI flips once he finishes the consent flow.
+  let n = 0; const t = setInterval(() => { refreshSpotify(); if (++n > 40 || spotConnected) clearInterval(t); }, 1500);
+});
+spotDisc?.addEventListener('click', async () => {
+  await fetch('/api/spotify/disconnect', { method: 'POST' });
+  refreshSpotify();
+});
+
+async function spotifyControl(action) {
+  await fetch('/api/spotify/control', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+  setTimeout(refreshSpotify, 400);
+}
+document.getElementById('np-prev')?.addEventListener('click', () => spotifyControl('previous'));
+document.getElementById('np-next')?.addEventListener('click', () => spotifyControl('next'));
+document.getElementById('np-playpause')?.addEventListener('click', () => {
+  spotifyControl(npEl?.classList.contains('paused') ? 'play' : 'pause');
+});
+
+// Keep the now-playing widget fresh while connected.
+setInterval(() => { if (spotConnected) refreshSpotify(); }, 15000);
+refreshSpotify();
 
 /* ═══ Character name — a rename re-skins every visible mention ═══ */
 let currentCharName = 'Aitha';
@@ -315,7 +479,13 @@ function handleMessage(data) {
 
     case 'chat_echo':
       document.getElementById('welcome')?.remove();
-      appendBubble(data.role === 'user' ? 'user' : 'aitha', data.content);
+      appendMessage(data.role === 'user' ? 'user' : 'aitha', data.content);
+      scrollToBottom();
+      break;
+
+    case 'aitha_image':
+      document.getElementById('welcome')?.remove();
+      if (data.url) appendMessage('aitha', '', { images: [data.url] });
       scrollToBottom();
       break;
 
@@ -342,6 +512,18 @@ function handleMessage(data) {
 
     case 'memory_changed':
       if (memLaneOpen) loadMemLane(true);   // she kept/forgot one mid-chat — refresh the list
+      break;
+
+    case 'projects_changed':
+      if (activeView === 'mantle') loadMind();   // she started/advanced a project — refresh her mind
+      break;
+
+    case 'calendar_changed':
+      if (bedrockOpen) loadCalendar();           // she jotted an event — refresh Bedrock
+      break;
+
+    case 'spotify_changed':
+      refreshSpotify();                          // playback/connection changed — refresh widget
       break;
 
     case 'tts_state':
@@ -431,13 +613,17 @@ function setGenerating(on) {
 
 function send() {
   const text = inputEl.value.trim();
-  if (!text || !connected) return;
+  const images = pendingImages.slice();
+  if ((!text && !images.length) || !connected) return;
 
   welcomeEl?.remove();
-  appendBubble('user', text);
+  document.getElementById('welcome')?.remove();
+  appendMessage('user', text, { images });
   scrollToBottom();
 
   inputEl.value = '';
+  pendingImages = [];
+  renderAttachTray();
   autoResize();
   setGenerating(true);
 
@@ -445,7 +631,7 @@ function send() {
   setOrbState('thinking');
   setStatus('Thinking...');
 
-  ws.send(JSON.stringify({ type: 'chat', message: text }));
+  ws.send(JSON.stringify({ type: 'chat', message: text, images }));
 }
 
 function cancelGeneration() {
@@ -663,6 +849,7 @@ function setAithaSpeaking(on) {
 function applyMicUI() {
   micToggle.classList.toggle('off', !micOn);
   micLabel.textContent = micOn ? 'Listening' : 'Listen';
+  syncPassthroughControls();
 }
 
 micToggle.addEventListener('click', async () => {
@@ -933,7 +1120,7 @@ function renderHistory(msgs) {
   streamingBubble = null;
   streamingContent = '';
   for (const m of msgs) {
-    appendBubble(m.role === 'user' ? 'user' : 'aitha', m.content);
+    appendMessage(m.role === 'user' ? 'user' : 'aitha', m.content, { images: m.images });
   }
   scrollToBottom();
 }
@@ -951,6 +1138,176 @@ function appendBubble(role, text, container = messagesEl) {
   container.appendChild(row);
   return bubble;
 }
+
+/* ─── Image-aware message (text bubble + any image bubbles, stacked) ──── */
+const IMG_TAG_RE = /<image>\s*([^<\s][^<]*?)\s*<\/image>/gi;
+
+function addBubbleImage(col, url) {
+  const img = document.createElement('img');
+  img.className = 'bubble-img';
+  img.src = url;
+  img.alt = '';
+  img.loading = 'lazy';
+  img.addEventListener('click', () => window.open(url, '_blank'));
+  img.addEventListener('error', () => {
+    img.replaceWith(Object.assign(document.createElement('div'),
+      { className: 'bubble-img-broken', textContent: 'image couldn’t load' }));
+  });
+  col.appendChild(img);
+}
+
+// role 'user'|'aitha'; text may contain <image>…</image> tags (aitha history);
+// opts.images is an explicit list of urls to render under the text.
+function appendMessage(role, text, opts = {}) {
+  const container = opts.container || messagesEl;
+  let body = text || '';
+  let images = opts.images ? opts.images.slice() : [];
+
+  if (role === 'aitha' && body) {
+    const found = [...body.matchAll(IMG_TAG_RE)].map(m => m[1].trim());
+    if (found.length) { images = images.concat(found); body = body.replace(IMG_TAG_RE, '').trim(); }
+  }
+
+  const row = document.createElement('div');
+  row.className = `message ${role}`;
+  const col = document.createElement('div');
+  col.className = 'msg-col';
+
+  if (body) {
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = body;
+    col.appendChild(bubble);
+  }
+  for (const u of images) addBubbleImage(col, u);
+
+  row.appendChild(col);
+  container.appendChild(row);
+  return row;
+}
+
+/* ─── Image attachments (drop / paste / pick → send to her) ──────────── */
+const MAX_ATTACH = 4;
+const MAX_IMG_DIM = 1024;          // downscale longest side before sending
+let pendingImages = [];
+const attachTray  = document.getElementById('attach-tray');
+const attachInput = document.getElementById('attach-input');
+
+function renderAttachTray() {
+  if (!attachTray) return;
+  attachTray.innerHTML = '';
+  attachTray.style.display = pendingImages.length ? 'flex' : 'none';
+  pendingImages.forEach((url, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'attach-chip';
+    const img = document.createElement('img'); img.src = url;
+    const rm = document.createElement('button');
+    rm.className = 'attach-rm'; rm.textContent = '✕'; rm.title = 'Remove';
+    rm.addEventListener('click', () => { pendingImages.splice(i, 1); renderAttachTray(); });
+    chip.append(img, rm);
+    attachTray.appendChild(chip);
+  });
+}
+
+function loadImg(src) {
+  return new Promise((res, rej) => {
+    const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src;
+  });
+}
+
+// Read a file → data URL, downscaling big images (keeps base64 payload sane for
+// both Ollama and cloud token cost).
+async function fileToDataURL(file) {
+  const raw = await new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+  try {
+    const img = await loadImg(raw);
+    const { width: w, height: h } = img;
+    if (Math.max(w, h) <= MAX_IMG_DIM && raw.length < 700000) return raw;
+    const scale = Math.min(1, MAX_IMG_DIM / Math.max(w, h));
+    const c = document.createElement('canvas');
+    c.width = Math.round(w * scale); c.height = Math.round(h * scale);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.85);
+  } catch { return raw; }
+}
+
+async function addImageFile(file) {
+  if (!file || !file.type?.startsWith('image/')) return;
+  if (pendingImages.length >= MAX_ATTACH) return;
+  const url = await fileToDataURL(file);
+  if (pendingImages.length < MAX_ATTACH) { pendingImages.push(url); renderAttachTray(); }
+}
+
+attachInput?.addEventListener('change', () => {
+  [...attachInput.files].forEach(addImageFile);
+  attachInput.value = '';
+});
+
+/* ─── Composer "+" menu (hover-expand): image + the folders she can read ── */
+const addWrap   = document.getElementById('composer-add-wrap');
+const addBtn    = document.getElementById('composer-add');
+const addMenu   = document.getElementById('composer-menu');
+let menuOpenTimer = null, menuCloseTimer = null;
+
+function openComposerMenu() {
+  clearTimeout(menuCloseTimer);
+  if (!addMenu || addMenu.classList.contains('open')) return;
+  renderFileRoots();
+  addMenu.classList.add('open');
+  addMenu.setAttribute('aria-hidden', 'false');
+  addBtn?.setAttribute('aria-expanded', 'true');
+}
+function closeComposerMenu() {
+  clearTimeout(menuOpenTimer);
+  if (!addMenu) return;
+  addMenu.classList.remove('open');
+  addMenu.setAttribute('aria-hidden', 'true');
+  addBtn?.setAttribute('aria-expanded', 'false');
+}
+// Hover for half a second to expand (Claude-style); click toggles immediately.
+addWrap?.addEventListener('mouseenter', () => {
+  clearTimeout(menuCloseTimer);
+  menuOpenTimer = setTimeout(openComposerMenu, 500);
+});
+addWrap?.addEventListener('mouseleave', () => {
+  clearTimeout(menuOpenTimer);
+  menuCloseTimer = setTimeout(closeComposerMenu, 220);
+});
+addBtn?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  addMenu?.classList.contains('open') ? closeComposerMenu() : openComposerMenu();
+});
+document.addEventListener('click', (e) => {
+  if (addMenu?.classList.contains('open') && !addWrap.contains(e.target)) closeComposerMenu();
+});
+document.getElementById('cmenu-image')?.addEventListener('click', () => {
+  closeComposerMenu();
+  attachInput?.click();
+});
+document.getElementById('cmenu-addfolder')?.addEventListener('click', async () => {
+  const picked = await window.electron?.pickFolder?.();
+  if (picked) addFileRoot(picked);
+});
+
+inputEl.addEventListener('paste', (e) => {
+  const imgs = [...(e.clipboardData?.items || [])].filter(it => it.type.startsWith('image/'));
+  if (imgs.length) { e.preventDefault(); imgs.forEach(it => addImageFile(it.getAsFile())); }
+});
+
+const dropZone = document.getElementById('view-chat');
+['dragenter', 'dragover'].forEach(ev => dropZone?.addEventListener(ev, (e) => {
+  if ([...(e.dataTransfer?.types || [])].includes('Files')) {
+    e.preventDefault(); dropZone.classList.add('drag-over');
+  }
+}));
+['dragleave', 'drop'].forEach(ev => dropZone?.addEventListener(ev, () => dropZone.classList.remove('drag-over')));
+dropZone?.addEventListener('drop', (e) => {
+  const files = [...(e.dataTransfer?.files || [])].filter(f => f.type.startsWith('image/'));
+  if (files.length) { e.preventDefault(); files.forEach(addImageFile); }
+});
 
 /* ─── Orb states ───────────────────────────────────────────────────── */
 function setOrbState(state) {
@@ -1017,6 +1374,7 @@ function switchView(name) {
   if (name === 'hearth' && !hearthLoaded) { hearthLoaded = true; loadHearth(); }
   if (name === 'mantle') loadMind();   // refresh each visit — her mind moves
   if (name !== 'mantle') closeMemLane();   // don't leave the lane (and its matrix) running
+  if (name !== 'notes') closeBedrock();    // leaving Magma closes the calendar slide-over
   if (name === 'chat') inputEl.focus();
 }
 
@@ -1028,6 +1386,7 @@ async function loadMind() {
   const jEl = document.getElementById('mantle-journal');
   const dEl = document.getElementById('mantle-discoveries');
   const cEl = document.getElementById('mantle-core');
+  const pEl = document.getElementById('mantle-projects');
   if (!jEl) return;
   jEl.classList.add('loading');
   try {
@@ -1072,6 +1431,45 @@ async function loadMind() {
     });
     add('her', core.self, 'self');
     add('him', core.him, 'him');
+
+    if (pEl) {
+      pEl.innerHTML = '';
+      const projects = data.projects || [];
+      const active = projects.filter(p => p.status === 'active');
+      const rest = projects.filter(p => p.status !== 'active');
+      if (!projects.length) {
+        pEl.innerHTML = '<div class="mantle-empty">Nothing she’s working on yet.</div>';
+      }
+      active.forEach(p => {
+        const row = document.createElement('div'); row.className = 'mantle-project';
+        const head = document.createElement('div'); head.className = 'mp-head';
+        const ttl = document.createElement('span'); ttl.className = 'mp-title'; ttl.textContent = p.title;
+        head.appendChild(ttl);
+        if (p.private) {
+          const lock = document.createElement('span'); lock.className = 'mp-private';
+          lock.textContent = 'private'; lock.title = 'She’s keeping this one to herself';
+          head.appendChild(lock);
+        }
+        row.appendChild(head);
+        if (p.about) {
+          const ab = document.createElement('div'); ab.className = 'mp-about'; ab.textContent = p.about;
+          row.appendChild(ab);
+        }
+        const last = (p.log || [])[p.log.length - 1];
+        if (last) {
+          const lg = document.createElement('div'); lg.className = 'mp-last';
+          lg.textContent = `${last.time} — ${last.note}`;
+          row.appendChild(lg);
+        }
+        pEl.appendChild(row);
+      });
+      if (rest.length) {
+        const done = rest.map(p => p.title);
+        const foot = document.createElement('div'); foot.className = 'mp-foot';
+        foot.textContent = (rest.some(p => p.status === 'done') ? 'finished/shelved: ' : 'shelved: ') + done.join(', ');
+        pEl.appendChild(foot);
+      }
+    }
   } catch (e) {
     if (moodEl) moodEl.textContent = '(couldn’t reach her mind right now)';
   } finally {
@@ -2176,6 +2574,235 @@ $h('hearth-send').addEventListener('click', sendHearth);
 $h('hearth-input').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendHearth(); } });
 $h('hearth-continue').addEventListener('click', () => hpost('/api/hearth/continue', {}));
 $h('hearth-session-zero').addEventListener('click', openSessionZero);
+
+/* ═══════════════════════════════════════════════════════════════════
+   BEDROCK — a shared calendar that slides in over Magma. He edits events;
+   she sees what's coming up and can add events herself (<event> directive).
+   ═══════════════════════════════════════════════════════════════════ */
+let bedrockOpen = false;
+let calYear, calMonth;            // month currently shown
+let calSelected = null;           // selected day (YYYY-MM-DD)
+let calToday = null;              // today's ISO, from the server
+let calEvents = [];              // events for the shown month
+const MONTHS = ['January','February','March','April','May','June','July',
+  'August','September','October','November','December'];
+
+function openBedrock() {
+  if (bedrockOpen) return;
+  bedrockOpen = true;
+  document.getElementById('view-notes')?.classList.add('bedrock-open');
+  const now = new Date();
+  if (calYear == null) { calYear = now.getFullYear(); calMonth = now.getMonth() + 1; }
+  loadCalendar();
+}
+function closeBedrock() {
+  if (!bedrockOpen) return;
+  bedrockOpen = false;
+  document.getElementById('view-notes')?.classList.remove('bedrock-open');
+}
+
+async function loadCalendar() {
+  try {
+    const data = await (await fetch(`/api/calendar?year=${calYear}&month=${calMonth}`)).json();
+    calToday = data.today;
+    calEvents = data.events || [];
+    renderCalendar();
+  } catch (e) {
+    const grid = document.getElementById('cal-grid');
+    if (grid) grid.innerHTML = '<div class="cal-empty">Couldn’t reach the calendar.</div>';
+  }
+}
+
+function eventsOn(iso) {
+  return calEvents.filter(e => e.date === iso)
+    .sort((a, b) => (a.time || '00:00').localeCompare(b.time || '00:00'));
+}
+
+function renderCalendar() {
+  const label = document.getElementById('bedrock-monthlabel');
+  if (label) label.textContent = `${MONTHS[calMonth - 1]} ${calYear}`;
+  const grid = document.getElementById('cal-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  const first = new Date(calYear, calMonth - 1, 1);
+  const startDow = first.getDay();                          // 0=Sun
+  const daysInMonth = new Date(calYear, calMonth, 0).getDate();
+  for (let i = 0; i < startDow; i++) {
+    const blank = document.createElement('div'); blank.className = 'cal-cell blank';
+    grid.appendChild(blank);
+  }
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${calYear}-${String(calMonth).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const cell = document.createElement('div');
+    cell.className = 'cal-cell';
+    if (iso === calToday) cell.classList.add('today');
+    if (iso === calSelected) cell.classList.add('selected');
+    const num = document.createElement('div'); num.className = 'cal-num'; num.textContent = d;
+    cell.appendChild(num);
+    const evs = eventsOn(iso);
+    if (evs.length) {
+      const dots = document.createElement('div'); dots.className = 'cal-dots';
+      evs.slice(0, 3).forEach(() => { const s = document.createElement('span'); dots.appendChild(s); });
+      cell.appendChild(dots);
+    }
+    cell.addEventListener('click', () => { calSelected = iso; renderCalendar(); renderCalDay(); });
+    grid.appendChild(cell);
+  }
+  renderCalDay();
+}
+
+function renderCalDay() {
+  const title = document.getElementById('cal-day-title');
+  const list = document.getElementById('cal-day-events');
+  const add = document.getElementById('cal-add');
+  if (!title || !list) return;
+  if (!calSelected) {
+    title.textContent = 'Pick a day';
+    list.innerHTML = '';
+    if (add) add.style.display = 'none';
+    return;
+  }
+  const [y, m, d] = calSelected.split('-').map(Number);
+  const dateObj = new Date(y, m - 1, d);
+  title.textContent = dateObj.toLocaleDateString(undefined,
+    { weekday: 'long', month: 'long', day: 'numeric' });
+  if (add) add.style.display = '';
+  list.innerHTML = '';
+  const evs = eventsOn(calSelected);
+  if (!evs.length) list.innerHTML = '<div class="cal-empty">Nothing planned.</div>';
+  evs.forEach(e => {
+    const row = document.createElement('div'); row.className = 'cal-event';
+    const t = document.createElement('span'); t.className = 'cal-event-time';
+    t.textContent = e.time ? fmtTime(e.time) : 'all day';
+    const body = document.createElement('div'); body.className = 'cal-event-body';
+    const ttl = document.createElement('div'); ttl.className = 'cal-event-title'; ttl.textContent = e.title;
+    body.appendChild(ttl);
+    if (e.notes) { const n = document.createElement('div'); n.className = 'cal-event-notes'; n.textContent = e.notes; body.appendChild(n); }
+    const rm = document.createElement('button'); rm.className = 'cal-event-rm'; rm.textContent = '✕'; rm.title = 'Delete';
+    rm.addEventListener('click', () => deleteEvent(e.id));
+    row.append(t, body, rm);
+    list.appendChild(row);
+  });
+}
+
+function fmtTime(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  const ampm = h < 12 ? 'AM' : 'PM';
+  const h12 = h % 12 || 12;
+  return `${h12}:${String(m).padStart(2,'0')} ${ampm}`;
+}
+
+async function addCalEvent() {
+  const titleEl = document.getElementById('cal-add-title');
+  const timeEl = document.getElementById('cal-add-time');
+  const title = (titleEl?.value || '').trim();
+  if (!title || !calSelected) return;
+  await fetch('/api/calendar/add', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ date: calSelected, title, time: timeEl?.value || '' }),
+  });
+  if (titleEl) titleEl.value = '';
+  if (timeEl) timeEl.value = '';
+  loadCalendar();
+}
+async function deleteEvent(id) {
+  await fetch('/api/calendar/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  loadCalendar();
+}
+
+document.getElementById('bedrock-open')?.addEventListener('click', openBedrock);
+document.getElementById('bedrock-back')?.addEventListener('click', closeBedrock);
+document.getElementById('bedrock-prev')?.addEventListener('click', () => {
+  calMonth--; if (calMonth < 1) { calMonth = 12; calYear--; } loadCalendar();
+});
+document.getElementById('bedrock-next')?.addEventListener('click', () => {
+  calMonth++; if (calMonth > 12) { calMonth = 1; calYear++; } loadCalendar();
+});
+document.getElementById('bedrock-today')?.addEventListener('click', () => {
+  const now = new Date(); calYear = now.getFullYear(); calMonth = now.getMonth() + 1;
+  calSelected = calToday; loadCalendar();
+});
+document.getElementById('cal-add-btn')?.addEventListener('click', addCalEvent);
+document.getElementById('cal-add-title')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); addCalEvent(); }
+});
+
+/* ═══════════════════════════════════════════════════════════════════
+   PASSTHROUGH MODE
+   Ambient view: her ball + the conversation + minimal mic/voice controls.
+   Reuses the chat view in place (body.passthrough); double-clicking her
+   collapses the chat (body.chat-collapsed). The mini mic/voice buttons
+   proxy the real sidebar toggles so all the logic stays in one place.
+   ═══════════════════════════════════════════════════════════════════ */
+// var (not const): syncPassthroughControls() is reachable from applyMicUI(),
+// which runs at boot BEFORE this point — var hoists to undefined so the guard
+// below works instead of throwing a temporal-dead-zone ReferenceError.
+var passthroughBtn = document.getElementById('passthrough-btn');
+var ptBar    = document.getElementById('pt-bar');
+var ptMicBtn = document.getElementById('pt-mic');
+var ptVoBtn  = document.getElementById('pt-voice');
+var ptExit   = document.getElementById('pt-exit');
+var ptHint   = document.getElementById('pt-hint');
+let passthrough = false;
+
+function syncPassthroughControls() {
+  if (!ptMicBtn) return;   // refs not built yet (called from applyMicUI on boot)
+  ptMicBtn.classList.toggle('off', micToggle.classList.contains('off'));
+  ptVoBtn.classList.toggle('muted', voiceToggle.classList.contains('muted'));
+}
+
+function updatePtHint() {
+  if (!ptHint) return;
+  const collapsed = document.body.classList.contains('chat-collapsed');
+  ptHint.textContent = collapsed
+    ? 'double-click her to show the conversation'
+    : 'double-click her to hide the conversation';
+}
+
+function enterPassthrough() {
+  if (passthrough) return;
+  passthrough = true;
+  switchView('chat');
+  document.body.classList.add('passthrough');
+  document.body.classList.remove('chat-collapsed');
+  window.electron?.passthroughEnter?.();   // reshape the window to a phone ratio
+  syncPassthroughControls();
+  updatePtHint();
+  inputEl.focus();
+}
+
+function exitPassthrough() {
+  if (!passthrough) return;
+  passthrough = false;
+  document.body.classList.remove('passthrough', 'chat-collapsed');
+  window.electron?.passthroughExit?.();    // restore the normal window
+}
+
+function toggleChatCollapsed() {
+  if (!passthrough) return;
+  document.body.classList.toggle('chat-collapsed');
+  updatePtHint();
+  if (!document.body.classList.contains('chat-collapsed')) inputEl.focus();
+}
+
+passthroughBtn?.addEventListener('click', enterPassthrough);
+ptExit?.addEventListener('click', exitPassthrough);
+// Mini controls proxy the real toggles; sync visual state right after.
+ptMicBtn?.addEventListener('click', () => { micToggle.click(); setTimeout(syncPassthroughControls, 0); });
+ptVoBtn?.addEventListener('click', () => { voiceToggle.click(); });
+// Double-click her ball to hide / reveal the conversation. Bind to the
+// orb-container, not #aitha-orb: the orb-ring overlays the orb as a sibling
+// and would otherwise swallow the clicks before they reach the orb.
+document.querySelector('.orb-container')?.addEventListener('dblclick', toggleChatCollapsed);
+// Esc leaves passthrough.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && passthrough && !settingsModal.classList.contains('open')) {
+    exitPassthrough();
+  }
+});
 
 /* ─── Boot ─────────────────────────────────────────────────────────── */
 connect();

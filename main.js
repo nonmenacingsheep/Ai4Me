@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, screen, dialog } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const http = require('http');
@@ -8,6 +8,12 @@ const fs = require('fs');
 let mainWindow;
 let backendProcess;
 let tray;
+
+// Passthrough (ambient phone-shaped) mode: remember the normal bounds so the
+// temporary phone size never leaks into the saved window state.
+let passthroughActive = false;
+let prePassthroughBounds = null;
+let prePassthroughMaximized = false;
 
 const BACKEND_PORT = 7823;
 const BACKEND_HOST = '127.0.0.1';
@@ -23,11 +29,13 @@ function loadWindowState() {
 function saveWindowState() {
   if (!mainWindow) return;
   try {
-    // getNormalBounds() is the un-maximized size, so we restore to the right
-    // dimensions even if it was closed while maximized.
-    const b = mainWindow.getNormalBounds();
-    const state = { ...b, maximized: mainWindow.isMaximized() };
-    fs.writeFileSync(WINDOW_STATE_FILE, JSON.stringify(state));
+    // In passthrough the window is phone-shaped — persist the normal bounds we
+    // stashed on entry instead, so a restart reopens at the real size.
+    const b = (passthroughActive && prePassthroughBounds)
+      ? prePassthroughBounds
+      : mainWindow.getNormalBounds();
+    const maximized = passthroughActive ? prePassthroughMaximized : mainWindow.isMaximized();
+    fs.writeFileSync(WINDOW_STATE_FILE, JSON.stringify({ ...b, maximized }));
   } catch (_) {}
 }
 
@@ -156,8 +164,8 @@ function createWindow() {
     minWidth: 680,
     minHeight: 480,
     frame: false,
-    transparent: false,
-    backgroundColor: '#07070e',
+    transparent: true,            // lets passthrough mode float over the desktop
+    backgroundColor: '#00000000', // normal mode stays opaque via the page's body bg
     titleBarStyle: 'hidden',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -189,7 +197,11 @@ function createWindow() {
   // Remember size/position. Debounced so we're not writing on every pixel of a
   // drag, plus a final save as it closes.
   let saveTimer = null;
-  const scheduleSave = () => { clearTimeout(saveTimer); saveTimer = setTimeout(saveWindowState, 400); };
+  const scheduleSave = () => {
+    if (passthroughActive) return;   // don't persist the temporary phone size
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveWindowState, 400);
+  };
   mainWindow.on('resize', scheduleSave);
   mainWindow.on('move', scheduleSave);
   mainWindow.on('close', saveWindowState);
@@ -228,9 +240,47 @@ function createTray() {
 /* ─── IPC: window controls ─────────────────────────────────────────── */
 ipcMain.on('window-close',    () => { app.quit(); });  // close button quits the app
 ipcMain.on('window-minimize', () => { mainWindow?.minimize(); });
+
+// Native folder picker for granting Aitha read-only access to a folder.
+ipcMain.handle('pick-folder', async () => {
+  if (!mainWindow) return null;
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose a folder Aitha can read',
+    properties: ['openDirectory'],
+  });
+  return res.canceled || !res.filePaths.length ? null : res.filePaths[0];
+});
 ipcMain.on('window-maximize', () => {
   if (mainWindow?.isMaximized()) mainWindow.unmaximize();
   else mainWindow?.maximize();
+});
+
+/* ─── IPC: passthrough (ambient phone-shaped) mode ─────────────────── */
+ipcMain.on('passthrough-enter', () => {
+  if (!mainWindow || passthroughActive) return;
+  passthroughActive = true;
+  prePassthroughMaximized = mainWindow.isMaximized();
+  if (prePassthroughMaximized) mainWindow.unmaximize();
+  prePassthroughBounds = mainWindow.getNormalBounds();
+
+  const disp = screen.getDisplayMatching(prePassthroughBounds).workArea;
+  const h = Math.min(840, disp.height - 40);
+  const w = Math.round(h * 0.50);   // ~phone aspect ratio
+  const x = Math.round(prePassthroughBounds.x + (prePassthroughBounds.width - w) / 2);
+  const y = Math.max(disp.y + 10, Math.round(prePassthroughBounds.y + (prePassthroughBounds.height - h) / 2));
+
+  mainWindow.setMinimumSize(280, 460);
+  mainWindow.setBounds({ x, y, width: w, height: h }, true);
+  mainWindow.setAlwaysOnTop(true, 'floating');   // she floats over other windows
+});
+
+ipcMain.on('passthrough-exit', () => {
+  if (!mainWindow || !passthroughActive) return;
+  passthroughActive = false;
+  mainWindow.setAlwaysOnTop(false);
+  mainWindow.setMinimumSize(680, 480);
+  if (prePassthroughBounds) mainWindow.setBounds(prePassthroughBounds, true);
+  if (prePassthroughMaximized) mainWindow.maximize();
 });
 
 /* ─── Single instance ──────────────────────────────────────────────── */

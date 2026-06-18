@@ -2049,6 +2049,144 @@ body.theme-mantle::before {
 .mantle-core-item.self .mc-tag { color: var(--accent-v-bright); background: var(--accent-v-dim); }
 .mantle-core-item.him .mc-tag { color: var(--accent-r); background: var(--accent-r-dim); }
 
+/* Her own projects (Mantle card) */
+.mantle-project { padding: 9px 10px; border-radius: var(--radius-sm); margin-bottom: 4px;
+  border-left: 2px solid var(--border-accent); background: rgba(255,255,255,0.02); }
+.mp-head { display: flex; align-items: center; gap: 8px; }
+.mp-title { font-size: 13px; font-weight: 600; color: var(--accent-v-bright); }
+.mp-private { flex-shrink: 0; font-size: 9px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; padding: 1px 6px; border-radius: 9px; color: var(--text-3);
+  border: 1px solid var(--border); }
+.mp-about { font-size: 12px; color: var(--text-2); line-height: 1.45; margin-top: 3px; }
+.mp-last { font-size: 11.5px; color: var(--text-3); line-height: 1.45; margin-top: 5px; font-style: italic; }
+.mp-foot { font-size: 11px; color: var(--text-3); margin-top: 6px; }
+
+/* Composer "+" menu — image + folders she can read (minimal hover popover) */
+.composer-add-wrap { position: relative; flex-shrink: 0; align-self: flex-end; }
+.composer-menu {
+  position: absolute; bottom: calc(100% + 10px); left: -4px; z-index: 60;
+  min-width: 244px; max-width: 320px; padding: 6px;
+  background: var(--bg-mid); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(0,0,0,0.2);
+  opacity: 0; transform: translateY(6px) scale(0.98); transform-origin: bottom left;
+  pointer-events: none; transition: opacity .14s ease, transform .14s ease;
+}
+.composer-menu.open { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+.cmenu-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border: none; border-radius: 9px; cursor: pointer;
+  background: transparent; color: var(--text-1); font: inherit; font-size: 13px; text-align: left;
+  transition: background .12s;
+}
+.cmenu-item:hover { background: var(--bg-hover); }
+.cmenu-item svg { flex-shrink: 0; color: var(--text-2); }
+.cmenu-item:hover svg { color: var(--accent-v-bright); }
+.cmenu-sep { height: 1px; background: var(--border-soft); margin: 5px 6px; }
+.cmenu-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-3); padding: 4px 10px 3px; }
+.cmenu-empty { font-size: 12px; color: var(--text-3); font-style: italic; padding: 3px 10px 6px; }
+.cmenu-roots { display: flex; flex-direction: column; max-height: 180px; overflow-y: auto; }
+.cmenu-root { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-radius: 8px; }
+.cmenu-root:hover { background: var(--bg-hover); }
+.cmenu-root-name { flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmenu-root-rm { flex-shrink: 0; width: 20px; height: 20px; border-radius: 6px; cursor: pointer;
+  background: transparent; border: none; color: var(--text-3); font-size: 11px; transition: color .15s, background .15s; }
+.cmenu-root-rm:hover { color: var(--accent-r); background: var(--accent-r-dim); }
+.cmenu-add { color: var(--text-2); }
+
+/* Spotify connect row (Settings) */
+.spotify-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.spotify-status { flex: 1; font-size: 12.5px; color: var(--text-2); }
+
+/* Now-playing widget (sidebar) */
+.nowplaying { margin: 0 0 12px; padding: 10px 12px; border-radius: var(--radius-md);
+  background: rgba(30,215,96,0.06); border: 1px solid rgba(30,215,96,0.18); }
+.np-track { font-size: 11.5px; color: var(--text-1); line-height: 1.35; margin-bottom: 8px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.np-controls { display: flex; align-items: center; justify-content: center; gap: 14px; }
+.np-btn { background: none; border: none; cursor: pointer; color: var(--text-2); font-size: 14px;
+  line-height: 1; padding: 2px; transition: color .15s, transform .1s; }
+.np-btn:hover { color: #1ed760; }
+.np-btn:active { transform: scale(0.9); }
+.nowplaying.paused { opacity: 0.7; }
+
+/* Capability toggles (Behavior tab) */
+.cap-toggles { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+.cap-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; }
+.cap-row + .cap-row { border-top: 1px solid var(--border-soft); }
+.cap-name { display: block; font-size: 13px; color: var(--text-1); }
+.cap-hint { display: block; font-size: 11.5px; color: var(--text-3); margin-top: 1px; }
+.cap-note { display: none; font-size: 11px; margin-top: 3px; }
+.cap-note:not(:empty) { display: block; }
+.cap-note.warn { color: var(--warn, #d8893b); }
+.cap-note.ok { color: var(--ok, #4caa6a); }
+
+/* ════ Bedrock — calendar slide-over under Magma ════ */
+.notes-head-tools { display: flex; align-items: center; gap: 4px; }
+
+.bedrock {
+  position: absolute; inset: 0; z-index: 5;
+  transform: translateX(100%); opacity: 0; pointer-events: none;
+  transition: transform .5s cubic-bezier(.7,0,.2,1), opacity .35s ease;
+  background: var(--bg-deep); display: flex; overflow: hidden;
+}
+.view-notes.bedrock-open .bedrock { transform: translateX(0); opacity: 1; pointer-events: auto; }
+.bedrock-inner { flex: 1; display: flex; flex-direction: column; padding: 18px 22px 16px; min-height: 0; }
+.bedrock-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.bedrock-back { background: none; border: none; color: var(--text-2); font-size: 22px; cursor: pointer;
+  line-height: 1; padding: 0 4px; transition: color .15s; }
+.bedrock-back:hover { color: var(--accent-v-bright); }
+.bedrock-head-text { flex: 1; }
+.bedrock-head .note-tool { font-size: 16px; }
+
+.bedrock-body { flex: 1; display: flex; gap: 20px; min-height: 0; }
+.cal-cal { flex: 1.4; display: flex; flex-direction: column; min-width: 0; }
+.cal-dow { display: grid; grid-template-columns: repeat(7, 1fr); margin-bottom: 6px; }
+.cal-dow span { text-align: center; font-size: 10px; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--text-3); }
+.cal-grid { flex: 1; display: grid; grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: 1fr; gap: 4px; min-height: 0; }
+.cal-cell { position: relative; border: 1px solid var(--border-soft); border-radius: 8px;
+  padding: 6px; cursor: pointer; transition: background .12s, border-color .12s;
+  background: rgba(255,255,255,0.015); display: flex; flex-direction: column; gap: 4px; min-height: 52px; }
+.cal-cell:hover { background: var(--bg-hover); border-color: var(--border); }
+.cal-cell.blank { border: none; background: none; cursor: default; }
+.cal-num { font-size: 12.5px; color: var(--text-2); }
+.cal-cell.today { border-color: var(--border-accent); }
+.cal-cell.today .cal-num { color: var(--accent-v-bright); font-weight: 700; }
+.cal-cell.selected { background: var(--accent-v-dim); border-color: var(--accent-v); }
+.cal-dots { display: flex; gap: 3px; margin-top: auto; flex-wrap: wrap; }
+.cal-dots span { width: 5px; height: 5px; border-radius: 50%; background: var(--accent-v); }
+
+.cal-side { flex: 1; display: flex; flex-direction: column; min-width: 0; max-width: 280px; }
+.cal-day-title { font-size: 14px; font-weight: 600; color: var(--text-1); margin-bottom: 10px; }
+.cal-day-events { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; scrollbar-width: none; }
+.cal-day-events::-webkit-scrollbar { display: none; }
+.cal-empty { font-size: 12.5px; color: var(--text-3); font-style: italic; }
+.cal-event { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
+  background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
+.cal-event-time { flex-shrink: 0; font-size: 11px; color: var(--accent-v-bright); font-weight: 600;
+  min-width: 58px; padding-top: 1px; }
+.cal-event-body { flex: 1; min-width: 0; }
+.cal-event-title { font-size: 13px; color: var(--text-1); line-height: 1.35; }
+.cal-event-notes { font-size: 11.5px; color: var(--text-3); margin-top: 2px; line-height: 1.4; }
+.cal-event-rm { flex-shrink: 0; width: 20px; height: 20px; border-radius: 6px; cursor: pointer;
+  background: transparent; border: none; color: var(--text-3); font-size: 11px; transition: color .15s, background .15s; }
+.cal-event-rm:hover { color: var(--accent-r); background: var(--accent-r-dim); }
+
+.cal-add { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.cal-add-row { display: flex; gap: 6px; }
+.cal-input { background: var(--bg-surface); border: 1px solid var(--border-soft); border-radius: 8px;
+  color: var(--text-1); padding: 8px 10px; font: inherit; font-size: 13px; outline: none; }
+.cal-input:focus { border-color: var(--border-accent); }
+.cal-add > .cal-input { width: 100%; }
+.cal-time { flex: 1; color-scheme: dark; }
+.cal-add-btn { flex-shrink: 0; padding: 0 16px; border-radius: 8px; cursor: pointer;
+  background: var(--accent-v); border: none; color: #fff; font: inherit; font-size: 13px; font-weight: 600;
+  transition: filter .15s; }
+.cal-add-btn:hover { filter: brightness(1.12); }
+
 .view-hearth { display: none; flex-direction: column; height: 100%; overflow: hidden; }
 .view-hearth.active { display: flex; }
 
@@ -2358,3 +2496,182 @@ body.theme-mantle::before {
   background: var(--accent-v); border: none; color: #fff; font-size: 15px;
   transition: filter .15s; }
 .memlane-composer button:hover { filter: brightness(1.12); }
+
+/* ══════════════════════════════════════════════════════════════════════
+   PASSTHROUGH MODE — ambient: just her ball + the conversation.
+   A body.passthrough class restyles the existing chat view in place, so
+   the orb, message stream and send pipeline are all reused untouched.
+   body.chat-collapsed (toggled by double-clicking her) hides the chat.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Entry button in the sidebar — matches the settings-button glass look */
+.passthrough-btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--font); font-size: 10px; font-weight: 600; letter-spacing: 0.05em;
+  color: var(--accent-v-bright);
+  background: linear-gradient(135deg, rgba(76,29,149,0.40), rgba(20,12,35,0.60));
+  border: 1px solid var(--border-accent); border-radius: 11px;
+  padding: 6px 11px; cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.25s, border-color 0.2s;
+  box-shadow: 0 0 16px rgba(124, 58, 237, 0.16), inset 0 1px 0 rgba(167,139,250,0.16);
+}
+.passthrough-btn:hover { border-color: var(--accent-v); box-shadow: 0 0 24px rgba(124,58,237,0.32); }
+.passthrough-btn:active { transform: scale(0.95); }
+.passthrough-btn svg { flex-shrink: 0; }
+
+/* Floating controls + hint are hidden until passthrough is on */
+.pt-bar, .pt-hint { display: none; }
+
+/* The whole window goes transparent — a floating column over the desktop.
+   Only her orb, the control row and the chat bubbles are drawn. */
+body.passthrough, body.passthrough html { background: transparent !important; }
+body.passthrough::before { display: none !important; }   /* drop the ambient gradient */
+body.passthrough .app { height: 100vh; }
+
+body.passthrough .titlebar,
+body.passthrough .sidebar > .sidebar-divider,
+body.passthrough .nav-hub,
+body.passthrough .sidebar-bottom,
+body.passthrough .aitha-name,
+body.passthrough .aitha-status,
+body.passthrough .view-chat::after,
+body.passthrough .input-hint { display: none !important; }
+
+/* Sidebar → transparent stage; her orb at the top of the column */
+body.passthrough .sidebar {
+  position: fixed; inset: 0; width: 100%; height: 100%;
+  background: transparent; border: 0; padding: 0; overflow: visible;
+  z-index: 30; pointer-events: none;
+}
+/* A slim draggable strip up top so the window can still be moved */
+body.passthrough .sidebar::before {
+  content: ''; position: fixed; top: 0; left: 0; right: 0; height: 32px;
+  -webkit-app-region: drag; pointer-events: auto;
+}
+body.passthrough .presence-area {
+  position: fixed; left: 0; right: 0; top: 13vh; padding: 0; pointer-events: none;
+  transition: top 0.5s cubic-bezier(.4,0,.2,1);
+}
+body.passthrough .orb-container {
+  transform: scale(1.85); pointer-events: auto; cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: transform 0.5s cubic-bezier(.34,1.25,.64,1);
+}
+
+/* Mic · voice · leave — a centred row just under her */
+body.passthrough .pt-bar {
+  display: flex; align-items: center; gap: 8px;
+  position: fixed; top: 24vh; left: 50%; transform: translateX(-50%); z-index: 50;
+  padding: 6px; border-radius: 16px;
+  background: rgba(14,12,22,0.5); border: 1px solid var(--border-soft);
+  backdrop-filter: blur(10px);
+  -webkit-app-region: no-drag;
+  transition: top 0.5s cubic-bezier(.4,0,.2,1), opacity 0.35s ease;
+}
+
+/* The conversation — just the bubbles, nothing behind them */
+body.passthrough .main-area {
+  position: fixed; left: 0; right: 0; top: 32vh; bottom: 0;
+  background: transparent; backdrop-filter: none; z-index: 20;
+  transition: opacity 0.3s ease;
+}
+body.passthrough .view-chat { background: transparent; border: 0; box-shadow: none; }
+body.passthrough .messages { padding: 8px 16px 4px; }
+body.passthrough .input-area { background: transparent; border: 0; padding: 10px 14px 16px; }
+/* Input becomes a legible glass pill over the desktop */
+body.passthrough .input-wrapper {
+  background: rgba(14,12,22,0.72);
+  border-color: var(--border-soft);
+  backdrop-filter: blur(12px);
+}
+/* Bubbles need to stay legible floating over any desktop — give them real glass */
+body.passthrough .message.aitha .bubble {
+  background: rgba(46,34,72,0.82);
+  border-color: var(--border-accent);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 6px 22px rgba(0,0,0,0.35);
+}
+body.passthrough .message.user .bubble {
+  background: rgba(22,22,32,0.82);
+  color: var(--text-1);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 6px 22px rgba(0,0,0,0.35);
+}
+
+/* Collapsed (double-click her): hide the chat, recentre her */
+body.passthrough.chat-collapsed .presence-area { top: 34vh; }
+body.passthrough.chat-collapsed .orb-container  { transform: scale(2.3); }
+body.passthrough.chat-collapsed .pt-bar         { top: 49vh; }
+body.passthrough.chat-collapsed .main-area      { opacity: 0; pointer-events: none; }
+.pt-btn {
+  width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 10px; cursor: pointer; color: var(--accent-v);
+  background: transparent; border: 1px solid transparent;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.pt-btn:hover { background: var(--accent-v-dim); border-color: var(--border-accent); }
+.pt-btn:active { transform: scale(0.93); }
+.pt-sep { width: 1px; height: 20px; background: var(--border-soft); margin: 0 2px; }
+.pt-exit { color: var(--text-2); }
+.pt-btn .mic-slash, .pt-btn .snd-slash { display: none; }
+.pt-btn.off    { color: var(--text-3); }
+.pt-btn.off .mic-slash { display: inline; }
+.pt-btn.muted  { color: var(--text-3); }
+.pt-btn.muted .snd-slash { display: inline; }
+.pt-btn.muted .snd-wave  { display: none; }
+
+body.passthrough .pt-hint {
+  display: block; position: fixed; left: 50%; top: 4vh; transform: translateX(-50%);
+  z-index: 40; font-size: 11px; letter-spacing: 0.06em; color: var(--text-3);
+  opacity: 0.4; pointer-events: none; text-transform: lowercase;
+  transition: top 0.5s cubic-bezier(.4,0,.2,1), opacity 0.3s ease;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   IMAGES IN CHAT — clean, refined image bubbles + the attach UI.
+   A message row holds a column: the text bubble, then any image bubbles.
+   ═══════════════════════════════════════════════════════════════════════ */
+.msg-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; max-width: 100%; }
+.message.user  .msg-col { align-items: flex-end; }
+.message.aitha .msg-col { align-items: flex-start; }
+
+.bubble-img {
+  display: block; max-width: min(280px, 100%); max-height: 340px;
+  width: auto; height: auto; object-fit: cover;
+  border-radius: 16px; border: 1px solid var(--border);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.30);
+  cursor: zoom-in; transition: transform 0.15s ease, box-shadow 0.2s ease;
+}
+.bubble-img:hover { transform: translateY(-1px); box-shadow: 0 8px 28px rgba(0,0,0,0.40); }
+.bubble-img-broken {
+  font-size: 12px; color: var(--text-3); font-style: italic;
+  padding: 10px 14px; border: 1px dashed var(--border); border-radius: 12px;
+}
+
+/* Pending attachments shown above the input before sending */
+.attach-tray { flex-wrap: wrap; gap: 8px; padding: 4px 4px 10px; }
+.attach-chip {
+  position: relative; width: 58px; height: 58px; border-radius: 10px;
+  overflow: hidden; border: 1px solid var(--border); background: var(--bg-surface);
+}
+.attach-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attach-rm {
+  position: absolute; top: 3px; right: 3px; width: 18px; height: 18px;
+  border-radius: 50%; border: none; cursor: pointer; line-height: 1; font-size: 9px;
+  color: #fff; background: rgba(0,0,0,0.62);
+  display: flex; align-items: center; justify-content: center;
+}
+.attach-rm:hover { background: rgba(0,0,0,0.85); }
+
+/* Attach button inside the input wrapper */
+.attach-btn {
+  flex-shrink: 0; width: 34px; height: 34px; align-self: flex-end;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: var(--radius-sm); cursor: pointer;
+  background: transparent; color: var(--text-2);
+  transition: background 0.15s, color 0.15s;
+}
+.attach-btn:hover { background: var(--bg-hover); color: var(--accent-v); }
+
+/* Drag-and-drop hint over the chat view */
+.view-chat.drag-over { outline: 2px dashed var(--border-accent); outline-offset: -10px; }

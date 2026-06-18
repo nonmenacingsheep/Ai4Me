@@ -5,7 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win"
+    "build": "electron-builder --win",
+    "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File create-desktop-shortcut.ps1"
   },
   "build": {
     "appId": "com.ai4me.aitha",

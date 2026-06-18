@@ -47,6 +47,32 @@ def default_behavior() -> dict:
     }
 
 
+def default_capabilities() -> dict:
+    """Which context-feeding capabilities are switched on. Turning one off removes
+    its block from her prompt entirely — disabling the feature AND shrinking context."""
+    return {
+        "notes": True,      # Magma notes (she sees titles, opens bodies on demand)
+        "projects": True,   # her own goals/projects
+        "calendar": True,   # Bedrock schedule awareness
+        "files": True,      # reading folders he's shared
+        "images": True,     # seeing images he sends + sharing web images
+        "web": True,        # live web search + watching YouTube
+        "themes": True,     # letting her re-skin the room / her sphere
+        "music": True,      # Spotify: see/control his music, build playlists
+    }
+
+
+def get_capabilities() -> dict:
+    """Capability flags merged over defaults, every value coerced to bool."""
+    c = default_capabilities()
+    saved = load().get("capabilities") or {}
+    if isinstance(saved, dict):
+        for k in c:
+            if k in saved:
+                c[k] = bool(saved[k])
+    return c
+
+
 def get_behavior() -> dict:
     """Behavior settings merged over defaults, with every value validated/clamped."""
     b = default_behavior()
@@ -88,6 +114,8 @@ def defaults() -> dict:
         # Default to the cloud model; local Ollama models still appear if Ollama is
         # running (it is never auto-started — see README).
         "model": os.getenv("AITHA_MODEL", "deepseek-chat"),
+        # Separate "eyes": a vision model that describes images for her. "" = none.
+        "vision_model": os.getenv("AITHA_VISION_MODEL", ""),
         "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "4096")),
         "tts_enabled": os.getenv("TTS_ENABLED", "1").lower() not in ("0", "false", "no"),
         "tts_voice": os.getenv("TTS_VOICE", "af_heart"),
@@ -95,6 +123,9 @@ def defaults() -> dict:
         "theme": default_theme(),
         "char_name": os.getenv("AITHA_NAME", "Aitha"),
         "behavior": default_behavior(),
+        "capabilities": default_capabilities(),
+        # Folders he's granted her read-only access to (absolute paths). Empty = none.
+        "file_roots": [],
     }
 
 
@@ -167,6 +198,20 @@ def list_models() -> list[str]:
     for m in cloud + local:
         if m not in seen:
             seen.add(m)
+            out.append(m)
+    return out
+
+
+def list_vision_models() -> list[str]:
+    """Models that can describe images — for the dedicated 'eyes' chooser. Cloud
+    vision models (if their key is set) plus any installed multimodal Ollama models."""
+    try:
+        from brain import cloud_models, _is_vision_model
+    except Exception:
+        return []
+    out = []
+    for m in cloud_models() + list_ollama_models():
+        if m not in out and _is_vision_model(m):
             out.append(m)
     return out
 

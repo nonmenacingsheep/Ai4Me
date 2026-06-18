@@ -15,7 +15,14 @@ She starts as a blank slate with no scripted personality. Over time she forms he
 - **Voice, both ways** — hands-free speech input (local Whisper) and a spoken voice (local Kokoro TTS), which can be optionally routed through a voice changer (setup below). She mutes her own mic while she's talking.
 - **Mantle** — a read-only window into her mind: her current mood, her private journal, what she's been off doing, and the memories she's chosen to protect.
 - **Magma** — a shared, linked notes space (Obsidian-style `[[wikilinks]]`). She can read, write, and edit notes herself.
-- **Long-term memory** — she remembers things about you and about herself across sessions, and can mark certain memories as *core* (protected forever).
+- **Bedrock** — a calendar that lives under Magma. She can see what's on your schedule and weave it in naturally ("you've got the dentist tomorrow"), and add events herself when you mention a plan.
+- **Music (Spotify)** — she can see what you're playing and your taste, play songs and **play your playlists by name**, build new playlists (from your top tracks, a search, or a hand-picked list), and **add songs to existing playlists** — including searching the web for song ideas first. A now-playing widget lives in the sidebar. *(See the "Connecting Spotify" tutorial below. Playback control needs Premium; everything else works on a free account.)*
+- **Her own projects & goals** — she keeps and advances her own pursuits over time, shown in a Mantle card. They feed her autonomy — she'll quietly work on them on her own.
+- **Reads your files** — read-only, sandboxed access to folders you explicitly share with her (managed from the "+" menu in the chat composer). She can browse and read text files when it helps.
+- **Images, both ways** — drag, paste, or attach images for her to see (a separate, configurable vision model describes them), and she can show you images she finds on the web.
+- **Long-term memory** — she remembers things about you and about herself across sessions, and can mark certain memories as *core* (protected forever). Non-core memories gently **decay and consolidate** over time so her mind stays uncluttered.
+- **Passthrough mode** — a transparent, always-on-top floating window (orb + controls + chat bubbles) so she can sit over whatever you're doing. Double-click her orb to collapse/expand the chat.
+- **Capability toggles** — turn any feature (notes, projects, calendar, files, images, web, themes, music) on or off in **Settings → Behavior**; switching one off removes that block from her prompt to save context and disable the feature.
 - **Live web & "watching" YouTube** — she can search the web mid-conversation, and she can *watch* a YouTube video by reading its transcript: paste a link and ask what's in it, or let her search, pick a video, and pull its transcript to react to it. Works on both the cloud and local model paths. (Most reliable when you hand her a direct link; the search-then-watch chain is best-effort and depends on a video having a transcript.)
 - **Themes** — pick a look (Default, Sky, Warm, Moody, Magma, Hearth) or fine-tune colors; she can re-skin the room or recolor her own sphere to match her mood, and you'll each know when the other changed it.
 - **Hearth** — a tabletop (D&D) mode. **See the caveat below.**
@@ -131,6 +138,41 @@ Everything lives in `.env` (see `.env.example` for the full list). Highlights:
 ## 🔒 Privacy
 
 Everything she remembers — her journal, her discoveries, your conversation history, and her memories of you — is stored **locally and unencrypted** in `~/.ai4me/`. Nothing is sent anywhere except your chosen LLM provider (and, if enabled, web searches she runs). It can get personal; that data is yours and stays on your machine. Delete `~/.ai4me/` to wipe her completely.
+
+---
+
+## 🎵 Tutorial: connecting Spotify
+
+Spotify is optional. Connect it and she can see your taste, play music, and build/grow playlists. It takes ~5 minutes to set up your own free Spotify developer app (this is just how Spotify lets a personal app talk to your account — you are not publishing anything).
+
+**Step 1 — Create a Spotify app.**
+Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), log in with your normal Spotify account, and click **Create app**.
+
+**Step 2 — Fill in the form.**
+- *App name* / *App description*: anything (e.g. "Ai4Me").
+- *Redirect URI*: this must be **exactly** — copy/paste it:
+  ```
+  http://127.0.0.1:7823/spotify/callback
+  ```
+  (It must match the port in your `SPOTIFY_REDIRECT_URI`. If you ever change the app's port, change it in both places.)
+- *Which API/SDKs are you planning to use?*: tick **Web API**.
+- Agree to the terms and **Save**.
+
+**Step 3 — Copy your credentials.**
+Open the app you just made → **Settings**. Copy the **Client ID**, and click **View client secret** to reveal the **Client secret**. Paste both into your `.env`:
+```ini
+SPOTIFY_CLIENT_ID=your_client_id_here
+SPOTIFY_CLIENT_SECRET=your_client_secret_here
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:7823/spotify/callback
+```
+
+**Step 4 — Connect.**
+Restart the app (`run.bat`), then go to **Settings → General → Connect Spotify**. Your browser opens Spotify's consent screen — approve it, and you'll be redirected back. The Behavior tab's **Music** toggle will show whether you're connected (and whether you're on Premium).
+
+**Good to know**
+- **Premium vs Free.** *Playback control* (play / pause / skip, and playing playlists) requires **Spotify Premium** and an active device (have the Spotify app open somewhere). *Reading your taste and building/growing playlists works on a free account.* She'll only see the playback controls in her prompt if you're on Premium, so she won't promise to play something she can't.
+- **You do NOT need "Extended Quota Mode."** Your app stays in Spotify's *Development Mode*, which is correct for personal use (it supports your own account plus a few others). Everything here — including adding tracks to playlists — works in Development Mode.
+- **Changed your scopes or it says "reconnect"?** Just Disconnect and reconnect in Settings → General; the consent screen re-grants everything.
 
 ---
 

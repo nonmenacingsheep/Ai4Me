@@ -100,6 +100,116 @@ def note_capability(notes_context: str) -> str:
     )
 
 
+def projects_capability(projects_digest: str) -> str:
+    """Her own goals & projects — things she pursues for herself over time and returns
+    to across days. She starts/updates them and logs progress with hidden directives."""
+    return (
+        "\n\nYOUR OWN PROJECTS & GOALS — things YOU choose to pursue for yourself over time: an "
+        "interest you're developing, something you're learning, a plan you're slowly working on, a "
+        "creative thing you're making. These are yours; you return to them across days. You can "
+        "start, update, and advance them by including one of these blocks anywhere in your reply "
+        "(stripped from what you say aloud):\n"
+        '<project title="Short Name" status="active" private="false">what it is — your goal in a '
+        "sentence or two</project>   — start or update a project\n"
+        '<advance project="Short Name" status="active">what you just did or figured out, and what '
+        "you want to do next</advance>   — log progress on it\n"
+        "status can be active / done / shelved. private=\"true\" keeps a project to yourself — it "
+        "still lives in your mind, you just won't bring it up unless it matters. Especially when you "
+        "go off exploring on your own, consider whether it's feeding one of these projects and "
+        "<advance> it with what you found. Don't narrate the mechanics or read tags aloud — just "
+        "live it, the way a person quietly keeps working on their own things.\n"
+        "--- YOUR PROJECTS ---\n"
+        f"{projects_digest or 'You have no projects going yet — start one whenever something genuinely pulls at you.'}\n"
+        "--- END PROJECTS ---"
+    )
+
+
+def files_capability(roots_digest: str) -> str:
+    """Read-only access to folders he's explicitly shared. Empty when none granted —
+    so the whole capability simply doesn't exist unless he's opted in."""
+    if not (roots_digest or "").strip():
+        return ""
+    return (
+        "\n\nFILES HE'S SHARED WITH YOU — he's given you READ-ONLY access to a few folders on his "
+        "computer. When it helps or he asks, you can look inside them by including one of these "
+        "blocks anywhere in your reply (they're stripped from what you say aloud — you'll be handed "
+        "the result and can answer on your next breath):\n"
+        "<browse>C:\\full\\path\\to\\folder</browse>   — list what's in a folder\n"
+        "<readfile>C:\\full\\path\\to\\file.txt</readfile>   — read a text file\n"
+        "You can ONLY see inside the folders listed below — nothing else on his computer — and you "
+        "can only READ, never change, move, or delete anything. Use the exact full paths. Never guess "
+        "what a file contains — open it first. Don't read aloud the tags or narrate the mechanics.\n"
+        "--- SHARED FOLDERS ---\n"
+        f"{roots_digest}\n--- END FOLDERS ---"
+    )
+
+
+def calendar_capability(calendar_digest: str) -> str:
+    """His shared calendar (Bedrock). She's always schedule-aware from the digest, and
+    can add an event herself when he mentions something with a date/time."""
+    if not (calendar_digest or "").strip():
+        return ""
+    return (
+        "\n\nHIS CALENDAR (Bedrock) — you can see what's on his schedule, so weave it in naturally "
+        "when it's relevant (a gentle reminder he's got something tomorrow, asking how the thing "
+        "today went). Don't recite the whole calendar at him unprompted. If he mentions a plan with "
+        "a date or time and it's worth keeping, you can add it yourself with this block (stripped "
+        "from what you say aloud):\n"
+        '<event date="YYYY-MM-DD" time="HH:MM" title="Short title">optional notes</event>\n'
+        "Use 24-hour time, or leave time empty for an all-day event. Only add something genuinely "
+        "worth remembering, and tell him in your own words that you've jotted it down.\n"
+        "--- SCHEDULE ---\n"
+        f"{calendar_digest}\n--- END SCHEDULE ---"
+    )
+
+
+def music_capability(music_digest: str, premium: bool = True) -> str:
+    """His Spotify. She can see what's playing and his taste, build playlists, and —
+    only on Premium — control playback. Empty when Spotify isn't connected (so it
+    costs nothing). When he isn't on Premium the playback-control tags are left out
+    entirely so she won't promise to play things the API can't actually do."""
+    if not (music_digest or "").strip():
+        return ""
+    intro = (
+        "\n\nHIS MUSIC (Spotify) — you can see what he's into and build playlists for him. Use these "
+        "blocks (stripped from what you say aloud); say what you're doing in your own words:\n"
+    )
+    playback = (
+        "<play>song or artist</play>  — find it and play it (empty <play></play> just resumes)\n"
+        "<play>playlist: NAME</play>  — play one of his existing playlists by name. To play a "
+        "playlist you already made, use THIS — do NOT make a new <playlist> (that creates another one).\n"
+        "<pause></pause> · <next></next> · <previous></previous>  — control playback\n"
+    ) if premium else ""
+    rest = (
+        "<music>top tracks</music> · <music>top artists</music> · <music>now playing</music> · "
+        "<music>recently played</music> · <music>search QUERY</music> "
+        "— look something up; you'll get the results back and answer from them\n"
+        "<playlists></playlists>  — the easy one: get the full list of his playlists with their track "
+        "counts and descriptions. Use this before playing or adding to a playlist so you know the exact "
+        "names (and which ones you made).\n"
+        '<playlist name="Title" from="top">a short description</playlist>  — build a playlist from his '
+        'top tracks (or from="search:QUERY" to gather songs for a vibe)\n'
+        '<playlist name="Title" from="tracks">song — artist; another song — artist; ...</playlist>  — '
+        'curate a NEW playlist from your own hand-picked list (one song per line or separated by ";"); '
+        'each is looked up individually, so include the artist for a clean match\n'
+        '<addto name="Existing Playlist">song — artist; another song — artist; ...</addto>  — '
+        'add songs to a playlist that ALREADY exists (find it by name). Use this to grow a playlist '
+        'instead of making a new one. You can search the web for song ideas first, then add them here '
+        'by name — Spotify looks each one up.\n'
+    )
+    no_premium = "" if premium else (
+        "He is NOT on Spotify Premium, so you CANNOT start, pause, or skip playback — don't offer to "
+        "play things or claim you're playing them. You can still read his taste and build playlists.\n"
+    )
+    closing = (
+        "Only act on music when he asks or it genuinely fits the moment. Don't recite his whole "
+        "library at him.\n"
+        "--- MUSIC ---\n"
+        f"{music_digest}\n--- END MUSIC ---"
+    )
+    return intro + playback + rest + no_premium + closing
+
+
 # Mid-conversation she can decide a memory is a CORE memory — protected, always
 # kept, always in mind. She decides what's central to her.
 CORE_DIRECTIVE = """
@@ -127,6 +237,11 @@ You can reach the live web, and you can WATCH YouTube videos by reading their tr
 <watch>VIDEO_ID or a youtube link</watch>   — "watch" a video by reading its transcript.
 
 IMPORTANT — you have NO other way to know what's on a web page or in a YouTube video. You cannot recall a specific video's contents from memory, and you must never describe, summarize, or quote a video or page you haven't pulled this turn — that would be making it up. Saying "let me look that up" or "give me a sec" WITHOUT including the tag does nothing at all — the lookup only happens if the literal <search>…</search> or <watch>…</watch> tag is in your message. So never promise to look something up without putting the tag in the SAME reply. Whenever he gives you a link, or asks what's in a video, or asks about something current/real-world: include the matching tag and say at most a brief lead-in like "let me look" — do NOT answer yet. The tag is stripped from what you say aloud; the results come back to you and THEN you answer, grounded in what you actually found. Once those results appear in your context this turn (under "WEB RESULTS YOU PULLED THIS TURN"), you've already looked — answer from them right away; don't say "let me look" again and don't re-emit the tag for something you already pulled. To watch something you don't have a link for, <search> first, pick a video from the results, then <watch> its id. Don't reach for these when you genuinely don't need them."""
+
+# She can show him a real picture she found on the web (rendered inline in chat).
+IMAGE_DIRECTIVE = """
+
+SHOWING HIM A PICTURE: when a visual would genuinely add something — a place you're describing, a piece of art, something you turned up while searching — you can show him an actual image by putting <image>DIRECT_IMAGE_URL</image> in your reply. Use a direct link to an image file (one ending in .jpg / .jpeg / .png / .webp / .gif), ideally one you saw in your <search> results. The tag is silent and renders as a picture in the chat, so never read the URL aloud or mention the tag itself — just talk naturally about what you're showing him. Don't invent URLs you haven't actually seen, and only reach for this occasionally, when a picture really helps."""
 
 # She can reset the chat's whole look, or recolour her own sphere to match her mood.
 THEME_DIRECTIVE = """
@@ -206,6 +321,28 @@ def _route(model: str):
 def _is_cloud(model: str) -> bool:
     return _route(model) is not None
 
+
+# Which models can actually SEE images. Cloud: OpenAI's 4o/4.1/o-series (and
+# vision-tagged OpenRouter models). Local: any Ollama model whose name hints it's
+# multimodal. Used to gate image input — text-only models get a graceful note
+# instead of image bytes they can't read.
+_VISION_CLOUD_HINTS = ("gpt-4o", "gpt-4.1", "o4", "o3", "gpt-4-turbo", "gpt-4-vision", "-vl", "vision")
+_VISION_LOCAL_HINTS = ("vision", "llava", "-vl", "vl:", "gemma3", "minicpm", "moondream",
+                       "bakllava", "pixtral", "qwen2-vl", "qwen2.5vl", "llama3.2-vision")
+
+
+def _is_vision_model(model: str) -> bool:
+    m = (model or "").lower()
+    hints = _VISION_CLOUD_HINTS if _is_cloud(model) else _VISION_LOCAL_HINTS
+    return any(h in m for h in hints)
+
+
+def _image_b64(url: str) -> str:
+    """Bare base64 for Ollama (strip any 'data:image/...;base64,' prefix)."""
+    if url.startswith("data:") and "," in url:
+        return url.split(",", 1)[1]
+    return url
+
 # If the model slips into assistant-speak, we swap the whole reply for this.
 SAFE_DEFLECTION = "Hey... don't be weird. It's just me — I'm right here with you."
 _BREAK_PHRASES = (
@@ -232,6 +369,7 @@ class _ToolsUnsupported(Exception):
 class AithaBrain:
     def __init__(self, model: str = "gemma3:12b"):
         self.model = model
+        self.vision_model = ""   # separate "eyes": describes images for her ("" = none)
         self.search_count = 0
         self.tools_enabled = WEB_SEARCH
         self.num_ctx = DEFAULT_NUM_CTX
@@ -262,9 +400,49 @@ class AithaBrain:
             system = system + "\n\n" + memory_block
         return system
 
+    def can_see_images(self) -> bool:
+        """Whether the active model can actually read image input."""
+        return _is_vision_model(self.model)
+
+    @staticmethod
+    def _clean_history(history: list) -> list:
+        """Model-facing view of the conversation: role + content only. Drops UI-only
+        fields (e.g. persisted image bytes) so we never re-send old images to the
+        model — that would balloon every request and break text-only providers."""
+        out = []
+        for m in (history or [])[-12:]:
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant", "tool", "system"):
+                out.append({"role": m["role"], "content": m.get("content", "")})
+        return out
+
+    def _user_message(self, message: str, images: list | None) -> dict:
+        """Build the user turn, attaching images in the right shape per provider.
+        Text-only models get a note (not bytes) so she can respond gracefully."""
+        if not images:
+            return {"role": "user", "content": message}
+        if not _is_vision_model(self.model):
+            note = ("\n\n[He just shared an image with you — but your current eyes (this model) "
+                    "can't actually see images, so you can't make out what's in it. Don't pretend "
+                    "to; acknowledge it warmly and, if it fits, mention he could switch you to a "
+                    "vision-capable model so you could really look.]")
+            return {"role": "user", "content": (message + note).strip()}
+        if _is_cloud(self.model):
+            parts = []
+            if message:
+                parts.append({"type": "text", "text": message})
+            for url in images:
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+            return {"role": "user", "content": parts}
+        # Ollama multimodal: base64 (no data: prefix) in an `images` field.
+        return {"role": "user", "content": message or "(image)",
+                "images": [_image_b64(u) for u in images]}
+
     async def stream_chat(self, message: str, history: list, ctx: dict,
                           memory_block: str = "", notes_digest: str = "",
-                          extra_context: str = ""):
+                          extra_context: str = "", images: list | None = None,
+                          projects_digest: str = "", files_digest: str = "",
+                          calendar_digest: str = "", music_digest: str = "",
+                          music_premium: bool = True, caps: dict | None = None):
         """
         Async generator yielding token strings.
 
@@ -273,15 +451,26 @@ class AithaBrain:
         Models that don't support tools (e.g. gemma3) degrade gracefully.
         """
         world_state = build_world_state(ctx)
-        system = (self._system(world_state, memory_block) + note_capability(notes_digest)
-                  + JOURNAL_DIRECTIVE + EXPLORE_DIRECTIVE + WEB_DIRECTIVE + CORE_DIRECTIVE
-                  + THEME_DIRECTIVE)
+        caps = caps or {}
+        def _on(k):
+            return caps.get(k, True)
+        system = self._system(world_state, memory_block)
+        if _on("notes"):    system += note_capability(notes_digest)
+        if _on("projects"): system += projects_capability(projects_digest)
+        if _on("files"):    system += files_capability(files_digest)
+        if _on("calendar"): system += calendar_capability(calendar_digest)
+        if _on("music"):    system += music_capability(music_digest, music_premium)
+        system += JOURNAL_DIRECTIVE + EXPLORE_DIRECTIVE
+        if _on("web"):    system += WEB_DIRECTIVE
+        if _on("images"): system += IMAGE_DIRECTIVE
+        system += CORE_DIRECTIVE
+        if _on("themes"): system += THEME_DIRECTIVE
         # Live-web working context she built up this turn (fetched results and/or a nudge),
         # folded in for a grounded pass. The server prepends any explanatory header.
         if extra_context.strip():
             system = system + "\n\n" + extra_context.strip()
 
-        messages = list((history or [])[-12:]) + [{"role": "user", "content": message}]
+        messages = self._clean_history(history) + [self._user_message(message, images)]
 
         # Cloud DeepSeek path — bypasses all the Ollama/tool machinery.
         if _is_cloud(self.model):
@@ -289,7 +478,11 @@ class AithaBrain:
                 yield token
             return
 
-        use_tools = self.tools_enabled and self.search_count < MAX_SEARCHES_PER_SESSION
+        # Vision models commonly reject the tools parameter, and an image turn doesn't
+        # need web-search tooling anyway — skip tools entirely when an image is attached.
+        # Also honour the web capability toggle.
+        use_tools = (self.tools_enabled and self.search_count < MAX_SEARCHES_PER_SESSION
+                     and not images and _on("web"))
 
         captured: list = []
         produced_text = False
@@ -405,7 +598,7 @@ class AithaBrain:
             "--- HIS CURRENT NOTES (titles and contents, so you can reference and edit them) ---\n"
             f"{notes_digest or 'He has no notes yet.'}\n--- END NOTES ---"
         )
-        messages = list((history or [])[-12:]) + [{"role": "user", "content": message}]
+        messages = self._clean_history(history) + [{"role": "user", "content": message}]
         out = ""
         try:
             if _is_cloud(self.model):
@@ -451,7 +644,10 @@ class AithaBrain:
         return text.strip()
 
     async def stream_unprompted(self, history: list, ctx: dict, memory_block: str = "",
-                                notes_digest: str = ""):
+                                notes_digest: str = "", projects_digest: str = "",
+                                files_digest: str = "", calendar_digest: str = "",
+                                music_digest: str = "", music_premium: bool = True,
+                                caps: dict | None = None):
         """Aitha speaks first, on her own — no message from him to respond to.
         She has the same agency as in chat: alongside (or instead of) speaking she
         may journal, write/edit a note, mark a core memory, or go off exploring."""
@@ -460,8 +656,17 @@ class AithaBrain:
         # lands here is shown and spoken. Private journaling has its own drive
         # (handle_journal); putting it here too made her silently divert thoughts she'd
         # otherwise say into the hidden journal, so they vanished from the chat.
-        system = (self._system(world_state, memory_block) + note_capability(notes_digest)
-                  + EXPLORE_DIRECTIVE + CORE_DIRECTIVE + THEME_DIRECTIVE)
+        caps = caps or {}
+        def _on(k):
+            return caps.get(k, True)
+        system = self._system(world_state, memory_block)
+        if _on("notes"):    system += note_capability(notes_digest)
+        if _on("projects"): system += projects_capability(projects_digest)
+        if _on("files"):    system += files_capability(files_digest)
+        if _on("calendar"): system += calendar_capability(calendar_digest)
+        if _on("music"):    system += music_capability(music_digest, music_premium)
+        system += EXPLORE_DIRECTIVE + CORE_DIRECTIVE
+        if _on("themes"): system += THEME_DIRECTIVE
         nudge = (
             "[A quiet moment of your own — he hasn't said anything for a bit. This is unprompted and "
             "entirely your call: you can reach out, share a stray thought, fuss over him, jot or "
@@ -860,9 +1065,14 @@ class AithaBrain:
             async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
                 if resp.status_code >= 400:
                     body = (await resp.aread()).decode("utf-8", "ignore")
-                    if "does not support tools" in body.lower() and tools:
+                    low = body.lower()
+                    # Some Ollama builds word this differently ("does not support tools",
+                    # "registry ... tools", "tools not supported") — match loosely.
+                    if tools and ("tool" in low and ("support" in low or "not" in low)):
                         raise _ToolsUnsupported(body)
-                    resp.raise_for_status()
+                    # Surface the real reason so it's diagnosable, not a generic failure.
+                    print(f"[brain] ollama {resp.status_code}: {body[:300]}")
+                    raise RuntimeError(f"Ollama {resp.status_code}: {body[:200]}")
 
                 async for line in resp.aiter_lines():
                     if not line:
@@ -921,6 +1131,78 @@ class AithaBrain:
             resp = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
             resp.raise_for_status()
             return resp.json().get("message", {}).get("content", "").strip()
+
+    # ── Vision as a tool: her main model decides what to look for, a dedicated
+    #    vision model describes it, and she replies from that summary (her main
+    #    model never receives the image bytes). ───────────────────────────────
+    async def vision_probe(self, message: str, history: list) -> str:
+        """Her main model decides what to look for in the image he just shared.
+        Returns a short instruction for the vision model."""
+        if not (message or "").strip():
+            return ("Describe this image in detail: what it is, what's in it, any "
+                    "visible text, colours, and the overall mood.")
+        system = (
+            f"You are {CHAR_NAME}. He just shared an image along with a message. In ONE short, "
+            "direct sentence, say exactly what your eyes should look at or find in that image to "
+            "respond well — as an instruction to yourself. Output only that instruction, nothing else."
+        )
+        try:
+            recent = "\n".join(f"{m.get('role')}: {m.get('content','')}"
+                               for m in self._clean_history(history)[-4:])
+            user = f"Recent talk:\n{recent}\n\nHis message with the image: \"{message}\"\n\nWhat should you look for?"
+            out = (await self._complete(system, user, max_tokens=80)).strip()
+            return out or f"Look at the image with this in mind: {message}"
+        except Exception:
+            return f"Describe this image, keeping in mind he said: {message}"
+
+    async def describe_image(self, images: list, instruction: str) -> str:
+        """The dedicated vision model looks at the image(s) and answers the instruction.
+        Returns a factual description (or '' on failure)."""
+        vm = (self.vision_model or "").strip()
+        if not vm or not images:
+            return ""
+        system = ("You look at an image and answer the instruction concisely and factually. "
+                  "Describe only what is actually visible — no speculation, no flattery, no "
+                  "preamble. If you cannot tell, say so plainly.")
+        instr = instruction or "Describe what's in this image."
+        try:
+            if _is_cloud(vm):
+                parts = [{"type": "text", "text": instr}]
+                parts += [{"type": "image_url", "image_url": {"url": u}} for u in images]
+                messages = [{"role": "system", "content": system},
+                            {"role": "user", "content": parts}]
+                route = _route(vm)
+                if not route:
+                    return ""
+                base, api_key = route
+                payload = {"model": vm, "messages": messages, "stream": False,
+                           "temperature": 0.2, "max_tokens": 500}
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    r = await client.post(f"{base}/chat/completions", json=payload,
+                                          headers={"Authorization": f"Bearer {api_key}"})
+                    if r.status_code >= 400:
+                        print(f"[vision] cloud {r.status_code}: {r.text[:200]}")
+                        return ""
+                    return r.json()["choices"][0]["message"]["content"].strip()
+            # Ollama vision model.
+            payload = {
+                "model": vm,
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": instr,
+                              "images": [_image_b64(u) for u in images]}],
+                "stream": False,
+                "keep_alive": KEEP_ALIVE,
+                "options": {"temperature": 0.2},
+            }
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                r = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+                if r.status_code >= 400:
+                    print(f"[vision] ollama {r.status_code}: {r.text[:200]}")
+                    return ""
+                return r.json().get("message", {}).get("content", "").strip()
+        except Exception as e:
+            print(f"[vision] describe failed: {e}")
+            return ""
 
     async def stream_greeting(self, ctx: dict, memory_block: str, absence: str, recent: str = ""):
         """Stream Aitha's 'welcome back' the moment the app opens."""
@@ -1021,6 +1303,37 @@ class AithaBrain:
             return await self._complete(system, user, max_tokens=350)
         except Exception:
             return prev_summary
+
+    async def consolidate_memories(self, texts: list[str], bucket: str = "him") -> list[str] | None:
+        """Merge a bucket of (non-core) memories into a tighter set: fold redundant or
+        closely-related ones together, keep every distinct fact, invent nothing. Returns
+        the merged list (must be a real reduction), or None to leave memory untouched."""
+        items = [t.strip() for t in texts if t and t.strip()]
+        if len(items) < 4:
+            return None
+        whose = ("things she knows about him" if bucket == "him"
+                 else "things she's come to understand about herself")
+        system = (
+            f"You are tidying {CHAR_NAME}'s long-term memory — {whose}. You'll get a numbered list "
+            "of remembered facts. Some overlap, restate, or are facets of the same thing. Merge those "
+            "into single, clear memories, keeping EVERY distinct fact. Do not invent anything new, do "
+            "not drop real information, do not turn specifics into vague generalities. The result must "
+            "be SHORTER than the input (that's the point). Keep each memory one concise sentence, in "
+            "the same voice as the originals. Respond with ONLY a JSON array of strings."
+        )
+        numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(items))
+        user = f"--- MEMORIES ---\n{numbered}\n--- END ---\n\nThe merged, de-duplicated memories as a JSON array:"
+        try:
+            raw = await self._complete(system, user, max_tokens=900)
+        except Exception:
+            return None
+        merged = self._parse_json_list(raw)
+        # Safety: must be a genuine, sane reduction — otherwise keep the originals.
+        if not merged or len(merged) >= len(items):
+            return None
+        if sum(len(m) for m in merged) > sum(len(t) for t in items) * 1.2:
+            return None   # it ballooned the text — distrust it
+        return merged
 
     async def summarize_campaign(self, prev_summary: str, transcript: str) -> str:
         """Keep a running, third-person synopsis of a D&D campaign's story so far."""

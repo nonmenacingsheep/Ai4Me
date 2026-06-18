@@ -25,6 +25,10 @@ from context import (
 )
 import memory as mem_store
 import notes as notes_store
+import projects as projects_store
+import files as files_store
+import events as events_store
+import spotify as spotify_store
 import settings_store
 import dnd as dnd_store
 from tts import engine as tts
@@ -49,6 +53,18 @@ MAX_NOTE_FETCH = int(os.getenv("AITHA_MAX_NOTE_FETCH", "2"))
 # How many live-web fetches (<search> / <watch>) she may chain in one turn before she
 # must answer with what she's gathered — bounds token spend and fetch loops.
 MAX_WEB_FETCH = int(os.getenv("AITHA_MAX_WEB_FETCH", "3"))
+# How many local file/folder reads (<browse> / <readfile>) she may chain in one turn.
+MAX_FILE_FETCH = int(os.getenv("AITHA_MAX_FILE_FETCH", "4"))
+# How many music lookups (<music>) she may chain in one turn.
+MAX_MUSIC_FETCH = int(os.getenv("AITHA_MAX_MUSIC_FETCH", "3"))
+
+# Memory upkeep (runs in her idle loop). Decay-pruning is cheap and runs hourly;
+# the LLM consolidation pass is gated: only when he's been away a while, only every
+# few hours, and only once a bucket has enough non-core memories to be worth tidying.
+MEM_DECAY_EVERY = int(os.getenv("AITHA_MEM_DECAY_EVERY", str(3600)))          # 1h
+MEM_CONSOLIDATE_EVERY = int(os.getenv("AITHA_MEM_CONSOLIDATE_EVERY", str(6 * 3600)))  # 6h
+MEM_CONSOLIDATE_MIN = int(os.getenv("AITHA_MEM_CONSOLIDATE_MIN", "70"))       # non-core count
+MEM_AWAY_SECONDS = int(os.getenv("AITHA_MEM_AWAY", str(600)))                 # "he's idle"
 
 # Prepended to her context once she's actually fetched something, so she reads the
 # results right (a search is just pointers; a transcript is the real video contents).
@@ -125,6 +141,7 @@ def settings_payload() -> dict:
         "current": settings,
         "options": {
             "models": settings_store.list_models(),
+            "vision_models": settings_store.list_vision_models(),
             "voices": settings_store.KOKORO_VOICES,
             "devices": settings_store.list_output_devices(),
         },
@@ -139,6 +156,18 @@ async def apply_settings(new: dict) -> dict:
             changed_model = True
         settings["model"] = new["model"]
         brain.model = new["model"]
+    if "vision_model" in new:
+        settings["vision_model"] = (new["vision_model"] or "").strip()
+        brain.vision_model = settings["vision_model"]
+    if "file_roots" in new and isinstance(new["file_roots"], list):
+        # Keep only valid directories; store the resolved, deduped set.
+        settings["file_roots"] = files_store.set_roots(new["file_roots"])
+    if "capabilities" in new and isinstance(new["capabilities"], dict):
+        cur = settings.get("capabilities") or settings_store.default_capabilities()
+        for k in settings_store.default_capabilities():
+            if k in new["capabilities"]:
+                cur[k] = bool(new["capabilities"][k])
+        settings["capabilities"] = cur
     if "num_ctx" in new:
         try:
             ctx = max(2048, min(32768, int(new["num_ctx"])))
@@ -237,8 +266,11 @@ async def lifespan(app: FastAPI):
     global brain, memory, settings
     settings = settings_store.load()
     settings["behavior"] = settings_store.get_behavior()  # normalize/fill sub-keys
+    settings["capabilities"] = settings_store.get_capabilities()
     brain = AithaBrain(model=settings["model"])
     brain.num_ctx = settings["num_ctx"]
+    brain.vision_model = settings.get("vision_model", "")
+    settings["file_roots"] = files_store.set_roots(settings.get("file_roots", []))
     brain_set_name(settings.get("char_name", "Aitha"))
     tts.enabled = settings["tts_enabled"]
     tts.voice = settings["tts_voice"]
@@ -394,6 +426,7 @@ async def api_mind():
 
     journal = await asyncio.to_thread(_parse_journal)
     discoveries = await asyncio.to_thread(_parse_discoveries)
+    projects = await asyncio.to_thread(projects_store.view)
     async with _memory_lock:
         core_him = [f["text"] for f in memory.get("facts", []) if f.get("core")]
         core_self = [f["text"] for f in memory.get("self_facts", []) if f.get("core")]
@@ -403,6 +436,7 @@ async def api_mind():
         "orb": theme_state.get("orb"),
         "journal": journal,
         "discoveries": discoveries,
+        "projects": projects,
         "core": {"self": core_self, "him": core_him},
     }
 
@@ -435,6 +469,95 @@ async def api_put_note(title: str, req: Request):
 @app.delete("/api/notes/{title}")
 async def api_delete_note(title: str):
     return {"ok": notes_store.delete_note(title)}
+
+
+# ─── Calendar (Bedrock) API ──────────────────────────────────────────────
+@app.get("/api/calendar")
+async def api_calendar(year: int | None = None, month: int | None = None):
+    import datetime as _dt
+    now = _dt.date.today()
+    y, m = year or now.year, month or now.month
+    return {
+        "today": now.isoformat(),
+        "year": y,
+        "month": m,
+        "events": await asyncio.to_thread(events_store.for_month, y, m),
+        "upcoming": await asyncio.to_thread(events_store.upcoming),
+    }
+
+
+@app.post("/api/calendar/add")
+async def api_calendar_add(req: Request):
+    body = await req.json()
+    ev = await asyncio.to_thread(
+        events_store.add, body.get("date", ""), body.get("title", ""),
+        body.get("time", ""), body.get("notes", ""),
+    )
+    if ev:
+        await broadcast({"type": "calendar_changed"})
+    return {"ok": bool(ev), "event": ev}
+
+
+@app.post("/api/calendar/delete")
+async def api_calendar_delete(req: Request):
+    body = await req.json()
+    ok = await asyncio.to_thread(events_store.delete, body.get("id", ""))
+    if ok:
+        await broadcast({"type": "calendar_changed"})
+    return {"ok": ok}
+
+
+# ─── Spotify (music) ─────────────────────────────────────────────────────
+from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
+
+
+@app.get("/spotify/login")
+async def spotify_login():
+    if not spotify_store.is_configured():
+        return HTMLResponse("<h2>Spotify isn't configured.</h2><p>Set SPOTIFY_CLIENT_ID / "
+                            "SPOTIFY_CLIENT_SECRET in .env and restart.</p>")
+    return RedirectResponse(spotify_store.auth_url(state="ai4me"))
+
+
+@app.get("/spotify/callback")
+async def spotify_callback(code: str | None = None, error: str | None = None):
+    if error or not code:
+        return HTMLResponse(f"<h2>Spotify connection cancelled.</h2><p>{error or ''}</p>")
+    ok = await asyncio.to_thread(spotify_store.exchange_code, code)
+    if ok:
+        await broadcast({"type": "spotify_changed"})
+        return HTMLResponse(
+            "<body style='font-family:Inter,sans-serif;background:#07070e;color:#e2e8f0;"
+            "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
+            "<div style='text-align:center'><h2>Spotify connected ✓</h2>"
+            "<p>You can close this tab and head back to Aitha.</p></div></body>")
+    return HTMLResponse("<h2>Couldn't connect Spotify.</h2><p>Check the credentials and try again.</p>")
+
+
+@app.get("/api/spotify/status")
+async def api_spotify_status():
+    return await asyncio.to_thread(spotify_store.status_summary)
+
+
+@app.post("/api/spotify/disconnect")
+async def api_spotify_disconnect():
+    await asyncio.to_thread(spotify_store.disconnect)
+    await broadcast({"type": "spotify_changed"})
+    return {"ok": True}
+
+
+@app.post("/api/spotify/control")
+async def api_spotify_control(req: Request):
+    """Playback controls for the now-playing widget (play/pause/next/previous)."""
+    body = await req.json()
+    action = (body.get("action") or "").lower()
+    fn = {"play": spotify_store.play, "pause": spotify_store.pause,
+          "next": spotify_store.next_track, "previous": spotify_store.previous_track}.get(action)
+    if not fn:
+        return {"ok": False, "error": "unknown action"}
+    res = await asyncio.to_thread(fn)
+    await broadcast({"type": "spotify_changed"})
+    return res
 
 
 @app.post("/api/notes/assist")
@@ -998,6 +1121,158 @@ _DELETE_DIRECTIVE = _re.compile(r'<deletenote\s*>(.*?)</deletenote\s*>', _re.S |
 _CORE_DIRECTIVE = _re.compile(
     rf'<core(?:\s+kind\s*=\s*[{_Q}]?(him|self)[{_Q}]?)?\s*>(.*?)</core\s*>', _re.S | _re.I
 )
+# Her own projects: <project title="X" status="active" private="false">about</project>
+_PROJECT_DIRECTIVE = _re.compile(
+    rf'<project\s+title\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+status\s*=\s*[{_Q}]?(active|done|shelved)[{_Q}]?)?'
+    rf'(?:\s+private\s*=\s*[{_Q}]?(true|false|yes|no)[{_Q}]?)?\s*>'
+    r'(.*?)</project\s*>', _re.S | _re.I,
+)
+# Progress on one: <advance project="X" status="active">what happened / next</advance>
+_ADVANCE_DIRECTIVE = _re.compile(
+    rf'<advance\s+project\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+status\s*=\s*[{_Q}]?(active|done|shelved)[{_Q}]?)?\s*>'
+    r'(.*?)</advance\s*>', _re.S | _re.I,
+)
+
+
+# An event she adds: <event date="YYYY-MM-DD" time="HH:MM" title="X">notes</event>
+_EVENT_DIRECTIVE = _re.compile(
+    rf'<event\s+date\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+time\s*=\s*[{_Q}]?([0-9:apmAPM\s]*)[{_Q}]?)?'
+    rf'\s+title\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]\s*>'
+    r'(.*?)</event\s*>', _re.S | _re.I,
+)
+
+
+def apply_event_directives(raw: str) -> list[str]:
+    """Add any <event> blocks she emitted to the calendar. Returns titles added."""
+    added: list[str] = []
+    for m in _EVENT_DIRECTIVE.finditer(raw or ""):
+        ev = events_store.add(m.group(1).strip(), m.group(3).strip(),
+                              (m.group(2) or "").strip(), m.group(4).strip())
+        if ev:
+            added.append(ev["title"])
+    return added
+
+
+# A playlist she builds: <playlist name="X" from="top|search:QUERY">desc</playlist>
+_PLAYLIST_DIRECTIVE = _re.compile(
+    rf'<playlist\s+name\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+from\s*=\s*[{_Q}]?([^{_Q}>]*)[{_Q}]?)?\s*>'
+    r'(.*?)</playlist\s*>', _re.S | _re.I,
+)
+
+# Add songs to an existing playlist: <addto name="X">song; song</addto>
+_ADDTO_DIRECTIVE = _re.compile(
+    rf'<addto\s+name\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]\s*>'
+    r'(.*?)</addto\s*>', _re.S | _re.I,
+)
+
+
+def apply_music_actions(actions: list, playlist_raw: str, addto_raw: str = "") -> list[str]:
+    """Run her playback controls, playlist builds, and adds-to-existing. Returns short
+    result notes (for logging / debug). Runs in a thread (network IO)."""
+    notes: list[str] = []
+    for action, arg in actions:
+        if action == "play":
+            # "playlist: NAME" plays one of his playlists; otherwise play a track.
+            if arg.lower().startswith("playlist:"):
+                res = spotify_store.play_playlist(arg.split(":", 1)[1])
+            else:
+                res = spotify_store.play(query=arg)
+        elif action == "pause":
+            res = spotify_store.pause()
+        elif action == "next":
+            res = spotify_store.next_track()
+        elif action == "previous":
+            res = spotify_store.previous_track()
+        else:
+            continue
+        notes.append(f"{action}: {res.get('error') or res.get('now') or 'ok'}")
+    for m in _PLAYLIST_DIRECTIVE.finditer(playlist_raw or ""):
+        name = m.group(1).strip()
+        src = (m.group(2) or "top").strip().lower()
+        desc = m.group(3).strip()
+        if src == "tracks":
+            # desc holds the curated list: one song per line and/or semicolon-separated.
+            songs = [s.strip() for s in _re.split(r"[\n;]+", desc) if s.strip()]
+            res = spotify_store.create_playlist_from_tracks(name, songs)
+        elif src.startswith("search:"):
+            res = spotify_store.create_playlist_from_search(name, src.split(":", 1)[1].strip(), desc)
+        else:
+            res = spotify_store.create_playlist_from_top(name=name, description=desc)
+        note = res.get("error") or ("created " + str(res.get("count", "")) + " tracks")
+        if res.get("missed"):
+            note += f" (couldn't find: {', '.join(res['missed'])})"
+        notes.append(f"playlist '{name}': {note}")
+    for m in _ADDTO_DIRECTIVE.finditer(addto_raw or ""):
+        name = m.group(1).strip()
+        songs = [s.strip() for s in _re.split(r"[\n;]+", m.group(2)) if s.strip()]
+        res = spotify_store.add_tracks_to_playlist(name, songs)
+        note = res.get("error") or ("added " + str(res.get("count", "")) + " tracks")
+        if res.get("missed"):
+            note += f" (couldn't find: {', '.join(res['missed'])})"
+        notes.append(f"addto '{name}': {note}")
+    return notes
+
+
+def music_lookup(query: str) -> str:
+    """Resolve a <music> read request into a text block she can answer from."""
+    q = (query or "").strip().lower()
+    def _tracks(items):
+        return "\n".join(f"{i+1}. {spotify_store._fmt_track(t)}" for i, t in enumerate(items)) or "(none)"
+    if q.startswith("top track"):
+        return "[HIS TOP TRACKS]\n" + _tracks(spotify_store.top_tracks(limit=10))
+    if q.startswith("top artist"):
+        arts = spotify_store.top_artists(limit=10)
+        return "[HIS TOP ARTISTS]\n" + ("\n".join(f"{i+1}. {a.get('name','')}" for i, a in enumerate(arts)) or "(none)")
+    if q.startswith("now playing") or q == "current":
+        np = spotify_store.now_playing()
+        return "[NOW PLAYING]\n" + (np["text"] if np else "(nothing playing)")
+    if q.startswith("recently"):
+        return "[RECENTLY PLAYED]\n" + _tracks(spotify_store.recently_played(limit=10))
+    if q.startswith("my playlist") or q == "playlists":
+        pls = spotify_store.my_playlists(limit=50)
+        lines = []
+        for p in pls:
+            # Feb-2026 API renamed the playlist's track-count field tracks->items.
+            cnt = (p.get("items") or p.get("tracks") or {}).get("total")
+            desc = (p.get("description") or "").strip()
+            line = f"- {p.get('name','')}" + (f" ({cnt} tracks)" if cnt is not None else "")
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+        return "[HIS PLAYLISTS]\n" + ("\n".join(lines) or "(none)")
+    if q.startswith("search"):
+        term = query.split(" ", 1)[1] if " " in query else ""
+        return f"[SEARCH: {term}]\n" + _tracks(spotify_store.search_tracks(term, limit=5))
+    # default: treat the whole thing as a search
+    return f"[SEARCH: {query}]\n" + _tracks(spotify_store.search_tracks(query, limit=5))
+
+
+def apply_project_directives(project_raw: str, advance_raw: str) -> list[str]:
+    """Apply her <project>/<advance> blocks against the project store. Returns the
+    titles touched. Runs in a thread (file IO)."""
+    changed: list[str] = []
+    for m in _PROJECT_DIRECTIVE.finditer(project_raw or ""):
+        title = m.group(1).strip()
+        status = (m.group(2) or "").lower() or None
+        priv = m.group(3)
+        private = None if priv is None else priv.lower() in ("true", "yes")
+        about = m.group(4).strip()
+        if title:
+            p, _ = projects_store.upsert(title, about=about or None, status=status, private=private)
+            changed.append(p["title"])
+    for m in _ADVANCE_DIRECTIVE.finditer(advance_raw or ""):
+        key = m.group(1).strip()
+        status = (m.group(2) or "").lower() or None
+        note = m.group(3).strip()
+        if key:
+            p = projects_store.advance(key, note, status=status)
+            if p:
+                changed.append(p["title"])
+    return changed
 
 
 def apply_note_directives(raw: str) -> tuple[str, list[str]]:
@@ -1048,7 +1323,32 @@ _HIDDEN_SPECS = [
     ("forget", "<forget>", "</forget>", False),        # let go of a memory (delete it)
     ("theme", "<theme>", "</theme>", False),           # change the chat theme preset
     ("orb", "<orb>", "</orb>", False),                 # set her sphere colour (mood)
+    ("image", "<image>", "</image>", False),           # show him a picture she found (url)
+    ("project", "<project", "</project>", True),       # start/update one of her own projects
+    ("advance", "<advance", "</advance>", True),       # log progress on a project
+    ("browse", "<browse>", "</browse>", False),        # list a shared folder
+    ("readfile", "<readfile>", "</readfile>", False),  # read a shared text file
+    ("event", "<event", "</event>", True),             # add an event to his calendar
+    ("play", "<play>", "</play>", False),              # play/resume music
+    ("pause", "<pause>", "</pause>", False),           # pause music
+    ("next", "<next>", "</next>", False),              # skip to next track
+    ("previous", "<previous>", "</previous>", False),  # previous track
+    ("music", "<music>", "</music>", False),           # look up music info
+    ("playlists", "<playlists>", "</playlists>", False),  # easy: list his playlists + descriptions
+    ("playlist", "<playlist", "</playlist>", True),    # build a playlist
+    ("addto", "<addto", "</addto>", True),             # add songs to an existing playlist
 ]
+
+
+def _safe_image_url(url: str) -> str:
+    """Accept only plain http(s) image URLs she could have found on the web.
+    Returns the cleaned URL, or '' if it's not something safe to render."""
+    url = (url or "").strip().strip("<>\"' ")
+    if not url.lower().startswith(("http://", "https://")):
+        return ""
+    if len(url) > 2048 or any(c in url for c in (" ", "\n", "\t", '"', "'", "<", ">")):
+        return ""
+    return url
 
 
 class _HiddenBlockFilter:
@@ -1168,6 +1468,54 @@ class _HiddenBlockFilter:
     def orb_requests(self) -> list[str]:
         """Orb colours she set this turn (hex or colour word; last one wins)."""
         return [t.strip() for n, t in self.captured if n == "orb" and t.strip()]
+
+    def image_requests(self) -> list[str]:
+        """Image URLs she chose to show him this turn."""
+        return [t.strip() for n, t in self.captured if n == "image" and t.strip()]
+
+    def project_blocks(self) -> str:
+        """Raw <project> blocks she emitted (start/update her own projects)."""
+        return "".join(t for n, t in self.captured if n == "project")
+
+    def advance_blocks(self) -> str:
+        """Raw <advance> blocks she emitted (progress on a project)."""
+        return "".join(t for n, t in self.captured if n == "advance")
+
+    def browse_requests(self) -> list[str]:
+        """Folder paths she asked to list this turn."""
+        return [t.strip() for n, t in self.captured if n == "browse" and t.strip()]
+
+    def readfile_requests(self) -> list[str]:
+        """File paths she asked to read this turn."""
+        return [t.strip() for n, t in self.captured if n == "readfile" and t.strip()]
+
+    def event_blocks(self) -> str:
+        """Raw <event> blocks she emitted (calendar events to add)."""
+        return "".join(t for n, t in self.captured if n == "event")
+
+    def music_requests(self) -> list[str]:
+        """Music lookups she asked for this turn (top tracks, search …)."""
+        return [t.strip() for n, t in self.captured if n == "music" and t.strip()]
+
+    def playlists_requested(self) -> bool:
+        """She emitted the easy <playlists> tag (list his playlists + descriptions)."""
+        return any(n == "playlists" for n, _ in self.captured)
+
+    def playback_actions(self) -> list[tuple[str, str]]:
+        """Playback control actions she emitted: (action, arg). arg used for <play>."""
+        out = []
+        for n, t in self.captured:
+            if n in ("play", "pause", "next", "previous"):
+                out.append((n, t.strip()))
+        return out
+
+    def playlist_blocks(self) -> str:
+        """Raw <playlist> blocks she emitted (build a playlist)."""
+        return "".join(t for n, t in self.captured if n == "playlist")
+
+    def addto_blocks(self) -> str:
+        """Raw <addto> blocks she emitted (add songs to an existing playlist)."""
+        return "".join(t for n, t in self.captured if n == "addto")
 
 
 @app.post("/api/magma_chat")
@@ -1290,6 +1638,8 @@ async def ws_endpoint(websocket: WebSocket):
     pending_exchanges: list[tuple[str, str]] = []  # awaiting a batched memory commit
     current_task: asyncio.Task | None = None
     proactive_task: asyncio.Task | None = None
+    last_mem_decay_ts: float = 0.0       # last time faded memories were pruned
+    last_mem_consolidate_ts: float = time.time()  # last LLM consolidation (don't run right away)
 
     async def append_journal(entry: str):
         """Append a timestamped entry to her journal note (no-op if empty)."""
@@ -1333,7 +1683,8 @@ async def ws_endpoint(websocket: WebSocket):
         await websocket.send_json({
             "type": "history",
             "messages": [
-                {"role": m["role"], "content": m["content"]}
+                {"role": m["role"], "content": m["content"],
+                 **({"images": m["images"]} if m.get("images") else {})}
                 for m in conversation if m.get("role") in ("user", "assistant")
             ],
         })
@@ -1414,6 +1765,42 @@ async def ws_endpoint(websocket: WebSocket):
             else:
                 print(f"[notes] unparsed note block: {note_blocks!r}")
 
+        # Her own goals/projects she started or advanced this turn.
+        proj_raw, adv_raw = hfilter.project_blocks(), hfilter.advance_blocks()
+        if proj_raw or adv_raw:
+            touched = await asyncio.to_thread(apply_project_directives, proj_raw, adv_raw)
+            if touched:
+                await broadcast({"type": "projects_changed", "titles": touched})
+            else:
+                print(f"[projects] unparsed block: {proj_raw or adv_raw!r}")
+
+        # Calendar events she jotted down for him.
+        event_raw = hfilter.event_blocks()
+        if event_raw:
+            added = await asyncio.to_thread(apply_event_directives, event_raw)
+            if added:
+                await broadcast({"type": "calendar_changed", "titles": added})
+            else:
+                print(f"[calendar] unparsed event block: {event_raw!r}")
+
+        # Music: playback controls + playlist builds + adds-to-existing she ran this turn.
+        actions, playlist_raw = hfilter.playback_actions(), hfilter.playlist_blocks()
+        addto_raw = hfilter.addto_blocks()
+        if actions or playlist_raw or addto_raw:
+            res = await asyncio.to_thread(apply_music_actions, actions, playlist_raw, addto_raw)
+            # Always log the outcome so a failed build isn't silent in the backend.
+            print(f"[spotify] {res if res else 'no-op (nothing matched)'}")
+            # Surface the outcome in the 'Show note tags' debug view, not just the raw block.
+            try:
+                await websocket.send_json({
+                    "type": "directives",
+                    "blocks": [{"kind": "music-result",
+                                "text": "\n".join(res) if res else "no-op (nothing matched)"}],
+                })
+            except Exception:
+                pass
+            await broadcast({"type": "spotify_changed"})
+
         # Core memories she marked.
         core_blocks = hfilter.core_blocks()
         if core_blocks:
@@ -1468,7 +1855,7 @@ async def ws_endpoint(websocket: WebSocket):
         if theme_updates:
             await apply_theme(theme_updates, by="her")
 
-    async def handle_chat(message: str, review: bool = False):
+    async def handle_chat(message: str, review: bool = False, images: list | None = None):
         nonlocal last_chat_ts, last_self_ts, journal_material, last_journal_ts, proactive_task
 
         tts.interrupt()  # barge-in: stop any speech still playing
@@ -1482,11 +1869,18 @@ async def ws_endpoint(websocket: WebSocket):
             else round((now - last_chat_ts) / 60)
         ctx.update(_consume_theme_ctx())
 
+        caps = settings.get("capabilities") or {}
         async with _memory_lock:
             memory_block = mem_store.render_block(memory)
         # Hybrid notes: she always sees the titles (cheap); she opens specific note
         # bodies on demand with <readnote>, and we re-run with that content folded in.
-        notes_context = await asyncio.to_thread(notes_store.notes_menu)
+        # Each digest is only built when its capability is on (saves work + context).
+        notes_context = await asyncio.to_thread(notes_store.notes_menu) if caps.get("notes", True) else ""
+        projects_context = await asyncio.to_thread(projects_store.digest) if caps.get("projects", True) else ""
+        files_context = await asyncio.to_thread(files_store.roots_digest) if caps.get("files", True) else ""
+        calendar_context = await asyncio.to_thread(events_store.digest) if caps.get("calendar", True) else ""
+        music_context = await asyncio.to_thread(spotify_store.digest) if caps.get("music", True) else ""
+        music_premium = (await asyncio.to_thread(spotify_store.is_premium)) if (caps.get("music", True) and music_context) else False
 
         # She may slip hidden <journal> or <note> blocks into her reply; the filter
         # hides them from the live feed + TTS and hands us the captured content.
@@ -1498,10 +1892,41 @@ async def ws_endpoint(websocket: WebSocket):
         if review:                # reviewing her mind together — give her the whole memory set
             async with _memory_lock:
                 web_context = _build_memory_review(memory)
-        note_fetches = web_fetches = 0
+        note_fetches = web_fetches = file_fetches = music_fetches = 0
         fetched_q: set[str] = set()   # queries/videos already pulled this turn (dedupe re-asks)
+        fetched_files: set[str] = set()  # folders/files already opened this turn (dedupe re-asks)
+        fetched_music: set[str] = set()  # music lookups already pulled this turn
         lead_in_shown = False         # a brief live "let me look" already went out this turn
         web_debug: list[dict] = []    # background search/watch actions, surfaced in debug mode
+
+        # ── Vision as a tool ──────────────────────────────────────────────
+        # If he attached image(s) AND a dedicated vision model is set, her main model
+        # decides what to look for, the vision model describes it, and we fold that
+        # summary into her context — her main model never sees the raw image.
+        images_for_main = None
+        if images and not caps.get("images", True):
+            images = []          # images capability is off — ignore any attachments
+        if images:
+            if (brain.vision_model or "").strip():
+                await websocket.send_json({"type": "searching"})  # "looking" indicator
+                instruction = await brain.vision_probe(message, conversation)
+                summary = await brain.describe_image(images, instruction)
+                if summary:
+                    vision_note = (
+                        "[He shared an image with you, and you looked at it"
+                        + (f" — checking: {instruction}" if instruction else "")
+                        + f".\nWhat you actually see in it: {summary}\n"
+                        "Respond to him naturally about the image; you genuinely saw it. "
+                        "Don't mention models or describe it like a caption — just react as you.]"
+                    )
+                else:
+                    vision_note = ("[He shared an image but your eyes couldn't make it out just "
+                                   "now — tell him so honestly instead of guessing.]")
+                web_context = (vision_note + ("\n\n" + web_context if web_context else "")).strip()
+            else:
+                # No vision model configured: let the main model try (it'll get a graceful
+                # 'can't see images' note if it's text-only).
+                images_for_main = images
 
         def _canon(v: str) -> str:
             # Dedupe a video by its canonical id (she may re-ask with the full URL one round
@@ -1509,7 +1934,10 @@ async def ws_endpoint(websocket: WebSocket):
             m = _re.search(brain._YT_ID, v)
             return ("yt:" + m.group(1)) if m else ("q:" + " ".join(v.lower().split()))
 
-        for round_idx in range(MAX_NOTE_FETCH + MAX_WEB_FETCH + 1):
+        def _canon_path(p: str) -> str:
+            return os.path.normcase(os.path.normpath(p.strip().strip('"').strip("'")))
+
+        for round_idx in range(MAX_NOTE_FETCH + MAX_WEB_FETCH + MAX_FILE_FETCH + MAX_MUSIC_FETCH + 1):
             # Only the FIRST pass streams live. Re-runs (after a search/watch) buffer their
             # text, so repeated "let me look" lead-ins don't pile up on screen — intermediate
             # lead-ins are dropped and only the final grounded answer is flushed once below.
@@ -1518,7 +1946,11 @@ async def ws_endpoint(websocket: WebSocket):
             speak_buf = ""
             try:
                 async for token in brain.stream_chat(
-                    message, conversation, ctx, memory_block, notes_context, web_context
+                    message, conversation, ctx, memory_block, notes_context, web_context,
+                    images=(images_for_main if round_idx == 0 else None),
+                    projects_digest=projects_context, files_digest=files_context,
+                    calendar_digest=calendar_context, music_digest=music_context,
+                    music_premium=music_premium, caps=caps,
                 ):
                     if token == "\x00SEARCHING\x00":
                         await websocket.send_json({"type": "searching"})
@@ -1555,6 +1987,39 @@ async def ws_endpoint(websocket: WebSocket):
                     bodies = await asyncio.to_thread(notes_store.fetch_notes, reqs)
                     notes_context = await asyncio.to_thread(notes_store.notes_menu) + bodies
                     continue
+
+            # Local files (browse / read): allow even after a spoken lead-in, then re-run so
+            # she answers grounded in what she found. Only act on paths not already opened.
+            braw, fraw = hfilter.browse_requests(), hfilter.readfile_requests()
+            breqs = [p for p in braw if ("b:" + _canon_path(p)) not in fetched_files]
+            freqs = [p for p in fraw if ("f:" + _canon_path(p)) not in fetched_files]
+            if (breqs or freqs) and file_fetches < MAX_FILE_FETCH:
+                file_fetches += 1
+                for p in breqs:
+                    fetched_files.add("b:" + _canon_path(p))
+                    web_debug.append({"kind": "browse", "text": p})
+                    res = await asyncio.to_thread(files_store.list_dir, p)
+                    web_context += f"\n\n[FOLDER — {p}]\n{res}"
+                for p in freqs:
+                    fetched_files.add("f:" + _canon_path(p))
+                    web_debug.append({"kind": "readfile", "text": p})
+                    res = await asyncio.to_thread(files_store.read_file, p)
+                    web_context += f"\n\n[FILE — {p}]\n{res}"
+                await websocket.send_json({"type": "directives", "blocks": web_debug[-(len(breqs) + len(freqs)):]})
+                continue
+
+            # Music lookups (<music>) — fetch from Spotify, fold in, re-run grounded.
+            extra_music = ["my playlists"] if hfilter.playlists_requested() else []
+            mreqs = [q for q in (hfilter.music_requests() + extra_music) if q.lower() not in fetched_music]
+            if mreqs and music_fetches < MAX_MUSIC_FETCH:
+                music_fetches += 1
+                for q in mreqs:
+                    fetched_music.add(q.lower())
+                    web_debug.append({"kind": "music", "text": q})
+                    res = await asyncio.to_thread(music_lookup, q)
+                    web_context += f"\n\n{res}"
+                await websocket.send_json({"type": "directives", "blocks": web_debug[-len(mreqs):]})
+                continue
 
             # Live web (search / watch): allow even after a spoken lead-in, then re-run so she
             # answers grounded in the results. Only act on requests not already fulfilled.
@@ -1632,8 +2097,16 @@ async def ws_endpoint(websocket: WebSocket):
             tts.speak(speak_buf)
 
         reply = hfilter.shown.strip()
-        if lead_in_shown and not reply:
+
+        # Pictures she chose to show him (<image> urls) — render each as an image
+        # bubble after her words, and keep the tag in the stored reply so it
+        # re-renders on reload.
+        her_images = [u for u in (_safe_image_url(x) for x in hfilter.image_requests()) if u]
+        for url in her_images:
+            await websocket.send_json({"type": "aitha_image", "url": url})
+        if lead_in_shown and not reply and not her_images:
             reply = "(looked something up)"  # never store an empty assistant turn
+        stored_reply = reply + "".join(f"\n<image>{u}</image>" for u in her_images)
 
         # Act on every directive she emitted (journal, notes, core memory, outing).
         await apply_self_directives(hfilter)
@@ -1646,8 +2119,11 @@ async def ws_endpoint(websocket: WebSocket):
         last_chat_ts_g = now
         mem_store.touch_last_seen(memory)  # cheap, no LLM — keeps "welcome back" fresh
 
-        conversation.append({"role": "user", "content": message})
-        conversation.append({"role": "assistant", "content": reply})
+        user_entry = {"role": "user", "content": message or "(shared an image)"}
+        if images:
+            user_entry["images"] = images   # UI-only: replayed on reload, not re-sent to the model
+        conversation.append(user_entry)
+        conversation.append({"role": "assistant", "content": stored_reply})
         mem_store.save_conversation(conversation)  # so we can resume after a restart
 
         journal_material += 1  # something happened — fuel for her next reflection
@@ -1674,9 +2150,15 @@ async def ws_endpoint(websocket: WebSocket):
             else round((now - last_chat_ts) / 60)
         ctx["likely_asleep"] = _likely_asleep(conversation, ctx)
         ctx.update(_consume_theme_ctx())
+        caps = settings.get("capabilities") or {}
         async with _memory_lock:
             memory_block = mem_store.render_block(memory)
-        notes_context = await asyncio.to_thread(notes_store.notes_menu)
+        notes_context = await asyncio.to_thread(notes_store.notes_menu) if caps.get("notes", True) else ""
+        projects_context = await asyncio.to_thread(projects_store.digest) if caps.get("projects", True) else ""
+        files_context = await asyncio.to_thread(files_store.roots_digest) if caps.get("files", True) else ""
+        calendar_context = await asyncio.to_thread(events_store.digest) if caps.get("calendar", True) else ""
+        music_context = await asyncio.to_thread(spotify_store.digest) if caps.get("music", True) else ""
+        music_premium = (await asyncio.to_thread(spotify_store.is_premium)) if (caps.get("music", True) and music_context) else False
 
         # If she's been off exploring and has something she wanted to share, this is
         # when she brings it to him (he's back and awake) — still her call to make.
@@ -1704,7 +2186,10 @@ async def ws_endpoint(websocket: WebSocket):
             full = ""
             try:
                 async for token in brain.stream_unprompted(
-                    conversation, ctx, memory_block, notes_context
+                    conversation, ctx, memory_block, notes_context,
+                    projects_digest=projects_context, files_digest=files_context,
+                    calendar_digest=calendar_context, music_digest=music_context,
+                    music_premium=music_premium, caps=caps
                 ):
                     if token == "\x00SEARCHING\x00":
                         continue
@@ -1957,6 +2442,41 @@ async def ws_endpoint(websocket: WebSocket):
         await asyncio.wait({proactive_task})
         return True
 
+    async def memory_maintenance():
+        """Upkeep her long-term memory in the background: let faded trivia go (cheap,
+        hourly) and occasionally merge redundant memories together (an LLM pass, only
+        while he's idle and only every few hours). Core memories are never touched."""
+        nonlocal last_mem_decay_ts, last_mem_consolidate_ts
+        now = time.time()
+
+        # 1) Gentle decay-prune — no LLM, runs hourly.
+        if now - last_mem_decay_ts >= MEM_DECAY_EVERY:
+            last_mem_decay_ts = now
+            async with _memory_lock:
+                dropped = mem_store.decay(memory)
+                if dropped:
+                    mem_store.save(memory)
+            if dropped:
+                print(f"[memory] let go of {len(dropped)} faded memories")
+
+        # 2) Consolidation — LLM, gated: he's away, enough has piled up, and it's been a while.
+        away = last_chat_ts is None or (now - last_chat_ts) >= MEM_AWAY_SECONDS
+        if not away or now - last_mem_consolidate_ts < MEM_CONSOLIDATE_EVERY:
+            return
+        for key, bucket in (("facts", "him"), ("self_facts", "self")):
+            async with _memory_lock:
+                texts = [it["text"] for it in memory.get(key, []) if not it.get("core")]
+            if len(texts) < MEM_CONSOLIDATE_MIN:
+                continue
+            last_mem_consolidate_ts = now
+            merged = await brain.consolidate_memories(texts, bucket)
+            if merged:
+                async with _memory_lock:
+                    mem_store.replace_noncore(memory, key, merged)
+                    mem_store.save(memory)
+                print(f"[memory] consolidated {key}: {len(texts)} → {len(merged)}")
+            break   # at most one bucket per pass — keep it light
+
     async def inner_life_loop():
         """Her heartbeat. It doesn't *grant* her a turn — it just checks in on a
         steady pulse. Whenever a drive is strong enough she acts, and the instant
@@ -1968,6 +2488,10 @@ async def ws_endpoint(websocket: WebSocket):
             # without a restart.
             hb = (settings.get("behavior") or {}).get("heartbeat_seconds", HEARTBEAT_SECONDS)
             await asyncio.sleep(hb)
+            try:
+                await memory_maintenance()
+            except Exception as e:
+                print(f"[memory] maintenance error: {e}")
             acted = await _consider_and_act()
             flows = 0
             while acted and flows < MAX_FLOW_BURST:
@@ -1985,7 +2509,11 @@ async def ws_endpoint(websocket: WebSocket):
 
             if msg_type == "chat":
                 message = data.get("message", "").strip()
-                if not message:
+                images = data.get("images") or []
+                if not isinstance(images, list):
+                    images = []
+                images = [u for u in images if isinstance(u, str) and u][:4]  # cap per turn
+                if not message and not images:
                     continue
                 # If she's mid-musing on her own, drop it — he's talking now.
                 if proactive_task and not proactive_task.done():
@@ -1994,7 +2522,7 @@ async def ws_endpoint(websocket: WebSocket):
                     continue  # already thinking — ignore until done or cancelled
                 # Run as a task so we can still receive a 'cancel' while she thinks.
                 current_task = asyncio.create_task(
-                    handle_chat(message, review=bool(data.get("review"))))
+                    handle_chat(message, review=bool(data.get("review")), images=images))
 
             elif msg_type == "cancel":
                 if current_task and not current_task.done():
