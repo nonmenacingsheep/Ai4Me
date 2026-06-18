@@ -2550,7 +2550,11 @@ async def ws_endpoint(websocket: WebSocket):
                 tts.interrupt()
 
             elif msg_type == "set_tts":
-                tts.set_enabled(bool(data.get("enabled", True)))
+                on = bool(data.get("enabled", True))
+                tts.set_enabled(on)
+                # Persist so the mute survives an app restart (startup reads this).
+                settings["tts_enabled"] = on
+                settings_store.save(settings)
 
             elif msg_type == "get_settings":
                 await websocket.send_json(settings_payload())
