@@ -2115,11 +2115,21 @@ async def ws_endpoint(websocket: WebSocket):
                             web_context += ("\n\n" + _CODE_RESULTS_HEADER) if web_context else _CODE_RESULTS_HEADER
                             code_acted = True
                         # 1) write any code files first, so a <run> in the same reply finds them
+                        wrote_any = False
                         for cm in _CODE_DIRECTIVE.finditer(code_raw or ""):
+                            wrote_any = True
                             fn, body = cm.group(1).strip(), cm.group(2)
                             res = await asyncio.to_thread(coder.write_file, fn, body)
                             web_debug.append({"kind": "code", "text": f"{fn}: {res}"})
                             web_context += f"\n\n[WROTE {fn}] {res}"
+                        # She emitted a <code> tag but it was malformed (no file="…"), e.g.
+                        # "<code> read embers.py" — nudge her to the right syntax instead of
+                        # silently doing nothing (which makes her loop or stall).
+                        if code_raw and not wrote_any and not (ls_req or read_reqs or run_reqs):
+                            web_context += ("\n\n(Your <code> tag had no file name. To READ a file "
+                                            "use <readcode>name.py</readcode>; to RUN one use "
+                                            "<run>name.py</run>; to WRITE one use "
+                                            '<code file="name.py">…python…</code>.)')
                         # 2) list / read / run
                         if ls_req:
                             listing = await asyncio.to_thread(coder.list_files)

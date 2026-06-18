@@ -16,7 +16,8 @@ import subprocess
 import sys
 
 _DIR = os.path.join(os.path.expanduser("~"), ".ai4me", "workspace")
-TIMEOUT = int(os.getenv("AITHA_CODE_TIMEOUT", "600"))          # seconds per run (10 min)
+TIMEOUT = int(os.getenv("AITHA_CODE_TIMEOUT", "60"))           # seconds per run
+# (60s catches an accidental infinite loop in a minute; raise it for known long jobs)
 MAX_OUTPUT = int(os.getenv("AITHA_CODE_MAX_OUTPUT", "8000"))   # chars fed back to her
 MAX_FILE = 200_000                                             # bytes per written file
 
@@ -121,9 +122,13 @@ def run_file(name: str) -> str:
     if not os.path.isfile(full):
         return f"error: no such file '{name}' — write it first"
     try:
+        # -I isolates (ignores env/user site); -X utf8 forces UTF-8 I/O so her
+        # Unicode output (•, ◦, emoji, …) prints instead of crashing on Windows
+        # cp1252 when stdout is a captured pipe. (-X survives -I; env vars don't.)
         proc = subprocess.run(
-            [sys.executable, "-I", full],
-            cwd=_root(), capture_output=True, text=True, timeout=TIMEOUT,
+            [sys.executable, "-I", "-X", "utf8", full],
+            cwd=_root(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=TIMEOUT,
         )
         out = (proc.stdout or "")[:MAX_OUTPUT]
         err = (proc.stderr or "")[:MAX_OUTPUT]
