@@ -55,17 +55,16 @@ MOOD_PROSODY = {
     "clingy":  {"speed": 1.03, "pitch": 1.020, "gain": 1.00},
     "angsty":  {"speed": 0.95, "pitch": 0.975, "gain": 0.90},
 }
-# Whisper / late-night softening, layered on top of the mood profile.
-# True whisper is unvoiced/breathy — Kokoro can't produce it, so when whisper mode
-# is active we synthesize that one utterance with eSpeak NG's "whisper" voice
-# variant instead (tiny, CPU-cheap, genuinely breathy). It goes out the same device
-# → the voice changer normalizes the timbre, so it still sounds like her. If eSpeak
-# isn't installed we fall back to just attenuating/slowing the normal Kokoro voice.
-WHISPER_GAIN = 0.55          # fallback hush level when eSpeak isn't available
+# "The Boiled One" — a horror voice. When on, every line is synthesized with
+# eSpeak NG's breathy/distorted voice instead of Kokoro (Kokoro can't make this
+# sound). It goes out the same device → the voice changer ties the timbre back to
+# her, so it's *her* voice gone wrong. If eSpeak isn't installed we fall back to
+# just attenuating/slowing the normal Kokoro voice (a poor-man's version).
+WHISPER_GAIN = 0.55          # fallback level when eSpeak isn't available
 WHISPER_SPEED = 0.97         # fallback tempo when eSpeak isn't available
 ESPEAK_WHISPER_VOICE = os.getenv("ESPEAK_WHISPER_VOICE", "en-us+whisperf")
-ESPEAK_WHISPER_WPM = int(os.getenv("ESPEAK_WHISPER_WPM", "155"))   # slow, intimate
-ESPEAK_WHISPER_PITCH = int(os.getenv("ESPEAK_WHISPER_PITCH", "35"))  # 0-99, low/soft
+ESPEAK_WHISPER_WPM = int(os.getenv("ESPEAK_WHISPER_WPM", "155"))   # slow, unhurried
+ESPEAK_WHISPER_PITCH = int(os.getenv("ESPEAK_WHISPER_PITCH", "35"))  # 0-99, low/menacing
 ESPEAK_WHISPER_GAIN = 0.85   # eSpeak runs hot; tame it a touch before the changer
 
 # Located once; None means eSpeak NG isn't installed and we use the fallback hush.
@@ -125,8 +124,8 @@ class TTSEngine:
             self._get_pipeline()
             self._resolve_device()
             self._ensure_stream()  # open the device now so the voice changer locks on
-            whisper = f"eSpeak ({_ESPEAK_BIN})" if _ESPEAK_BIN else "fallback hush (eSpeak not found)"
-            print(f"[tts] ready — voice={self.voice} device={self._device_label()} whisper={whisper}")
+            boiled = f"eSpeak ({_ESPEAK_BIN})" if _ESPEAK_BIN else "fallback (eSpeak not found)"
+            print(f"[tts] ready — voice={self.voice} device={self._device_label()} boiled-one={boiled}")
         except Exception as e:
             print(f"[tts] warm-up failed: {e}")
 
@@ -199,7 +198,7 @@ class TTSEngine:
         p = {"speed": 1.0, "pitch": 1.0, "gain": 1.0}
         if self.expr_prosody:
             p.update(MOOD_PROSODY.get(self.mood, p))
-        if self.expr_whisper and self._late:
+        if self.expr_whisper:
             p["gain"] *= WHISPER_GAIN
             p["speed"] *= WHISPER_SPEED
         return p
@@ -406,15 +405,15 @@ class TTSEngine:
     def _synth_and_play(self, text: str, gen: int):
         stream = self._ensure_stream()
 
-        # Whisper mode (late-night + toggle): synthesize via eSpeak's breathy voice
-        # rather than Kokoro, routed through the same device so the voice changer
-        # keeps it sounding like her.
-        if self.expr_whisper and self._late:
+        # "The Boiled One" — when on, ALL her speech is synthesized via eSpeak's
+        # breathy/distorted voice instead of Kokoro (genuine analog-horror timbre),
+        # routed through the same device so the voice changer keeps it tied to her.
+        if self.expr_whisper:
             wav = self._whisper_synth(text)
             if wav is not None:
                 self._write_samples(stream, wav, gen)
                 return
-            # eSpeak unavailable — fall through to the attenuated Kokoro hush below
+            # eSpeak unavailable — fall through to the attenuated Kokoro voice below
             # (WHISPER_GAIN/SPEED are already folded into the prosody profile).
 
         pipeline = self._get_pipeline()

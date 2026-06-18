@@ -48,7 +48,7 @@ def default_behavior() -> dict:
         "voice_mood_map": True,      # speak in a mood-matched voice
         "voice_prosody": True,       # vary pace / pitch / volume by mood
         "voice_micro_pauses": True,  # breathe between sentences
-        "voice_whisper": False,      # soften to a near-whisper late at night
+        "voice_whisper": False,      # "The Boiled One" horror voice (always-on when set)
     }
 
 
