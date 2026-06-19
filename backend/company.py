@@ -25,6 +25,7 @@ MAX_EMPLOYEES = 24
 MAX_TASKS = 120            # storage ceiling (oldest done/blocked shed first)
 MAX_DECISIONS = 80
 MAX_TASK_LOG = 30
+MAX_CHAT = 240             # group-chat messages kept
 
 
 def _blank() -> dict:
@@ -35,9 +36,11 @@ def _blank() -> dict:
         "industry": "",
         "created": 0.0,
         "updated": 0.0,
+        "heartbeat": False,   # autonomous timer: team acts on its own when True
         "employees": [],
         "tasks": [],
         "decisions": [],
+        "chat": [],           # company group chat (CEO + employees + Chairman)
     }
 
 
@@ -50,9 +53,10 @@ def load() -> dict:
         base = _blank()
         base.update(data)
         # Defensive: make sure the list fields are actually lists.
-        for k in ("employees", "tasks", "decisions"):
+        for k in ("employees", "tasks", "decisions", "chat"):
             if not isinstance(base.get(k), list):
                 base[k] = []
+        base["heartbeat"] = bool(base.get("heartbeat", False))
         return base
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return _blank()
@@ -235,6 +239,48 @@ def _enforce_task_cap(co: dict) -> None:
         co["tasks"].remove(t)
 
 
+def set_heartbeat(on: bool) -> dict:
+    """Turn the autonomous timer on/off. When on, the team works + talks on its own."""
+    co = load()
+    co["heartbeat"] = bool(on)
+    co["updated"] = time.time()
+    save(co)
+    return co
+
+
+def heartbeat_on() -> bool:
+    return bool(load().get("heartbeat", False))
+
+
+def post_message(author_id: str | None, author: str, role: str, text: str) -> dict | None:
+    """Append a message to the company group chat. author_id is an employee id, or
+    'ceo' (Aitha) / 'chairman' (him). Returns the message."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    co = load()
+    now = time.time()
+    msg = {
+        "id": "m_" + uuid.uuid4().hex[:8],
+        "author_id": author_id,
+        "author": author,
+        "role": role,
+        "text": text[:2000],
+        "time": time.strftime("%I:%M %p"),
+        "created": now,
+    }
+    co["chat"].append(msg)
+    co["chat"] = co["chat"][-MAX_CHAT:]
+    co["updated"] = now
+    save(co)
+    return msg
+
+
+def recent_chat(n: int = 14) -> list[dict]:
+    """The last n group-chat messages, oldest first."""
+    return load().get("chat", [])[-n:]
+
+
 def pick_work() -> tuple[dict, dict] | None:
     """Choose the next task for the autonomous engine to advance: the oldest
     in-progress task with an active assignee, or else a backlog task with an
@@ -293,9 +339,11 @@ def view() -> dict:
         "mission": co["mission"],
         "industry": co["industry"],
         "created": co["created"],
+        "heartbeat": bool(co.get("heartbeat", False)),
         "employees": sorted(co["employees"], key=lambda e: e.get("hired", 0)),
         "tasks": tasks,
         "decisions": list(reversed(co["decisions"]))[:30],
+        "chat": co.get("chat", [])[-80:],
         "counts": {
             "employees": len(co["employees"]),
             "backlog": sum(1 for t in co["tasks"] if t.get("status") == "backlog"),
@@ -332,4 +380,9 @@ def digest() -> str:
         lines.append("  Blocked: " + ", ".join(f'"{t["title"]}"' for t in blocked[:5]))
     if done:
         lines.append(f"  Shipped: {len(done)} task(s)")
+    chat = co.get("chat", [])
+    if chat:
+        lines.append("  Recent team group-chat:")
+        for m in chat[-5:]:
+            lines.append(f"    {m.get('author')}: {m.get('text','')[:120]}")
     return "\n".join(lines)

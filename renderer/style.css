@@ -929,6 +929,60 @@ img.forge-media { object-fit: contain; max-height: none; }
 .foundry-decision-text { color: var(--text-1); font-size: 0.9rem; line-height: 1.4; }
 .foundry-decision-time { flex: 0 0 auto; font-size: 0.74rem; color: var(--text-3); white-space: nowrap; }
 @media (max-width: 760px) { .foundry-board { grid-template-columns: 1fr 1fr; } }
+
+/* Heartbeat toggle */
+.foundry-beat { display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px;
+  border-radius: 999px; cursor: pointer; font-size: 0.78rem; font-weight: 600;
+  color: var(--text-3); background: transparent; border: 1px solid var(--border-accent);
+  transition: color .15s, border-color .15s, background .15s; }
+.foundry-beat-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); }
+.foundry-beat.on { color: #4caf6e; border-color: #4caf6e; background: rgba(76,175,110,0.10); }
+.foundry-beat.on .foundry-beat-dot { background: #4caf6e; animation: foundry-pulse 1.4s ease-in-out infinite; }
+@keyframes foundry-pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(1.5); } }
+/* Sub-tabs */
+.foundry-subtabs { display: flex; gap: 6px; margin-bottom: 16px; }
+.foundry-subtab { padding: 6px 14px; border-radius: 9px; cursor: pointer; font-size: 0.85rem;
+  font-weight: 600; color: var(--text-3); background: transparent; border: 1px solid transparent;
+  transition: color .15s, background .15s; }
+.foundry-subtab:hover { color: var(--text-2); }
+.foundry-subtab.active { color: var(--text-1); background: var(--bg-mid); border-color: var(--border-accent); }
+/* Team sub-tab */
+.foundry-team-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.foundry-teamcard { background: var(--bg-mid); border: 1px solid var(--border-accent);
+  border-radius: 14px; padding: 16px; }
+.foundry-teamcard-head { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+.foundry-emp-tasks { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.foundry-emp-task { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 10px; border-radius: 8px; background: rgba(0,0,0,0.18);
+  border-left: 3px solid var(--text-3); }
+.foundry-emp-task.foundry-task-in_progress { border-left-color: #f5b14b; }
+.foundry-emp-task.foundry-task-done { border-left-color: #4caf6e; }
+.foundry-emp-task.foundry-task-blocked { border-left-color: #d6443a; }
+.foundry-emp-task-title { color: var(--text-1); font-size: 0.86rem; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foundry-emp-task-status { flex: 0 0 auto; font-size: 0.7rem; color: var(--text-3);
+  text-transform: uppercase; letter-spacing: .03em; }
+/* Group chat */
+.foundry-chat { display: flex; flex-direction: column; gap: 12px; padding: 4px 2px; }
+.foundry-msg { max-width: 78%; padding: 9px 13px; border-radius: 13px;
+  background: var(--bg-mid); border: 1px solid var(--border-accent); }
+.foundry-msg-ceo { align-self: flex-start; border-left: 3px solid var(--accent-v-bright); }
+.foundry-msg-emp { align-self: flex-start; }
+.foundry-msg-chairman { align-self: flex-end; background: var(--accent-v-dim); }
+.foundry-msg-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px; }
+.foundry-msg-author { font-weight: 700; font-size: 0.82rem; color: var(--text-1); }
+.foundry-msg-role { font-size: 0.72rem; color: var(--accent-v-bright); }
+.foundry-msg-time { font-size: 0.7rem; color: var(--text-3); margin-left: auto; }
+.foundry-msg-text { color: var(--text-1); font-size: 0.9rem; line-height: 1.45; white-space: pre-wrap; }
+.foundry-composer { display: flex; gap: 8px; align-items: flex-end; padding: 12px 0 2px;
+  border-top: 1px solid var(--border-accent); margin-top: 6px; }
+.foundry-composer textarea { flex: 1; resize: none; max-height: 120px; padding: 9px 12px;
+  border-radius: 10px; background: var(--bg-mid); border: 1px solid var(--border-accent);
+  color: var(--text-1); font: inherit; font-size: 0.9rem; }
+.foundry-composer button { flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px;
+  cursor: pointer; color: var(--accent-v-bright); background: var(--accent-v-dim);
+  border: 1px solid var(--border-accent); font-size: 1rem; transition: background .15s, color .15s; }
+.foundry-composer button:hover { background: var(--accent-v-glow); color: var(--text-1); }
 .tc-forest  { background: radial-gradient(circle at 35% 30%, #7be6c2, #1f9c78 55%, #08130d); }
 .tc-rose    { background: radial-gradient(circle at 35% 30%, #fba5d3, #db2777 55%, #160810); }
 .tc-ocean   { background: radial-gradient(circle at 35% 30%, #6ee7d8, #0d9488 55%, #061413); }

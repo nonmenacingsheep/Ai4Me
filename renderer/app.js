@@ -527,6 +527,10 @@ function handleMessage(data) {
       if (activeView === 'foundry') loadFoundry();      // she ran a CEO action — refresh the Foundry
       break;
 
+    case 'company_chat':
+      if (data.message) appendFoundryChat(data.message);  // a new group-chat message
+      break;
+
     case 'calendar_changed':
       if (bedrockOpen) loadCalendar();           // she jotted an event — refresh Bedrock
       break;
@@ -1525,6 +1529,8 @@ const FOUNDRY_COLS = [
   { key: 'done',        label: 'Done' },
   { key: 'blocked',     label: 'Blocked' },
 ];
+let foundryData = null;       // last loaded company snapshot
+let foundrySub = 'overview';  // active sub-tab: overview | team | chat
 function foundryEl(tag, cls, text) {
   const el = document.createElement(tag);
   if (cls) el.className = cls;
@@ -1535,113 +1541,227 @@ async function loadFoundry() {
   const body = document.getElementById('foundry-body');
   const sub = document.getElementById('foundry-sub');
   const title = document.getElementById('foundry-title');
+  const subtabs = document.getElementById('foundry-subtabs');
+  const composer = document.getElementById('foundry-composer');
+  const beat = document.getElementById('foundry-beat');
   if (!body) return;
   try {
     const data = await (await fetch('/api/company')).json();
-    body.innerHTML = '';
-    if (!data.enabled) {
+    foundryData = (data.enabled && data.company && data.company.founded) ? data.company : null;
+    if (!foundryData) {
+      body.innerHTML = '';
+      if (subtabs) subtabs.style.display = 'none';
+      if (composer) composer.style.display = 'none';
+      if (beat) beat.style.display = 'none';
       if (title) title.textContent = 'The Foundry';
-      if (sub) sub.textContent = 'company off';
-      body.appendChild(foundryEl('div', 'foundry-empty',
-        'Her company is off. Turn on Company in Settings → Behavior → Capabilities to let her run it as CEO — you’re the Chairman who guides her.'));
+      if (!data.enabled) {
+        if (sub) sub.textContent = 'company off';
+        body.appendChild(foundryEl('div', 'foundry-empty',
+          'Her company is off. Turn on Company in Settings → Behavior → Capabilities to let her run it as CEO — you’re the Chairman who guides her.'));
+      } else {
+        if (sub) sub.textContent = 'not founded yet';
+        body.appendChild(foundryEl('div', 'foundry-empty',
+          'No company yet. Talk to her about what she’d build if she ran her own company — when it clicks, she’ll found it, and it’ll take shape here.'));
+      }
       return;
     }
-    const co = data.company || {};
-    if (!co.founded) {
-      if (title) title.textContent = 'The Foundry';
-      if (sub) sub.textContent = 'not founded yet';
-      body.appendChild(foundryEl('div', 'foundry-empty',
-        'No company yet. Talk to her about what she’d build if she ran her own company — when it clicks, she’ll found it, and it’ll take shape here.'));
-      return;
-    }
+    const co = foundryData;
     if (title) title.textContent = co.name || 'Her Company';
     if (sub) sub.textContent = co.industry || 'her company';
-
-    // ── Masthead: mission + at-a-glance counts ──
-    const head = foundryEl('div', 'foundry-overview');
-    if (co.mission) head.appendChild(foundryEl('div', 'foundry-mission', co.mission));
-    const c = co.counts || {};
-    const stats = foundryEl('div', 'foundry-stats');
-    [['Team', c.employees], ['In progress', c.in_progress],
-     ['Done', c.done], ['Blocked', c.blocked]].forEach(([k, v]) => {
-      const s = foundryEl('div', 'foundry-stat');
-      s.appendChild(foundryEl('span', 'foundry-stat-n', String(v || 0)));
-      s.appendChild(foundryEl('span', 'foundry-stat-l', k));
-      stats.appendChild(s);
-    });
-    head.appendChild(stats);
-    body.appendChild(head);
-
-    // ── Org roster ──
-    const emps = co.employees || [];
-    if (emps.length) {
-      const org = foundryEl('div', 'foundry-section');
-      org.appendChild(foundryEl('div', 'foundry-section-title', 'The team'));
-      const roster = foundryEl('div', 'foundry-roster');
-      emps.forEach(e => {
-        const card = foundryEl('div', 'foundry-emp');
-        const initials = (e.name || e.role || '?').trim().slice(0, 2).toUpperCase();
-        card.appendChild(foundryEl('div', 'foundry-avatar', initials));
-        const info = foundryEl('div', 'foundry-emp-info');
-        info.appendChild(foundryEl('div', 'foundry-emp-name', e.name || e.role));
-        info.appendChild(foundryEl('div', 'foundry-emp-role', e.role || ''));
-        if (e.brief) info.appendChild(foundryEl('div', 'foundry-emp-brief', e.brief));
-        card.appendChild(info);
-        roster.appendChild(card);
-      });
-      org.appendChild(roster);
-      body.appendChild(org);
-    }
-
-    // ── Task board (Kanban) ──
-    const boardSec = foundryEl('div', 'foundry-section');
-    boardSec.appendChild(foundryEl('div', 'foundry-section-title', 'Task board'));
-    const board = foundryEl('div', 'foundry-board');
-    const tasks = co.tasks || [];
-    FOUNDRY_COLS.forEach(col => {
-      const colEl = foundryEl('div', 'foundry-col');
-      const h = foundryEl('div', 'foundry-col-head');
-      h.appendChild(foundryEl('span', 'foundry-col-label', col.label));
-      const inCol = tasks.filter(t => (t.status || 'backlog') === col.key);
-      h.appendChild(foundryEl('span', 'foundry-col-count', String(inCol.length)));
-      colEl.appendChild(h);
-      if (!inCol.length) colEl.appendChild(foundryEl('div', 'foundry-col-empty', '—'));
-      inCol.forEach(t => {
-        const card = foundryEl('div', `foundry-task foundry-task-${col.key}`);
-        card.appendChild(foundryEl('div', 'foundry-task-title', t.title));
-        if (t.detail) card.appendChild(foundryEl('div', 'foundry-task-detail', t.detail));
-        const foot = foundryEl('div', 'foundry-task-foot');
-        foot.appendChild(foundryEl('span', 'foundry-task-who', t.assignee || 'unassigned'));
-        card.appendChild(foot);
-        if (t.output) card.appendChild(foundryEl('div', 'foundry-task-output', t.output));
-        colEl.appendChild(card);
-      });
-      board.appendChild(colEl);
-    });
-    boardSec.appendChild(board);
-    body.appendChild(boardSec);
-
-    // ── Decision log ──
-    const decs = co.decisions || [];
-    if (decs.length) {
-      const sec = foundryEl('div', 'foundry-section');
-      sec.appendChild(foundryEl('div', 'foundry-section-title', 'Decisions'));
-      const list = foundryEl('div', 'foundry-decisions');
-      decs.forEach(d => {
-        const row = foundryEl('div', 'foundry-decision');
-        row.appendChild(foundryEl('div', 'foundry-decision-text', d.summary));
-        if (d.time) row.appendChild(foundryEl('div', 'foundry-decision-time', d.time));
-        list.appendChild(row);
-      });
-      sec.appendChild(list);
-      body.appendChild(sec);
-    }
+    if (subtabs) subtabs.style.display = 'flex';
+    if (beat) beat.style.display = 'inline-flex';
+    updateBeatButton(!!co.heartbeat);
+    renderFoundrySub();
   } catch (_) {
     body.innerHTML = '';
     body.appendChild(foundryEl('div', 'foundry-empty', 'Couldn’t load her company.'));
   }
 }
+function updateBeatButton(on) {
+  const beat = document.getElementById('foundry-beat');
+  const label = document.getElementById('foundry-beat-label');
+  if (!beat) return;
+  beat.classList.toggle('on', on);
+  if (label) label.textContent = on ? 'Heartbeat on' : 'Heartbeat off';
+}
+function setFoundrySub(name) {
+  foundrySub = name;
+  document.querySelectorAll('.foundry-subtab').forEach(b =>
+    b.classList.toggle('active', b.dataset.sub === name));
+  renderFoundrySub();
+}
+function renderFoundrySub() {
+  const body = document.getElementById('foundry-body');
+  const composer = document.getElementById('foundry-composer');
+  if (!body || !foundryData) return;
+  body.innerHTML = '';
+  if (composer) composer.style.display = (foundrySub === 'chat') ? 'flex' : 'none';
+  if (foundrySub === 'team') renderFoundryTeam(body, foundryData);
+  else if (foundrySub === 'chat') renderFoundryChat(body, foundryData);
+  else renderFoundryOverview(body, foundryData);
+}
+function renderFoundryOverview(body, co) {
+  const head = foundryEl('div', 'foundry-overview');
+  if (co.mission) head.appendChild(foundryEl('div', 'foundry-mission', co.mission));
+  const c = co.counts || {};
+  const stats = foundryEl('div', 'foundry-stats');
+  [['Team', c.employees], ['In progress', c.in_progress],
+   ['Done', c.done], ['Blocked', c.blocked]].forEach(([k, v]) => {
+    const s = foundryEl('div', 'foundry-stat');
+    s.appendChild(foundryEl('span', 'foundry-stat-n', String(v || 0)));
+    s.appendChild(foundryEl('span', 'foundry-stat-l', k));
+    stats.appendChild(s);
+  });
+  head.appendChild(stats);
+  body.appendChild(head);
+
+  const boardSec = foundryEl('div', 'foundry-section');
+  boardSec.appendChild(foundryEl('div', 'foundry-section-title', 'Task board'));
+  const board = foundryEl('div', 'foundry-board');
+  const tasks = co.tasks || [];
+  FOUNDRY_COLS.forEach(col => {
+    const colEl = foundryEl('div', 'foundry-col');
+    const h = foundryEl('div', 'foundry-col-head');
+    h.appendChild(foundryEl('span', 'foundry-col-label', col.label));
+    const inCol = tasks.filter(t => (t.status || 'backlog') === col.key);
+    h.appendChild(foundryEl('span', 'foundry-col-count', String(inCol.length)));
+    colEl.appendChild(h);
+    if (!inCol.length) colEl.appendChild(foundryEl('div', 'foundry-col-empty', '—'));
+    inCol.forEach(t => colEl.appendChild(foundryTaskCard(t, col.key)));
+    board.appendChild(colEl);
+  });
+  boardSec.appendChild(board);
+  body.appendChild(boardSec);
+
+  const decs = co.decisions || [];
+  if (decs.length) {
+    const sec = foundryEl('div', 'foundry-section');
+    sec.appendChild(foundryEl('div', 'foundry-section-title', 'Decisions'));
+    const list = foundryEl('div', 'foundry-decisions');
+    decs.forEach(d => {
+      const row = foundryEl('div', 'foundry-decision');
+      row.appendChild(foundryEl('div', 'foundry-decision-text', d.summary));
+      if (d.time) row.appendChild(foundryEl('div', 'foundry-decision-time', d.time));
+      list.appendChild(row);
+    });
+    sec.appendChild(list);
+    body.appendChild(sec);
+  }
+}
+function foundryTaskCard(t, status) {
+  const card = foundryEl('div', `foundry-task foundry-task-${status}`);
+  card.appendChild(foundryEl('div', 'foundry-task-title', t.title));
+  if (t.detail) card.appendChild(foundryEl('div', 'foundry-task-detail', t.detail));
+  const foot = foundryEl('div', 'foundry-task-foot');
+  foot.appendChild(foundryEl('span', 'foundry-task-who', t.assignee || 'unassigned'));
+  card.appendChild(foot);
+  if (t.output) card.appendChild(foundryEl('div', 'foundry-task-output', t.output));
+  return card;
+}
+function renderFoundryTeam(body, co) {
+  const emps = co.employees || [];
+  if (!emps.length) {
+    body.appendChild(foundryEl('div', 'foundry-empty', 'No one hired yet. She’ll bring teammates on as her company grows.'));
+    return;
+  }
+  const tasks = co.tasks || [];
+  const grid = foundryEl('div', 'foundry-team-grid');
+  emps.forEach(e => {
+    const card = foundryEl('div', 'foundry-teamcard');
+    const head = foundryEl('div', 'foundry-teamcard-head');
+    const initials = (e.name || e.role || '?').trim().slice(0, 2).toUpperCase();
+    head.appendChild(foundryEl('div', 'foundry-avatar', initials));
+    const info = foundryEl('div', 'foundry-emp-info');
+    info.appendChild(foundryEl('div', 'foundry-emp-name', e.name || e.role));
+    info.appendChild(foundryEl('div', 'foundry-emp-role', e.role || ''));
+    head.appendChild(info);
+    card.appendChild(head);
+    if (e.brief) card.appendChild(foundryEl('div', 'foundry-emp-brief', e.brief));
+    const mine = tasks.filter(t => t.assignee_id === e.id);
+    const tl = foundryEl('div', 'foundry-emp-tasks');
+    if (!mine.length) tl.appendChild(foundryEl('div', 'foundry-col-empty', 'No tasks yet'));
+    mine.forEach(t => {
+      const row = foundryEl('div', `foundry-emp-task foundry-task-${t.status || 'backlog'}`);
+      row.appendChild(foundryEl('span', 'foundry-emp-task-title', t.title));
+      row.appendChild(foundryEl('span', 'foundry-emp-task-status', (t.status || 'backlog').replace('_', ' ')));
+      tl.appendChild(row);
+    });
+    card.appendChild(tl);
+    grid.appendChild(card);
+  });
+  body.appendChild(grid);
+}
+function foundryMsgRow(m) {
+  const who = m.author_id === 'chairman' ? 'chairman' : (m.author_id === 'ceo' ? 'ceo' : 'emp');
+  const row = foundryEl('div', `foundry-msg foundry-msg-${who}`);
+  const meta = foundryEl('div', 'foundry-msg-meta');
+  meta.appendChild(foundryEl('span', 'foundry-msg-author', m.author));
+  if (m.role && m.role !== m.author) meta.appendChild(foundryEl('span', 'foundry-msg-role', m.role));
+  if (m.time) meta.appendChild(foundryEl('span', 'foundry-msg-time', m.time));
+  row.appendChild(meta);
+  row.appendChild(foundryEl('div', 'foundry-msg-text', m.text));
+  return row;
+}
+function renderFoundryChat(body, co) {
+  const list = foundryEl('div', 'foundry-chat');
+  list.id = 'foundry-chat-list';
+  const msgs = co.chat || [];
+  if (!msgs.length) {
+    list.appendChild(foundryEl('div', 'foundry-empty',
+      'Quiet so far. Post a message as the Chairman, or flip on the Heartbeat and let the team start passing ideas around.'));
+  }
+  msgs.forEach(m => list.appendChild(foundryMsgRow(m)));
+  body.appendChild(list);
+  list.scrollTop = list.scrollHeight;
+}
+function appendFoundryChat(m) {
+  if (foundryData) { foundryData.chat = (foundryData.chat || []); foundryData.chat.push(m); }
+  if (activeView !== 'foundry' || foundrySub !== 'chat') return;
+  const list = document.getElementById('foundry-chat-list');
+  if (!list) return;
+  const empty = list.querySelector('.foundry-empty');
+  if (empty) empty.remove();
+  list.appendChild(foundryMsgRow(m));
+  list.scrollTop = list.scrollHeight;
+}
+async function toggleFoundryBeat() {
+  if (!foundryData) return;
+  const next = !foundryData.heartbeat;
+  updateBeatButton(next);  // optimistic
+  try {
+    const r = await (await fetch('/api/company/heartbeat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on: next }),
+    })).json();
+    foundryData.heartbeat = !!r.heartbeat;
+    updateBeatButton(foundryData.heartbeat);
+  } catch (_) { updateBeatButton(foundryData.heartbeat); }
+}
+async function sendFoundryChat() {
+  const input = document.getElementById('foundry-chat-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  input.style.height = 'auto';
+  try {
+    await fetch('/api/company/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    // the chairman message + team replies arrive via the company_chat socket event
+  } catch (_) {}
+}
 document.getElementById('foundry-refresh')?.addEventListener('click', loadFoundry);
+document.getElementById('foundry-beat')?.addEventListener('click', toggleFoundryBeat);
+document.getElementById('foundry-subtabs')?.addEventListener('click', (e) => {
+  const b = e.target.closest('.foundry-subtab');
+  if (b) setFoundrySub(b.dataset.sub);
+});
+document.getElementById('foundry-chat-send')?.addEventListener('click', sendFoundryChat);
+document.getElementById('foundry-chat-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendFoundryChat(); }
+});
 
 /* ═══════════════════════════════════════════════════════════════════
    MANTLE — a read-only window into her inner life (mood, thoughts, etc.)

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=34" />
+  <link rel="stylesheet" href="style.css?v=35" />
 </head>
 <body>
 
@@ -636,9 +636,22 @@
               <div class="mantle-title" id="foundry-title">The Foundry</div>
               <div class="mantle-mood" id="foundry-sub">her company</div>
             </div>
+            <button class="foundry-beat" id="foundry-beat" title="Heartbeat: act on a timer without you in chat">
+              <span class="foundry-beat-dot"></span><span id="foundry-beat-label">Heartbeat off</span>
+            </button>
             <button class="note-tool" id="foundry-refresh" title="Refresh">↻</button>
           </header>
+          <div class="foundry-subtabs" id="foundry-subtabs">
+            <button class="foundry-subtab active" data-sub="overview">Overview</button>
+            <button class="foundry-subtab" data-sub="team">Team</button>
+            <button class="foundry-subtab" data-sub="chat">Group chat</button>
+          </div>
           <div class="foundry-body" id="foundry-body"></div>
+          <!-- group-chat composer (only shown on the chat sub-tab) -->
+          <div class="foundry-composer" id="foundry-composer" style="display:none">
+            <textarea id="foundry-chat-input" rows="1" placeholder="Speak to the team as the Chairman…"></textarea>
+            <button id="foundry-chat-send" title="Send">➤</button>
+          </div>
         </div>
       </section>
 
@@ -735,6 +748,6 @@
     <div class="pt-hint" id="pt-hint">double-click her to hide the conversation</div>
   </div>
 
-  <script src="app.js?v=34"></script>
+  <script src="app.js?v=35"></script>
 </body>
 </html>

@@ -261,7 +261,10 @@ async def broadcast(msg: dict):
 # through her brain to produce a real deliverable and report a status back.
 COMPANY_TICK = int(os.getenv("AITHA_COMPANY_TICK", "120"))      # seconds between ticks
 COMPANY_TOKENS = int(os.getenv("AITHA_COMPANY_TOKENS", "440"))  # work product length cap
+COMPANY_CHAT_EVERY = int(os.getenv("AITHA_COMPANY_CHAT_EVERY", "3"))  # group-chat round every N ticks
 _company_lock = asyncio.Lock()
+_company_tick_n = 0
+_chat_rotor = 0
 _STATUS_LINE = _re.compile(r'\s*STATUS:\s*(DONE|WORKING|BLOCKED)\b[\s\-:]*(.*)', _re.I)
 _STATUS_MAP = {"DONE": "done", "WORKING": "in_progress", "BLOCKED": "blocked"}
 
@@ -301,8 +304,7 @@ async def _employee_work(co: dict, emp: dict, task: dict) -> tuple[str, str, str
 
 
 async def _company_tick():
-    if not (settings.get("capabilities") or {}).get("company", False):
-        return
+    """One unit of silent work: advance a single task via its assignee."""
     pick = await asyncio.to_thread(company_store.pick_work)
     if not pick:
         return
@@ -323,11 +325,79 @@ async def _company_tick():
                          "changes": [f"{emp['name']}: '{task['title']}' → {status}"]})
 
 
+def _fmt_transcript(msgs: list) -> str:
+    return "\n".join(f"{m['author']} ({m['role']}): {m['text']}" for m in msgs) or "(no messages yet)"
+
+
+async def _chat_say(co: dict, speaker: dict, is_ceo: bool, directive: str) -> str:
+    """Generate one short group-chat message from a speaker (employee or the CEO)."""
+    ceo = settings.get("char_name", "Aitha")
+    name, role = speaker["name"], speaker["role"]
+    persona = (f"You are {name}, the {role} at {co['name']} "
+               f"({co.get('industry') or 'a startup'}). Mission: {co.get('mission') or '—'}. ")
+    if speaker.get("brief"):
+        persona += f"Your brief: {speaker['brief']}. "
+    system = (persona +
+        f"You're in the company group chat with your teammates, the CEO {ceo}, and the Chairman — "
+        "this is where the team passes ideas around to find the best solutions. Speak in 1–3 short "
+        "sentences: build on what was just said, be concrete, push or sharpen an idea, ask a pointed "
+        "question, or commit to a next step. No preamble, no stage directions — just talk.")
+    open_tasks = [t for t in co["tasks"] if t.get("status") in ("in_progress", "backlog", "blocked")]
+    ctx = ("Open work: " + "; ".join(f"{t['title']} [{t['status']}]" for t in open_tasks[:6])
+           if open_tasks else "")
+    transcript = _fmt_transcript(await asyncio.to_thread(company_store.recent_chat, 14))
+    user = f"{ctx}\n\nGROUP CHAT:\n{transcript}\n\n{directive}\nYou ({name}) say:"
+    out = (await brain._complete(system, user, max_tokens=170)).strip()
+    # Strip a self-prefixed "Name:" / "Name (role):" the model sometimes adds.
+    out = _re.sub(rf'^{_re.escape(name)}\s*(\([^)]*\))?\s*:\s*', '', out).strip()
+    return out
+
+
+async def _company_chat_round(seed: dict | None = None):
+    """A short group-chat exchange: a teammate speaks, then the CEO responds. When
+    `seed` is set (the Chairman just posted), the round responds to that."""
+    global _chat_rotor
+    co = await asyncio.to_thread(company_store.load)
+    if not co.get("founded") or not co.get("employees"):
+        return
+    emps = [e for e in co["employees"] if e.get("status", "active") == "active"]
+    if not emps:
+        return
+    ceo_name = settings.get("char_name", "Aitha")
+    ceo_speaker = {"name": ceo_name, "role": "CEO",
+                   "brief": f"You founded {co['name']} and lead it; synthesize the team's "
+                            "ideas into clear direction."}
+    emp = emps[_chat_rotor % len(emps)]
+    _chat_rotor += 1
+    if seed is not None:
+        plan = [(emp, False, "Respond to the Chairman's message above."),
+                (ceo_speaker, True, "As CEO, respond to the Chairman and align the team.")]
+    else:
+        plan = [(emp, False, "Raise or push forward an idea about the open work above."),
+                (ceo_speaker, True, "As CEO, respond to your teammate — decide, sharpen, or set direction.")]
+    async with _company_lock:
+        for speaker, is_ceo, directive in plan:
+            text = await _chat_say(co, speaker, is_ceo, directive)
+            if not text:
+                continue
+            aid = "ceo" if is_ceo else speaker["id"]
+            msg = await asyncio.to_thread(company_store.post_message,
+                                          aid, speaker["name"], speaker["role"], text)
+            if msg:
+                await broadcast({"type": "company_chat", "message": msg})
+
+
 async def company_engine_loop():
+    global _company_tick_n
     await asyncio.sleep(35)  # let startup + model warm-up settle first
     while True:
         try:
-            await _company_tick()
+            caps = settings.get("capabilities") or {}
+            if caps.get("company", False) and company_store.heartbeat_on():
+                _company_tick_n += 1
+                await _company_tick()                                # silent work each beat
+                if _company_tick_n % COMPANY_CHAT_EVERY == 0:        # …team talks now and then
+                    await _company_chat_round()
         except Exception as e:
             print(f"[company] tick error: {e}")
         await asyncio.sleep(COMPANY_TICK)
@@ -602,10 +672,38 @@ async def api_forge_delete(req: Request):
 
 @app.get("/api/company")
 async def api_company():
-    """Everything the Helm tab shows: her company, roster, task board, decisions."""
+    """Everything the Foundry tab shows: her company, roster, task board, decisions."""
     enabled = bool((settings.get("capabilities") or {}).get("company", False))
     data = await asyncio.to_thread(company_store.view)
     return {"enabled": enabled, "company": data}
+
+
+@app.post("/api/company/heartbeat")
+async def api_company_heartbeat(req: Request):
+    """Toggle the autonomous heartbeat — when on, the team works and talks on its own."""
+    if not (settings.get("capabilities") or {}).get("company", False):
+        return {"ok": False, "result": "Company capability is off."}
+    body = await req.json()
+    on = bool(body.get("on"))
+    co = await asyncio.to_thread(company_store.set_heartbeat, on)
+    await broadcast({"type": "company_changed", "changes": [f"heartbeat {'on' if on else 'off'}"]})
+    return {"ok": True, "heartbeat": bool(co.get("heartbeat"))}
+
+
+@app.post("/api/company/chat")
+async def api_company_chat(req: Request):
+    """The Chairman posts into the company group chat; the team responds in a round."""
+    if not (settings.get("capabilities") or {}).get("company", False):
+        return {"ok": False, "result": "Company capability is off."}
+    body = await req.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        return {"ok": False}
+    msg = await asyncio.to_thread(company_store.post_message, "chairman", "Chairman", "Chairman", text)
+    if msg:
+        await broadcast({"type": "company_chat", "message": msg})
+        asyncio.create_task(_company_chat_round(seed=msg))   # team replies (off-request)
+    return {"ok": True, "message": msg}
 
 
 # ─── Notes API ──────────────────────────────────────────────────────────
