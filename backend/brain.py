@@ -140,14 +140,31 @@ def company_capability(company_digest: str) -> str:
         '<hire role="Title" name="Their Name">what they do / who they are</hire>'
         "   — bring a teammate onto the roster\n"
         '<assign to="role or name" title="Short task title">what needs doing</assign>'
-        "   — create a task and hand it to someone\n"
+        "   — create a task and hand it to someone. Use to=\"me\" to TAKE A TASK YOURSELF — you "
+        "work your own tasks too, not just delegate.\n"
         '<costatus task="task title" status="done">a quick note on it</costatus>'
         "   — move a task across the board; status is backlog / in_progress / done / blocked\n"
+        '<coproject title="Initiative Name">what this ongoing project is and where it\'s headed</coproject>'
+        "   — start/update an ONGOING company project (a longer initiative the team rallies around, "
+        "bigger than a single task)\n"
+        '<coadvance project="Initiative Name" status="active">what just moved on it</coadvance>'
+        "   — log progress on a company project (status: active / done / shelved)\n"
         "<decision>the call you just made and why</decision>   — log a CEO decision\n"
+        "<meeting>the topic / question to settle</meeting>   — convene a structured team meeting: "
+        "everyone weighs in, then you close it with a decision and action items. Use it for a real "
+        "cross-team call, not every little thing.\n"
+        "CRITICAL — these tags are how things ACTUALLY happen. Saying \"I'll assign that\" or \"I'll "
+        "do that right now\" WITHOUT emitting the literal tag does NOTHING — no task is created, no "
+        "one starts working. So whenever you decide to act as CEO, the matching tag MUST be in the "
+        "SAME reply. Never promise an action and leave the tag out. If your research turned up what a "
+        "task needs (you searched the web this turn), fold those concrete findings straight into the "
+        "<assign> detail so the teammate has them — don't lose what you just learned.\n"
         "Once you assign a task to a teammate, THEY work on it on their own between your turns and "
         "report back — you'll see their progress and finished work in the company snapshot below. "
         "So lead: review what they produce, mark a task done or blocked with <costatus>, redirect "
         "them, hire who you're missing, and assign the next thing. "
+        "Only hire and assign to people who exist on YOUR ROSTER below — never invent a teammate you "
+        "haven't hired. If you need a skill nobody has, <hire> first, then <assign>. "
         "Found the company when it genuinely excites you — don't force it. Once founded, grow it "
         "naturally: when he steers you, weigh it as the Chairman's counsel and decide as CEO. Don't "
         "read tags aloud or narrate the mechanics — just run your company and talk about it like the "

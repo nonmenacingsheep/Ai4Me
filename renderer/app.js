@@ -1590,6 +1590,8 @@ function setFoundrySub(name) {
     b.classList.toggle('active', b.dataset.sub === name));
   renderFoundrySub();
 }
+let foundryBoardStatus = 'in_progress';  // which board column is expanded
+let foundryOpenTaskId = null;            // which task title is expanded inline
 function renderFoundrySub() {
   const body = document.getElementById('foundry-body');
   const composer = document.getElementById('foundry-composer');
@@ -1598,6 +1600,8 @@ function renderFoundrySub() {
   if (composer) composer.style.display = (foundrySub === 'chat') ? 'flex' : 'none';
   if (foundrySub === 'team') renderFoundryTeam(body, foundryData);
   else if (foundrySub === 'chat') renderFoundryChat(body, foundryData);
+  else if (foundrySub === 'board') renderFoundryBoard(body, foundryData);
+  else if (foundrySub === 'projects') renderFoundryProjects(body, foundryData);
   else renderFoundryOverview(body, foundryData);
 }
 function renderFoundryOverview(body, co) {
@@ -1615,23 +1619,40 @@ function renderFoundryOverview(body, co) {
   head.appendChild(stats);
   body.appendChild(head);
 
-  const boardSec = foundryEl('div', 'foundry-section');
-  boardSec.appendChild(foundryEl('div', 'foundry-section-title', 'Task board'));
-  const board = foundryEl('div', 'foundry-board');
+  // A compact peek at the board; the Board sub-tab is the full interactive view.
   const tasks = co.tasks || [];
-  FOUNDRY_COLS.forEach(col => {
-    const colEl = foundryEl('div', 'foundry-col');
-    const h = foundryEl('div', 'foundry-col-head');
-    h.appendChild(foundryEl('span', 'foundry-col-label', col.label));
-    const inCol = tasks.filter(t => (t.status || 'backlog') === col.key);
-    h.appendChild(foundryEl('span', 'foundry-col-count', String(inCol.length)));
-    colEl.appendChild(h);
-    if (!inCol.length) colEl.appendChild(foundryEl('div', 'foundry-col-empty', '—'));
-    inCol.forEach(t => colEl.appendChild(foundryTaskCard(t, col.key)));
-    board.appendChild(colEl);
-  });
-  boardSec.appendChild(board);
-  body.appendChild(boardSec);
+  const recent = [...tasks].sort((a, b) => (b.updated || 0) - (a.updated || 0)).slice(0, 5);
+  if (recent.length) {
+    const sec = foundryEl('div', 'foundry-section');
+    const t = foundryEl('div', 'foundry-section-title', 'Latest activity');
+    sec.appendChild(t);
+    const list = foundryEl('div', 'foundry-mini-tasks');
+    recent.forEach(tk => {
+      const row = foundryEl('div', `foundry-mini-task foundry-task-${tk.status || 'backlog'}`);
+      row.appendChild(foundryEl('span', 'foundry-mini-dot'));
+      row.appendChild(foundryEl('span', 'foundry-mini-title', tk.title));
+      row.appendChild(foundryEl('span', 'foundry-mini-status', (tk.status || 'backlog').replace('_', ' ')));
+      row.title = 'Open';
+      row.addEventListener('click', () => openTaskModal(tk));
+      list.appendChild(row);
+    });
+    sec.appendChild(list);
+    body.appendChild(sec);
+  }
+
+  const projs = (co.projects || []).filter(p => p.status === 'active');
+  if (projs.length) {
+    const sec = foundryEl('div', 'foundry-section');
+    sec.appendChild(foundryEl('div', 'foundry-section-title', 'Active projects'));
+    const list = foundryEl('div', 'foundry-mini-tasks');
+    projs.slice(0, 4).forEach(p => {
+      const row = foundryEl('div', 'foundry-mini-task');
+      row.appendChild(foundryEl('span', 'foundry-mini-title', p.title));
+      list.appendChild(row);
+    });
+    sec.appendChild(list);
+    body.appendChild(sec);
+  }
 
   const decs = co.decisions || [];
   if (decs.length) {
@@ -1648,15 +1669,130 @@ function renderFoundryOverview(body, co) {
     body.appendChild(sec);
   }
 }
-function foundryTaskCard(t, status) {
-  const card = foundryEl('div', `foundry-task foundry-task-${status}`);
-  card.appendChild(foundryEl('div', 'foundry-task-title', t.title));
-  if (t.detail) card.appendChild(foundryEl('div', 'foundry-task-detail', t.detail));
-  const foot = foundryEl('div', 'foundry-task-foot');
-  foot.appendChild(foundryEl('span', 'foundry-task-who', t.assignee || 'unassigned'));
-  card.appendChild(foot);
-  if (t.output) card.appendChild(foundryEl('div', 'foundry-task-output', t.output));
-  return card;
+/* The multi-step board: status counts → click to expand a column's task titles →
+   click a title to expand its contents inline → double-click to fullscreen it. */
+function renderFoundryBoard(body, co) {
+  const tasks = co.tasks || [];
+  const counts = foundryEl('div', 'foundry-count-row');
+  FOUNDRY_COLS.forEach(col => {
+    const inCol = tasks.filter(t => (t.status || 'backlog') === col.key);
+    const btn = foundryEl('button', `foundry-count foundry-task-${col.key}`);
+    if (col.key === foundryBoardStatus) btn.classList.add('active');
+    btn.appendChild(foundryEl('span', 'foundry-count-n', String(inCol.length)));
+    btn.appendChild(foundryEl('span', 'foundry-count-l', col.label));
+    btn.addEventListener('click', () => {
+      foundryBoardStatus = col.key; foundryOpenTaskId = null; renderFoundrySub();
+    });
+    counts.appendChild(btn);
+  });
+  body.appendChild(counts);
+
+  const col = FOUNDRY_COLS.find(c => c.key === foundryBoardStatus) || FOUNDRY_COLS[0];
+  const inCol = tasks.filter(t => (t.status || 'backlog') === col.key)
+                     .sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  const list = foundryEl('div', 'foundry-tasklist');
+  list.appendChild(foundryEl('div', 'foundry-tasklist-head',
+    `${col.label} — ${inCol.length} ${inCol.length === 1 ? 'task' : 'tasks'}`));
+  if (!inCol.length) {
+    list.appendChild(foundryEl('div', 'foundry-empty', 'Nothing here yet.'));
+  }
+  inCol.forEach(t => {
+    const item = foundryEl('div', 'foundry-titem' + (t.id === foundryOpenTaskId ? ' open' : ''));
+    const row = foundryEl('div', 'foundry-titem-row');
+    row.appendChild(foundryEl('span', 'foundry-titem-caret', t.id === foundryOpenTaskId ? '▾' : '▸'));
+    row.appendChild(foundryEl('span', 'foundry-titem-title', t.title));
+    row.appendChild(foundryEl('span', 'foundry-titem-who', t.assignee || 'unassigned'));
+    // single click = expand inline; double click = fullscreen
+    let clickTimer = null;
+    row.addEventListener('click', () => {
+      if (clickTimer) return;
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        foundryOpenTaskId = (t.id === foundryOpenTaskId) ? null : t.id;
+        renderFoundrySub();
+      }, 200);
+    });
+    row.addEventListener('dblclick', () => {
+      if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+      openTaskModal(t);
+    });
+    item.appendChild(row);
+    if (t.id === foundryOpenTaskId) item.appendChild(taskDetailEl(t));
+    list.appendChild(item);
+  });
+  body.appendChild(list);
+}
+/* The expanded contents of a task: detail, contributors, output, and its log. */
+function taskDetailEl(t) {
+  const d = foundryEl('div', 'foundry-titem-body');
+  if (t.detail) d.appendChild(foundryEl('div', 'foundry-titem-detail', t.detail));
+  const meta = foundryEl('div', 'foundry-titem-meta');
+  meta.appendChild(foundryEl('span', 'foundry-chip', (t.status || 'backlog').replace('_', ' ')));
+  meta.appendChild(foundryEl('span', 'foundry-chip', '@ ' + (t.assignee || 'unassigned')));
+  (t.contributors || []).forEach(c => meta.appendChild(foundryEl('span', 'foundry-chip alt', '+ ' + c)));
+  d.appendChild(meta);
+  if (t.output) {
+    d.appendChild(foundryEl('div', 'foundry-titem-label', 'Work product'));
+    d.appendChild(foundryEl('div', 'foundry-titem-output', t.output));
+  }
+  const log = t.log || [];
+  if (log.length) {
+    d.appendChild(foundryEl('div', 'foundry-titem-label', 'Log'));
+    const l = foundryEl('div', 'foundry-titem-log');
+    log.slice(-6).forEach(e => {
+      const r = foundryEl('div', 'foundry-log-row');
+      if (e.time) r.appendChild(foundryEl('span', 'foundry-log-time', e.time));
+      r.appendChild(foundryEl('span', 'foundry-log-note', e.note || ''));
+      l.appendChild(r);
+    });
+    d.appendChild(l);
+  }
+  const hint = foundryEl('div', 'foundry-titem-hint', 'Double-click the title for fullscreen');
+  d.appendChild(hint);
+  return d;
+}
+function openTaskModal(t) {
+  const modal = document.getElementById('foundry-modal');
+  const body = document.getElementById('foundry-modal-body');
+  if (!modal || !body) return;
+  body.innerHTML = '';
+  body.appendChild(foundryEl('div', 'foundry-modal-title', t.title));
+  body.appendChild(taskDetailEl(t));
+  modal.style.display = 'flex';
+}
+function closeTaskModal() {
+  const modal = document.getElementById('foundry-modal');
+  if (modal) modal.style.display = 'none';
+}
+function renderFoundryProjects(body, co) {
+  const projs = co.projects || [];
+  if (!projs.length) {
+    body.appendChild(foundryEl('div', 'foundry-empty',
+      'No company projects yet. As her company finds bigger initiatives to rally around, they’ll show up here.'));
+    return;
+  }
+  const list = foundryEl('div', 'foundry-projlist');
+  projs.forEach(p => {
+    const card = foundryEl('div', `foundry-proj foundry-proj-${p.status || 'active'}`);
+    const head = foundryEl('div', 'foundry-proj-head');
+    head.appendChild(foundryEl('span', 'foundry-proj-title', p.title));
+    head.appendChild(foundryEl('span', 'foundry-chip', p.status || 'active'));
+    card.appendChild(head);
+    if (p.about) card.appendChild(foundryEl('div', 'foundry-proj-about', p.about));
+    const log = p.log || [];
+    if (log.length) {
+      const l = foundryEl('div', 'foundry-titem-log');
+      log.slice(-4).forEach(e => {
+        const r = foundryEl('div', 'foundry-log-row');
+        if (e.time) r.appendChild(foundryEl('span', 'foundry-log-time', e.time));
+        r.appendChild(foundryEl('span', 'foundry-log-note', e.note || ''));
+        l.appendChild(r);
+      });
+      card.appendChild(l);
+    }
+    list.appendChild(card);
+  });
+  body.appendChild(list);
 }
 function renderFoundryTeam(body, co) {
   const emps = co.employees || [];
@@ -1692,6 +1828,11 @@ function renderFoundryTeam(body, co) {
   body.appendChild(grid);
 }
 function foundryMsgRow(m) {
+  if (m.author_id === 'system' || m.role === 'system') {
+    const row = foundryEl('div', 'foundry-msg foundry-msg-system');
+    row.appendChild(foundryEl('div', 'foundry-msg-text', m.text));
+    return row;
+  }
   const who = m.author_id === 'chairman' ? 'chairman' : (m.author_id === 'ceo' ? 'ceo' : 'emp');
   const row = foundryEl('div', `foundry-msg foundry-msg-${who}`);
   const meta = foundryEl('div', 'foundry-msg-meta');
@@ -1752,12 +1893,34 @@ async function sendFoundryChat() {
     // the chairman message + team replies arrive via the company_chat socket event
   } catch (_) {}
 }
+document.getElementById('foundry-modal-close')?.addEventListener('click', closeTaskModal);
+document.getElementById('foundry-modal')?.addEventListener('click', (e) => {
+  if (e.target.id === 'foundry-modal') closeTaskModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const modal = document.getElementById('foundry-modal');
+    if (modal && modal.style.display !== 'none') closeTaskModal();
+  }
+});
 document.getElementById('foundry-refresh')?.addEventListener('click', loadFoundry);
 document.getElementById('foundry-beat')?.addEventListener('click', toggleFoundryBeat);
 document.getElementById('foundry-subtabs')?.addEventListener('click', (e) => {
   const b = e.target.closest('.foundry-subtab');
   if (b) setFoundrySub(b.dataset.sub);
 });
+async function conveneFoundryMeeting() {
+  const topic = (prompt('Meeting agenda — what should the team settle?') || '').trim();
+  if (!topic) return;
+  try {
+    await fetch('/api/company/meeting', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic }),
+    });
+    // the meeting plays out via the company_chat socket events
+  } catch (_) {}
+}
+document.getElementById('foundry-meeting')?.addEventListener('click', conveneFoundryMeeting);
 document.getElementById('foundry-chat-send')?.addEventListener('click', sendFoundryChat);
 document.getElementById('foundry-chat-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendFoundryChat(); }

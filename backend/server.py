@@ -269,28 +269,66 @@ _STATUS_LINE = _re.compile(r'\s*STATUS:\s*(DONE|WORKING|BLOCKED)\b[\s\-:]*(.*)',
 _STATUS_MAP = {"DONE": "done", "WORKING": "in_progress", "BLOCKED": "blocked"}
 
 
+async def _research(query: str) -> str:
+    """One bounded web lookup for the autonomous team, so a teammate can ground a
+    deliverable in real, current information instead of guessing."""
+    try:
+        return (await asyncio.to_thread(brain._ddg_search, query)) or "(no results)"
+    except Exception as e:
+        return f"(search failed: {e})"
+
+
+# A teammate can reach for the web mid-task: <search>query</search>.
+_WORK_SEARCH = _re.compile(r'<search>(.*?)</search>', _re.S | _re.I)
+
+
 async def _employee_work(co: dict, emp: dict, task: dict) -> tuple[str, str, str]:
-    """Run one employee's persona against one task. Returns (deliverable, status, note)."""
+    """Run one employee's persona against one task. Returns (deliverable, status, note).
+    The teammate sees the whole board + roster, and can do one web search to ground
+    their work before producing it."""
     ceo = settings.get("char_name", "Aitha")
+    is_ceo = emp.get("id") == company_store.CEO_ID
     prior = (task.get("output") or "").strip()
+    roster = company_store.roster_text(ceo)
+    board = company_store.tasks_digest()
+    if is_ceo:
+        whoami = (f"You are {ceo}, the CEO and founder of {co.get('name')}, "
+                  f"a {co.get('industry') or 'startup'}. Mission: {co.get('mission') or '—'}. "
+                  "You took this task on yourself.")
+    else:
+        whoami = (f"You are {emp.get('name')}, the {emp.get('role')} at {co.get('name')}, "
+                  f"a {co.get('industry') or 'startup'}. Mission: {co.get('mission') or '—'}. "
+                  f"Your brief: {emp.get('brief') or 'do your role well'}. You report to the CEO, {ceo}.")
     system = (
-        f"You are {emp.get('name')}, the {emp.get('role')} at {co.get('name')}, "
-        f"a {co.get('industry') or 'startup'}. Mission: {co.get('mission') or '—'}. "
-        f"Your brief: {emp.get('brief') or 'do your role well'}. You report to the CEO, "
-        f"{ceo}. Do real, concrete work and produce the actual deliverable — not a "
-        "description of what you'd do. Be specific and genuinely useful. Keep it tight."
+        whoami + " Do real, concrete work and produce the actual deliverable — not a "
+        "description of what you'd do. Be specific and genuinely useful. Keep it tight.\n"
+        f"TEAM: {roster}.\nWHOLE BOARD (so you stay coordinated):\n{board}"
     )
-    user = (
+    instructions = (
         f"TASK: {task.get('title')}\n"
         + (f"DETAILS: {task.get('detail')}\n" if task.get("detail") else "")
         + (f"\nWORK SO FAR (continue / improve it):\n{prior}\n" if prior else "")
-        + "\nDo the next concrete chunk of work and output the deliverable itself.\n"
-        "Then, on the FINAL line, output exactly one of:\n"
+        + "\nIf — and only if — you genuinely need current, real-world facts to do this "
+        "well, you may look ONE thing up by putting <search>your query</search> as the FIRST "
+        "line of your reply and nothing else; you'll get results back and then produce the work. "
+        "Otherwise, do the next concrete chunk of work now and output the deliverable itself.\n"
+        "When you produce the deliverable, on the FINAL line output exactly one of:\n"
         "STATUS: DONE  — the task is fully complete\n"
         "STATUS: WORKING  — solid progress, more to do next time\n"
         "STATUS: BLOCKED - <what you need from the CEO to continue>"
     )
-    raw = (await brain._complete(system, user, max_tokens=COMPANY_TOKENS)).strip()
+    raw = (await brain._complete(system, instructions, max_tokens=COMPANY_TOKENS)).strip()
+    # Tool-use: if they reached for the web, run it and re-run once with the findings
+    # folded in — so research and the deliverable stay in the same thread.
+    sm = _WORK_SEARCH.search(raw)
+    if sm and sm.group(1).strip():
+        query = sm.group(1).strip()
+        results = await _research(query)
+        grounded = (instructions
+                    + f"\n\nYOU SEARCHED \"{query}\" AND GOT:\n{results}\n\n"
+                    "Now produce the deliverable, grounded in what you found. Do NOT search "
+                    "again — use these results. End with the STATUS line.")
+        raw = (await brain._complete(system, grounded, max_tokens=COMPANY_TOKENS)).strip()
     status, note, body = "in_progress", "", raw
     lines = raw.splitlines()
     for i in range(len(lines) - 1, -1, -1):
@@ -305,7 +343,8 @@ async def _employee_work(co: dict, emp: dict, task: dict) -> tuple[str, str, str
 
 async def _company_tick():
     """One unit of silent work: advance a single task via its assignee."""
-    pick = await asyncio.to_thread(company_store.pick_work)
+    ceo_name = settings.get("char_name", "Aitha")
+    pick = await asyncio.to_thread(company_store.pick_work, ceo_name)
     if not pick:
         return
     emp, task = pick
@@ -329,6 +368,43 @@ def _fmt_transcript(msgs: list) -> str:
     return "\n".join(f"{m['author']} ({m['role']}): {m['text']}" for m in msgs) or "(no messages yet)"
 
 
+# A teammate co-writing a task from the group chat. (_Q is defined further down,
+# so spell out the same quote class inline to stay import-order-safe.)
+_CW_Q = "\"'“”‘’"
+_COWRITE = _re.compile(
+    rf'<cowrite\s+task\s*=\s*[{_CW_Q}]([^{_CW_Q}]+)[{_CW_Q}]\s*>(.*?)</cowrite\s*>', _re.S | _re.I,
+)
+# Directive tags valid inside the group chat (so we can strip them from what's shown).
+_CHAT_TAGS = ("assign", "costatus", "coproject", "coadvance", "hire", "cowrite", "decision")
+_CHAT_DECISION = _re.compile(r'<decision>(.*?)</decision>', _re.S | _re.I)
+_CHAT_TAG_RE = _re.compile(
+    r'<(' + '|'.join(_CHAT_TAGS) + r')\b.*?</\1\s*>', _re.S | _re.I,
+)
+
+
+def _apply_chat_directives(text: str, actor_name: str, is_ceo: bool) -> tuple[str, list[str]]:
+    """Parse + apply any company directives a speaker emitted in the group chat, then
+    return (text with the tags stripped, short summaries of what happened). The CEO can
+    assign / move tasks / start projects / decide; anyone can co-write a task."""
+    summaries: list[str] = []
+    if is_ceo:
+        # Reuse the CEO directive pipeline for the action tags.
+        a = "".join(m.group(0) for m in _ASSIGN_DIRECTIVE.finditer(text))
+        c = "".join(m.group(0) for m in _COSTATUS_DIRECTIVE.finditer(text))
+        h = "".join(m.group(0) for m in _HIRE_DIRECTIVE.finditer(text))
+        cp = "".join(m.group(0) for m in _COPROJECT_DIRECTIVE.finditer(text))
+        ca = "".join(m.group(0) for m in _COADVANCE_DIRECTIVE.finditer(text))
+        dec = "\x00".join(m.group(1).strip() for m in _CHAT_DECISION.finditer(text) if m.group(1).strip())
+        if a or c or h or cp or ca or dec:
+            summaries += apply_company_directives("", h, a, c, dec, cp, ca, by=actor_name)
+    for m in _COWRITE.finditer(text):
+        t = company_store.co_write(m.group(1).strip(), actor_name, m.group(2).strip())
+        if t:
+            summaries.append(f"co-wrote '{t['title']}'")
+    clean = _CHAT_TAG_RE.sub("", text).strip()
+    return clean, summaries
+
+
 async def _chat_say(co: dict, speaker: dict, is_ceo: bool, directive: str) -> str:
     """Generate one short group-chat message from a speaker (employee or the CEO)."""
     ceo = settings.get("char_name", "Aitha")
@@ -337,17 +413,41 @@ async def _chat_say(co: dict, speaker: dict, is_ceo: bool, directive: str) -> st
                f"({co.get('industry') or 'a startup'}). Mission: {co.get('mission') or '—'}. ")
     if speaker.get("brief"):
         persona += f"Your brief: {speaker['brief']}. "
+    roster = company_store.roster_text(ceo)
+    if is_ceo:
+        powers = (
+            "\nYou are the CEO: this chat is also where you DIRECT the company. When the "
+            "conversation lands on something to do, ACT on it right there by including the tag "
+            "in your message (the tag is stripped from what teammates see — they just see your "
+            "words plus a note that you acted):\n"
+            '  <assign to="name or role" title="Short title">what to do</assign>  (to="me" to take it yourself)\n'
+            '  <costatus task="title" status="done">note</costatus>\n'
+            '  <coproject title="Initiative">what it is</coproject>\n'
+            '  <coadvance project="Initiative" status="active">what moved on it</coadvance>\n'
+            "  <decision>the call and why</decision>\n"
+            "Don't just SAY you'll assign something — emit the tag in the same message. Only "
+            f"assign to people on the team: {roster}."
+        )
+    else:
+        powers = (
+            "\nYou can help shape the work: if you want to add concrete content to a task on the "
+            'board, include <cowrite task="exact task title">your addition</cowrite> in your '
+            "message (it's stripped from what others see; your contribution is saved onto that task)."
+        )
     system = (persona +
         f"You're in the company group chat with your teammates, the CEO {ceo}, and the Chairman — "
         "this is where the team passes ideas around to find the best solutions. Speak in 1–3 short "
         "sentences: build on what was just said, be concrete, push or sharpen an idea, ask a pointed "
-        "question, or commit to a next step. No preamble, no stage directions — just talk.")
-    open_tasks = [t for t in co["tasks"] if t.get("status") in ("in_progress", "backlog", "blocked")]
-    ctx = ("Open work: " + "; ".join(f"{t['title']} [{t['status']}]" for t in open_tasks[:6])
-           if open_tasks else "")
+        "question, or commit to a next step. No preamble, no stage directions — just talk."
+        + powers + f"\nThe team is exactly: {roster} — never invent teammates who aren't listed.")
+    board = company_store.tasks_digest(12)
+    active_projs = [p for p in co.get("projects", []) if p.get("status") == "active"]
+    projline = ("\n\nCOMPANY PROJECTS (ongoing initiatives — reference them by name):\n"
+                + "\n".join(f'• "{p.get("title")}" — {p.get("about","")}' for p in active_projs[:8])
+                ) if active_projs else ""
     transcript = _fmt_transcript(await asyncio.to_thread(company_store.recent_chat, 14))
-    user = f"{ctx}\n\nGROUP CHAT:\n{transcript}\n\n{directive}\nYou ({name}) say:"
-    out = (await brain._complete(system, user, max_tokens=170)).strip()
+    user = f"THE BOARD:\n{board}{projline}\n\nGROUP CHAT:\n{transcript}\n\n{directive}\nYou ({name}) say:"
+    out = (await brain._complete(system, user, max_tokens=220)).strip()
     # Strip a self-prefixed "Name:" / "Name (role):" the model sometimes adds.
     out = _re.sub(rf'^{_re.escape(name)}\s*(\([^)]*\))?\s*:\s*', '', out).strip()
     return out
@@ -378,13 +478,74 @@ async def _company_chat_round(seed: dict | None = None):
     async with _company_lock:
         for speaker, is_ceo, directive in plan:
             text = await _chat_say(co, speaker, is_ceo, directive)
-            if not text:
-                continue
-            aid = "ceo" if is_ceo else speaker["id"]
-            msg = await asyncio.to_thread(company_store.post_message,
-                                          aid, speaker["name"], speaker["role"], text)
-            if msg:
-                await broadcast({"type": "company_chat", "message": msg})
+            await _post_chat(speaker, is_ceo, text)
+
+
+async def _post_chat(speaker: dict, is_ceo: bool, text: str):
+    """Apply any directives in a chat message, strip them, post it, and broadcast —
+    plus a system note for any actions taken. Shared by chat rounds and meetings."""
+    if not text:
+        return
+    clean, summaries = await asyncio.to_thread(
+        _apply_chat_directives, text, speaker["name"], is_ceo)
+    text = clean or text
+    aid = "ceo" if is_ceo else speaker["id"]
+    msg = await asyncio.to_thread(company_store.post_message,
+                                  aid, speaker["name"], speaker["role"], text)
+    if msg:
+        await broadcast({"type": "company_chat", "message": msg})
+    if summaries:
+        note = await asyncio.to_thread(
+            company_store.post_message, "system", "Foundry", "system",
+            "📋 " + "; ".join(summaries))
+        if note:
+            await broadcast({"type": "company_chat", "message": note})
+            await broadcast({"type": "company_changed", "changes": summaries})
+
+
+async def _system_chat(text: str):
+    """Post a system notice into the group chat (meeting markers, etc.)."""
+    note = await asyncio.to_thread(company_store.post_message, "system", "Foundry", "system", text)
+    if note:
+        await broadcast({"type": "company_chat", "message": note})
+
+
+async def company_meeting(topic: str):
+    """A structured team meeting: the CEO opens an agenda, every active teammate
+    weighs in once, then the CEO MUST close it with a concrete decision and any
+    action items (assignments). Inspired by decision-forcing meeting frameworks —
+    "discussed but didn't decide" isn't allowed to be the outcome."""
+    topic = (topic or "").strip()
+    co = await asyncio.to_thread(company_store.load)
+    if not co.get("founded") or not topic:
+        return
+    ceo_name = settings.get("char_name", "Aitha")
+    ceo_speaker = {"name": ceo_name, "role": "CEO",
+                   "brief": f"You founded {co['name']} and lead it."}
+    emps = [e for e in co["employees"] if e.get("status", "active") == "active"]
+    async with _company_lock:
+        await _system_chat(f"🏛 Meeting called by {ceo_name} — agenda: {topic}")
+        # CEO frames the meeting.
+        opening = await _chat_say(co, ceo_speaker, True,
+            f"Open a team meeting on this agenda: \"{topic}\". In 1-2 sentences, frame the "
+            "question the team needs to settle and invite their input. Don't decide yet.")
+        await _post_chat(ceo_speaker, True, opening)
+        # Each teammate weighs in once.
+        for emp in emps[:8]:
+            co = await asyncio.to_thread(company_store.load)  # pick up running transcript
+            take = await _chat_say(co, emp, False,
+                f"The meeting agenda is: \"{topic}\". Give your sharpest take from your role — "
+                "a concrete recommendation, risk, or option. One short paragraph.")
+            await _post_chat(emp, False, take)
+        # CEO closes — forced to decide and assign.
+        co = await asyncio.to_thread(company_store.load)
+        closing = await _chat_say(co, ceo_speaker, True,
+            f"Now CLOSE the meeting on \"{topic}\". You MUST make the call: state the decision in "
+            "1-2 sentences, then emit a <decision>…</decision> capturing it, and emit an "
+            "<assign>…</assign> for each concrete next step (assign to a teammate by name, or to "
+            "\"me\"). Do not leave it undecided.")
+        await _post_chat(ceo_speaker, True, closing)
+        await _system_chat("🏛 Meeting adjourned.")
 
 
 async def company_engine_loop():
@@ -704,6 +865,20 @@ async def api_company_chat(req: Request):
         await broadcast({"type": "company_chat", "message": msg})
         asyncio.create_task(_company_chat_round(seed=msg))   # team replies (off-request)
     return {"ok": True, "message": msg}
+
+
+@app.post("/api/company/meeting")
+async def api_company_meeting(req: Request):
+    """Convene a structured team meeting on a topic: everyone weighs in, the CEO
+    closes with a decision and action items. Runs off-request via the chat socket."""
+    if not (settings.get("capabilities") or {}).get("company", False):
+        return {"ok": False, "result": "Company capability is off."}
+    body = await req.json()
+    topic = (body.get("topic") or "").strip()
+    if not topic:
+        return {"ok": False}
+    asyncio.create_task(company_meeting(topic))
+    return {"ok": True}
 
 
 # ─── Notes API ──────────────────────────────────────────────────────────
@@ -1420,6 +1595,17 @@ _COSTATUS_DIRECTIVE = _re.compile(
     rf'(?:\s+status\s*=\s*[{_Q}]?(backlog|in_progress|done|blocked)[{_Q}]?)?\s*>'
     r'(.*?)</costatus\s*>', _re.S | _re.I,
 )
+# Ongoing company projects (initiatives bigger than one task).
+_COPROJECT_DIRECTIVE = _re.compile(
+    rf'<coproject\s+title\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+status\s*=\s*[{_Q}]?(active|done|shelved)[{_Q}]?)?\s*>'
+    r'(.*?)</coproject\s*>', _re.S | _re.I,
+)
+_COADVANCE_DIRECTIVE = _re.compile(
+    rf'<coadvance\s+project\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+status\s*=\s*[{_Q}]?(active|done|shelved)[{_Q}]?)?\s*>'
+    r'(.*?)</coadvance\s*>', _re.S | _re.I,
+)
 
 
 # An event she adds: <event date="YYYY-MM-DD" time="HH:MM" title="X">notes</event>
@@ -1562,9 +1748,14 @@ def apply_project_directives(project_raw: str, advance_raw: str) -> list[str]:
 
 
 def apply_company_directives(founded_raw: str, hire_raw: str, assign_raw: str,
-                             costatus_raw: str, decision_raw: str) -> list[str]:
+                             costatus_raw: str, decision_raw: str,
+                             coproject_raw: str = "", coadvance_raw: str = "",
+                             by: str = "") -> list[str]:
     """Apply her CEO directives against the company store. Returns short human
-    summaries of what changed (for the directive debug feed). Runs in a thread."""
+    summaries of what changed (for the directive debug feed). Runs in a thread.
+    `by` is the actor's name (CEO by default, or an employee co-writing in chat)."""
+    ceo_name = settings.get("char_name", "Aitha")
+    actor = by or ceo_name
     changed: list[str] = []
     for m in _FOUNDED_DIRECTIVE.finditer(founded_raw or ""):
         name = m.group(1).strip()
@@ -1586,7 +1777,7 @@ def apply_company_directives(founded_raw: str, hire_raw: str, assign_raw: str,
         title = m.group(2).strip()
         detail = m.group(3).strip()
         if title:
-            t = company_store.assign(to, title, detail=detail)
+            t = company_store.assign(to, title, detail=detail, ceo_name=ceo_name, by=actor)
             if t:
                 changed.append(f"assigned '{t['title']}' → {t['assignee']}")
     for m in _COSTATUS_DIRECTIVE.finditer(costatus_raw or ""):
@@ -1597,6 +1788,22 @@ def apply_company_directives(founded_raw: str, hire_raw: str, assign_raw: str,
             t = company_store.set_task_status(task, status, note=note)
             if t:
                 changed.append(f"{t['title']} → {t['status']}")
+    for m in _COPROJECT_DIRECTIVE.finditer(coproject_raw or ""):
+        title = m.group(1).strip()
+        status = (m.group(2) or "").lower() or None
+        about = m.group(3).strip()
+        if title:
+            p = company_store.upsert_project(title, about=about, status=status)
+            if p:
+                changed.append(f"project '{p['title']}'")
+    for m in _COADVANCE_DIRECTIVE.finditer(coadvance_raw or ""):
+        key = m.group(1).strip()
+        status = (m.group(2) or "").lower() or None
+        note = m.group(3).strip()
+        if key:
+            p = company_store.advance_project(key, note, status=status)
+            if p:
+                changed.append(f"advanced '{p['title']}'")
     for body in [b.strip() for b in (decision_raw or "").split("\x00") if b.strip()]:
         d = company_store.decide(body)
         if d:
@@ -1675,6 +1882,9 @@ _HIDDEN_SPECS = [
     ("hire", "<hire", "</hire>", True),                # hire a teammate
     ("assign", "<assign", "</assign>", True),          # create + assign a company task
     ("costatus", "<costatus", "</costatus>", True),    # move a company task on the board
+    ("coproject", "<coproject", "</coproject>", True), # start/update an ongoing company project
+    ("coadvance", "<coadvance", "</coadvance>", True), # log progress on a company project
+    ("meeting", "<meeting>", "</meeting>", False),     # convene a structured team meeting
     ("decision", "<decision>", "</decision>", False),  # log a CEO decision
 ]
 
@@ -1840,6 +2050,18 @@ class _HiddenBlockFilter:
     def costatus_blocks(self) -> str:
         """Raw <costatus> blocks (task moves on the board)."""
         return "".join(t for n, t in self.captured if n == "costatus")
+
+    def coproject_blocks(self) -> str:
+        """Raw <coproject> blocks (ongoing company initiatives)."""
+        return "".join(t for n, t in self.captured if n == "coproject")
+
+    def coadvance_blocks(self) -> str:
+        """Raw <coadvance> blocks (progress on company projects)."""
+        return "".join(t for n, t in self.captured if n == "coadvance")
+
+    def meeting_requests(self) -> list[str]:
+        """Topics she chose to convene a team meeting on this turn."""
+        return [t.strip() for n, t in self.captured if n == "meeting" and t.strip()]
 
     def decision_blocks(self) -> str:
         """CEO decisions she logged this turn, NUL-joined (one per entry)."""
@@ -2162,15 +2384,23 @@ async def ws_endpoint(websocket: WebSocket):
         founded_raw, hire_raw = hfilter.founded_blocks(), hfilter.hire_blocks()
         assign_raw, costatus_raw = hfilter.assign_blocks(), hfilter.costatus_blocks()
         decision_raw = hfilter.decision_blocks()
-        if founded_raw or hire_raw or assign_raw or costatus_raw or decision_raw:
+        coproject_raw, coadvance_raw = hfilter.coproject_blocks(), hfilter.coadvance_blocks()
+        if (founded_raw or hire_raw or assign_raw or costatus_raw or decision_raw
+                or coproject_raw or coadvance_raw):
             co_changed = await asyncio.to_thread(
                 apply_company_directives, founded_raw, hire_raw, assign_raw,
-                costatus_raw, decision_raw)
+                costatus_raw, decision_raw, coproject_raw, coadvance_raw)
             if co_changed:
                 await broadcast({"type": "company_changed", "changes": co_changed})
             else:
                 print(f"[company] unparsed block(s): "
-                      f"{founded_raw or hire_raw or assign_raw or costatus_raw or decision_raw!r}")
+                      f"{founded_raw or hire_raw or assign_raw or costatus_raw or decision_raw or coproject_raw or coadvance_raw!r}")
+
+        # A team meeting she chose to convene — run it off-request (it posts into the
+        # group chat and forces a decision + action items at the end).
+        meeting_reqs = hfilter.meeting_requests()
+        if meeting_reqs and (settings.get("capabilities") or {}).get("company", False):
+            asyncio.create_task(company_meeting(meeting_reqs[0]))
 
         # Calendar events she jotted down for him.
         event_raw = hfilter.event_blocks()

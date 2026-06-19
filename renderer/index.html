@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=35" />
+  <link rel="stylesheet" href="style.css?v=36" />
 </head>
 <body>
 
@@ -643,12 +643,22 @@
           </header>
           <div class="foundry-subtabs" id="foundry-subtabs">
             <button class="foundry-subtab active" data-sub="overview">Overview</button>
+            <button class="foundry-subtab" data-sub="board">Board</button>
             <button class="foundry-subtab" data-sub="team">Team</button>
+            <button class="foundry-subtab" data-sub="projects">Projects</button>
             <button class="foundry-subtab" data-sub="chat">Group chat</button>
           </div>
           <div class="foundry-body" id="foundry-body"></div>
+          <!-- fullscreen task view (double-click a task) -->
+          <div class="foundry-modal" id="foundry-modal" style="display:none">
+            <div class="foundry-modal-card">
+              <button class="foundry-modal-close" id="foundry-modal-close" title="Close">✕</button>
+              <div class="foundry-modal-body" id="foundry-modal-body"></div>
+            </div>
+          </div>
           <!-- group-chat composer (only shown on the chat sub-tab) -->
           <div class="foundry-composer" id="foundry-composer" style="display:none">
+            <button id="foundry-meeting" class="foundry-meeting-btn" title="Convene a structured team meeting — everyone weighs in, the CEO closes with a decision">🏛 Meeting</button>
             <textarea id="foundry-chat-input" rows="1" placeholder="Speak to the team as the Chairman…"></textarea>
             <button id="foundry-chat-send" title="Send">➤</button>
           </div>
@@ -748,6 +758,6 @@
     <div class="pt-hint" id="pt-hint">double-click her to hide the conversation</div>
   </div>
 
-  <script src="app.js?v=35"></script>
+  <script src="app.js?v=36"></script>
 </body>
 </html>
