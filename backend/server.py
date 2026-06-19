@@ -26,6 +26,7 @@ from context import (
 import memory as mem_store
 import notes as notes_store
 import projects as projects_store
+import company as company_store
 import files as files_store
 import events as events_store
 import spotify as spotify_store
@@ -254,6 +255,84 @@ async def broadcast(msg: dict):
             clients.remove(ws)
 
 
+# ─── Autonomous company engine ──────────────────────────────────────────
+# When the Company capability is on and she's founded one, her AI teammates
+# advance their tasks on their own — each tick, one assignee runs their persona
+# through her brain to produce a real deliverable and report a status back.
+COMPANY_TICK = int(os.getenv("AITHA_COMPANY_TICK", "120"))      # seconds between ticks
+COMPANY_TOKENS = int(os.getenv("AITHA_COMPANY_TOKENS", "440"))  # work product length cap
+_company_lock = asyncio.Lock()
+_STATUS_LINE = _re.compile(r'\s*STATUS:\s*(DONE|WORKING|BLOCKED)\b[\s\-:]*(.*)', _re.I)
+_STATUS_MAP = {"DONE": "done", "WORKING": "in_progress", "BLOCKED": "blocked"}
+
+
+async def _employee_work(co: dict, emp: dict, task: dict) -> tuple[str, str, str]:
+    """Run one employee's persona against one task. Returns (deliverable, status, note)."""
+    ceo = settings.get("char_name", "Aitha")
+    prior = (task.get("output") or "").strip()
+    system = (
+        f"You are {emp.get('name')}, the {emp.get('role')} at {co.get('name')}, "
+        f"a {co.get('industry') or 'startup'}. Mission: {co.get('mission') or '—'}. "
+        f"Your brief: {emp.get('brief') or 'do your role well'}. You report to the CEO, "
+        f"{ceo}. Do real, concrete work and produce the actual deliverable — not a "
+        "description of what you'd do. Be specific and genuinely useful. Keep it tight."
+    )
+    user = (
+        f"TASK: {task.get('title')}\n"
+        + (f"DETAILS: {task.get('detail')}\n" if task.get("detail") else "")
+        + (f"\nWORK SO FAR (continue / improve it):\n{prior}\n" if prior else "")
+        + "\nDo the next concrete chunk of work and output the deliverable itself.\n"
+        "Then, on the FINAL line, output exactly one of:\n"
+        "STATUS: DONE  — the task is fully complete\n"
+        "STATUS: WORKING  — solid progress, more to do next time\n"
+        "STATUS: BLOCKED - <what you need from the CEO to continue>"
+    )
+    raw = (await brain._complete(system, user, max_tokens=COMPANY_TOKENS)).strip()
+    status, note, body = "in_progress", "", raw
+    lines = raw.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        m = _STATUS_LINE.match(lines[i])
+        if m:
+            status = _STATUS_MAP.get(m.group(1).upper(), "in_progress")
+            note = m.group(2).strip()
+            body = "\n".join(lines[:i]).strip()
+            break
+    return (body or raw), status, (note or f"reported {status}")
+
+
+async def _company_tick():
+    if not (settings.get("capabilities") or {}).get("company", False):
+        return
+    pick = await asyncio.to_thread(company_store.pick_work)
+    if not pick:
+        return
+    emp, task = pick
+    async with _company_lock:
+        # A backlog task being picked up moves to in-progress first, so the board
+        # reflects that someone's now on it.
+        if task.get("status") == "backlog":
+            await asyncio.to_thread(company_store.set_task_status,
+                                    task["id"], "in_progress", f"{emp['name']} picked it up")
+            task["status"] = "in_progress"
+            await broadcast({"type": "company_changed",
+                             "changes": [f"{emp['name']} picked up '{task['title']}'"]})
+        co = await asyncio.to_thread(company_store.load)
+        body, status, note = await _employee_work(co, emp, task)
+        await asyncio.to_thread(company_store.record_work, task["id"], body, status, note)
+        await broadcast({"type": "company_changed",
+                         "changes": [f"{emp['name']}: '{task['title']}' → {status}"]})
+
+
+async def company_engine_loop():
+    await asyncio.sleep(35)  # let startup + model warm-up settle first
+    while True:
+        try:
+            await _company_tick()
+        except Exception as e:
+            print(f"[company] tick error: {e}")
+        await asyncio.sleep(COMPANY_TICK)
+
+
 # How many exchanges to gather before running a (single) fact-extraction call.
 COMMIT_EVERY = 3
 
@@ -329,8 +408,10 @@ async def lifespan(app: FastAPI):
         )
     tts.on_state = _on_speaking
     task = asyncio.create_task(context_poll_loop())
+    company_task = asyncio.create_task(company_engine_loop())
     yield
     task.cancel()
+    company_task.cancel()
     async with _memory_lock:
         mem_store.touch_last_seen(memory)
         mem_store.save(memory)
@@ -505,6 +586,26 @@ async def api_forge_run(req: Request):
     body = await req.json()
     result = await asyncio.to_thread(coder.run_file, (body.get("name") or "").strip())
     return {"ok": True, "result": result}
+
+
+@app.post("/api/forge/delete")
+async def api_forge_delete(req: Request):
+    """Delete one of her workspace files from the Forge tab. Path-confined to the
+    workspace; honors the same coding capability toggle."""
+    if not (settings.get("capabilities") or {}).get("coding", False):
+        return {"ok": False, "result": "Code workspace is off — enable it in Settings → Behavior."}
+    body = await req.json()
+    result = await asyncio.to_thread(coder.delete_file, (body.get("name") or "").strip())
+    ok = result.startswith("deleted")
+    return {"ok": ok, "result": result}
+
+
+@app.get("/api/company")
+async def api_company():
+    """Everything the Helm tab shows: her company, roster, task board, decisions."""
+    enabled = bool((settings.get("capabilities") or {}).get("company", False))
+    data = await asyncio.to_thread(company_store.view)
+    return {"enabled": enabled, "company": data}
 
 
 # ─── Notes API ──────────────────────────────────────────────────────────
@@ -1200,6 +1301,27 @@ _ADVANCE_DIRECTIVE = _re.compile(
     rf'(?:\s+status\s*=\s*[{_Q}]?(active|done|shelved)[{_Q}]?)?\s*>'
     r'(.*?)</advance\s*>', _re.S | _re.I,
 )
+# Her company (she's CEO). Found it, hire, assign tasks, move them, decide.
+_FOUNDED_DIRECTIVE = _re.compile(
+    rf'<founded\s+name\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+industry\s*=\s*[{_Q}]([^{_Q}]*)[{_Q}])?\s*>'
+    r'(.*?)</founded\s*>', _re.S | _re.I,
+)
+_HIRE_DIRECTIVE = _re.compile(
+    rf'<hire(?:\s+role\s*=\s*[{_Q}]([^{_Q}]*)[{_Q}])?'
+    rf'(?:\s+name\s*=\s*[{_Q}]([^{_Q}]*)[{_Q}])?\s*>'
+    r'(.*?)</hire\s*>', _re.S | _re.I,
+)
+_ASSIGN_DIRECTIVE = _re.compile(
+    rf'<assign(?:\s+to\s*=\s*[{_Q}]([^{_Q}]*)[{_Q}])?'
+    rf'\s+title\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]\s*>'
+    r'(.*?)</assign\s*>', _re.S | _re.I,
+)
+_COSTATUS_DIRECTIVE = _re.compile(
+    rf'<costatus\s+task\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+status\s*=\s*[{_Q}]?(backlog|in_progress|done|blocked)[{_Q}]?)?\s*>'
+    r'(.*?)</costatus\s*>', _re.S | _re.I,
+)
 
 
 # An event she adds: <event date="YYYY-MM-DD" time="HH:MM" title="X">notes</event>
@@ -1341,6 +1463,49 @@ def apply_project_directives(project_raw: str, advance_raw: str) -> list[str]:
     return changed
 
 
+def apply_company_directives(founded_raw: str, hire_raw: str, assign_raw: str,
+                             costatus_raw: str, decision_raw: str) -> list[str]:
+    """Apply her CEO directives against the company store. Returns short human
+    summaries of what changed (for the directive debug feed). Runs in a thread."""
+    changed: list[str] = []
+    for m in _FOUNDED_DIRECTIVE.finditer(founded_raw or ""):
+        name = m.group(1).strip()
+        industry = (m.group(2) or "").strip()
+        mission = m.group(3).strip()
+        if name:
+            company_store.found(name, mission=mission, industry=industry)
+            changed.append(f"founded {name}")
+    for m in _HIRE_DIRECTIVE.finditer(hire_raw or ""):
+        role = (m.group(1) or "").strip()
+        name = (m.group(2) or "").strip()
+        brief = m.group(3).strip()
+        if role or name:
+            emp = company_store.hire(role, name=name, brief=brief)
+            if emp:
+                changed.append(f"hired {emp['name']} ({emp['role']})")
+    for m in _ASSIGN_DIRECTIVE.finditer(assign_raw or ""):
+        to = (m.group(1) or "").strip()
+        title = m.group(2).strip()
+        detail = m.group(3).strip()
+        if title:
+            t = company_store.assign(to, title, detail=detail)
+            if t:
+                changed.append(f"assigned '{t['title']}' → {t['assignee']}")
+    for m in _COSTATUS_DIRECTIVE.finditer(costatus_raw or ""):
+        task = m.group(1).strip()
+        status = (m.group(2) or "").strip() or "in_progress"
+        note = m.group(3).strip()
+        if task:
+            t = company_store.set_task_status(task, status, note=note)
+            if t:
+                changed.append(f"{t['title']} → {t['status']}")
+    for body in [b.strip() for b in (decision_raw or "").split("\x00") if b.strip()]:
+        d = company_store.decide(body)
+        if d:
+            changed.append(f"decided: {body[:48]}")
+    return changed
+
+
 def apply_note_directives(raw: str) -> tuple[str, list[str]]:
     """Run any note directives in a reply against the notes store. Returns the
     reply with the blocks stripped out, plus the titles that changed. Shared by
@@ -1407,6 +1572,12 @@ _HIDDEN_SPECS = [
     ("run", "<run>", "</run>", False),                 # run a workspace python file
     ("lscode", "<lscode>", "</lscode>", False),        # list her workspace files
     ("readcode", "<readcode>", "</readcode>", False),  # re-read a workspace file
+    ("delcode", "<delcode>", "</delcode>", False),     # delete a workspace file
+    ("founded", "<founded", "</founded>", True),       # found her company (CEO)
+    ("hire", "<hire", "</hire>", True),                # hire a teammate
+    ("assign", "<assign", "</assign>", True),          # create + assign a company task
+    ("costatus", "<costatus", "</costatus>", True),    # move a company task on the board
+    ("decision", "<decision>", "</decision>", False),  # log a CEO decision
 ]
 
 # <code file="name.py">…python…</code> — parse the filename + body out of the block.
@@ -1556,6 +1727,26 @@ class _HiddenBlockFilter:
         """Raw <advance> blocks she emitted (progress on a project)."""
         return "".join(t for n, t in self.captured if n == "advance")
 
+    def founded_blocks(self) -> str:
+        """Raw <founded> blocks (she's establishing her company)."""
+        return "".join(t for n, t in self.captured if n == "founded")
+
+    def hire_blocks(self) -> str:
+        """Raw <hire> blocks (teammates she's bringing on)."""
+        return "".join(t for n, t in self.captured if n == "hire")
+
+    def assign_blocks(self) -> str:
+        """Raw <assign> blocks (tasks she's handing out)."""
+        return "".join(t for n, t in self.captured if n == "assign")
+
+    def costatus_blocks(self) -> str:
+        """Raw <costatus> blocks (task moves on the board)."""
+        return "".join(t for n, t in self.captured if n == "costatus")
+
+    def decision_blocks(self) -> str:
+        """CEO decisions she logged this turn, NUL-joined (one per entry)."""
+        return "\x00".join(t.strip() for n, t in self.captured if n == "decision" and t.strip())
+
     def browse_requests(self) -> list[str]:
         """Folder paths she asked to list this turn."""
         return [t.strip() for n, t in self.captured if n == "browse" and t.strip()]
@@ -1591,6 +1782,10 @@ class _HiddenBlockFilter:
     def readcode_requests(self) -> list[str]:
         """Workspace files she asked to re-read this turn."""
         return [t.strip() for n, t in self.captured if n == "readcode" and t.strip()]
+
+    def delcode_requests(self) -> list[str]:
+        """Workspace files she asked to delete this turn."""
+        return [t.strip() for n, t in self.captured if n == "delcode" and t.strip()]
 
     def playback_actions(self) -> list[tuple[str, str]]:
         """Playback control actions she emitted: (action, arg). arg used for <play>."""
@@ -1865,6 +2060,20 @@ async def ws_endpoint(websocket: WebSocket):
             else:
                 print(f"[projects] unparsed block: {proj_raw or adv_raw!r}")
 
+        # Her company — CEO actions: found / hire / assign / move tasks / decide.
+        founded_raw, hire_raw = hfilter.founded_blocks(), hfilter.hire_blocks()
+        assign_raw, costatus_raw = hfilter.assign_blocks(), hfilter.costatus_blocks()
+        decision_raw = hfilter.decision_blocks()
+        if founded_raw or hire_raw or assign_raw or costatus_raw or decision_raw:
+            co_changed = await asyncio.to_thread(
+                apply_company_directives, founded_raw, hire_raw, assign_raw,
+                costatus_raw, decision_raw)
+            if co_changed:
+                await broadcast({"type": "company_changed", "changes": co_changed})
+            else:
+                print(f"[company] unparsed block(s): "
+                      f"{founded_raw or hire_raw or assign_raw or costatus_raw or decision_raw!r}")
+
         # Calendar events she jotted down for him.
         event_raw = hfilter.event_blocks()
         if event_raw:
@@ -1971,6 +2180,7 @@ async def ws_endpoint(websocket: WebSocket):
         files_context = await asyncio.to_thread(files_store.roots_digest) if caps.get("files", True) else ""
         calendar_context = await asyncio.to_thread(events_store.digest) if caps.get("calendar", True) else ""
         music_context = await asyncio.to_thread(spotify_store.digest) if caps.get("music", True) else ""
+        company_context = await asyncio.to_thread(company_store.digest) if caps.get("company", False) else ""
         music_premium = (await asyncio.to_thread(spotify_store.is_premium)) if (caps.get("music", True) and music_context) else False
 
         # She may slip hidden <journal> or <note> blocks into her reply; the filter
@@ -2043,6 +2253,7 @@ async def ws_endpoint(websocket: WebSocket):
                     images=(images_for_main if round_idx == 0 else None),
                     projects_digest=projects_context, files_digest=files_context,
                     calendar_digest=calendar_context, music_digest=music_context,
+                    company_digest=company_context,
                     music_premium=music_premium, caps=caps,
                 ):
                     if token == "\x00SEARCHING\x00":
@@ -2120,8 +2331,9 @@ async def ws_endpoint(websocket: WebSocket):
                 code_raw = hfilter.code_blocks()
                 run_reqs = hfilter.run_requests()
                 read_reqs = hfilter.readcode_requests()
+                del_reqs = hfilter.delcode_requests()
                 ls_req = hfilter.lscode_requested()
-                if (code_raw or run_reqs or read_reqs or ls_req):
+                if (code_raw or run_reqs or read_reqs or del_reqs or ls_req):
                     if code_runs < MAX_CODE_RUNS:
                         code_runs += 1
                         before = len(web_debug)
@@ -2139,7 +2351,7 @@ async def ws_endpoint(websocket: WebSocket):
                         # She emitted a <code> tag but it was malformed (no file="…"), e.g.
                         # "<code> read embers.py" — nudge her to the right syntax instead of
                         # silently doing nothing (which makes her loop or stall).
-                        if code_raw and not wrote_any and not (ls_req or read_reqs or run_reqs):
+                        if code_raw and not wrote_any and not (ls_req or read_reqs or run_reqs or del_reqs):
                             web_context += ("\n\n(Your <code> tag had no file name. To READ a file "
                                             "use <readcode>name.py</readcode>; to RUN one use "
                                             "<run>name.py</run>; to WRITE one use "
@@ -2153,6 +2365,10 @@ async def ws_endpoint(websocket: WebSocket):
                             body = await asyncio.to_thread(coder.read_file, r)
                             web_debug.append({"kind": "code", "text": f"read {r}"})
                             web_context += f"\n\n[FILE {r}]\n{body}"
+                        for r in del_reqs:
+                            res = await asyncio.to_thread(coder.delete_file, r)
+                            web_debug.append({"kind": "code", "text": f"delete {r}: {res}"})
+                            web_context += f"\n\n[DELETED {r}] {res}"
                         for r in run_reqs:
                             await websocket.send_json({"type": "searching"})
                             res = await asyncio.to_thread(coder.run_file, r)
@@ -2303,6 +2519,7 @@ async def ws_endpoint(websocket: WebSocket):
         files_context = await asyncio.to_thread(files_store.roots_digest) if caps.get("files", True) else ""
         calendar_context = await asyncio.to_thread(events_store.digest) if caps.get("calendar", True) else ""
         music_context = await asyncio.to_thread(spotify_store.digest) if caps.get("music", True) else ""
+        company_context = await asyncio.to_thread(company_store.digest) if caps.get("company", False) else ""
         music_premium = (await asyncio.to_thread(spotify_store.is_premium)) if (caps.get("music", True) and music_context) else False
 
         # If she's been off exploring and has something she wanted to share, this is
@@ -2334,6 +2551,7 @@ async def ws_endpoint(websocket: WebSocket):
                     conversation, ctx, memory_block, notes_context,
                     projects_digest=projects_context, files_digest=files_context,
                     calendar_digest=calendar_context, music_digest=music_context,
+                    company_digest=company_context,
                     music_premium=music_premium, caps=caps
                 ):
                     if token == "\x00SEARCHING\x00":

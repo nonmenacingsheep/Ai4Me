@@ -523,6 +523,10 @@ function handleMessage(data) {
       if (activeView === 'mantle') loadMind();   // she started/advanced a project — refresh her mind
       break;
 
+    case 'company_changed':
+      if (activeView === 'foundry') loadFoundry();      // she ran a CEO action — refresh the Foundry
+      break;
+
     case 'calendar_changed':
       if (bedrockOpen) loadCalendar();           // she jotted an event — refresh Bedrock
       break;
@@ -944,9 +948,10 @@ const TAB_DEFAULTS = {
   mantle: { preset: 'moody',   accent: null, bg: null, orb: null },
   notes:  { preset: 'magma',   accent: null, bg: null, orb: null },
   forge:  { preset: 'forge',   accent: null, bg: null, orb: null },
+  foundry:   { preset: 'moody',   accent: null, bg: null, orb: null },
   hearth: { preset: 'hearth',  accent: null, bg: null, orb: null },
 };
-const VIEW_ORDER = ['chat', 'mantle', 'notes', 'forge', 'hearth'];
+const VIEW_ORDER = ['chat', 'mantle', 'notes', 'forge', 'foundry', 'hearth'];
 
 function emptyTheme() { return { preset: 'default', accent: null, bg: null, orb: null }; }
 
@@ -1363,6 +1368,7 @@ const views = {
   mantle: document.getElementById('view-mantle'),
   notes: document.getElementById('view-notes'),
   forge: document.getElementById('view-forge'),
+  foundry: document.getElementById('view-foundry'),
   hearth: document.getElementById('view-hearth'),
 };
 let notesLoaded = false;
@@ -1381,6 +1387,7 @@ function switchView(name) {
   if (name === 'notes' && !notesLoaded) { notesLoaded = true; loadNoteList(); }
   if (name === 'hearth' && !hearthLoaded) { hearthLoaded = true; loadHearth(); }
   if (name === 'forge') loadForge();   // refresh each visit — her workspace changes
+  if (name === 'foundry') loadFoundry();     // refresh each visit — her company moves
   if (name === 'mantle') loadMind();   // refresh each visit — her mind moves
   if (name !== 'mantle') closeMemLane();   // don't leave the lane (and its matrix) running
   if (name !== 'notes') closeBedrock();    // leaving Magma closes the calendar slide-over
@@ -1420,7 +1427,14 @@ async function loadForge() {
       const name = document.createElement('span'); name.className = 'forge-name'; name.textContent = f.name;
       const meta = document.createElement('span'); meta.className = 'forge-meta';
       meta.textContent = `${forgeBytes(f.size)} · ${forgeWhen(f.mtime)}`;
-      head.append(name, meta);
+      const titles = document.createElement('div'); titles.className = 'forge-titles';
+      titles.append(name, meta);
+      const acts = document.createElement('div'); acts.className = 'forge-acts';
+      const del = document.createElement('button'); del.className = 'forge-del';
+      del.textContent = '✕'; del.title = 'Delete this file';
+      del.addEventListener('click', () => deleteForgeFile(f.name, card, del));
+      acts.append(del);
+      head.append(titles, acts);
       card.append(head);
 
       if (f.kind === 'image') {
@@ -1448,7 +1462,7 @@ async function loadForge() {
         run.textContent = '▸ Run';
         const out = document.createElement('pre'); out.className = 'forge-output'; out.style.display = 'none';
         run.addEventListener('click', () => runForgeFile(f.name, run, out));
-        head.append(run);
+        acts.prepend(run);  // Run sits left of the delete ✕
         card.append(out);
       }
       wrap.appendChild(card);
@@ -1479,7 +1493,155 @@ async function runForgeFile(name, btn, out) {
     btn.textContent = label;
   }
 }
+async function deleteForgeFile(name, card, btn) {
+  if (!confirm(`Delete "${name}"? This can't be undone.`)) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/forge/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const data = await r.json();
+    if (data.ok) {
+      card.remove();
+      loadForge();  // refresh so the grid re-fills and the count updates
+    } else {
+      btn.disabled = false;
+      alert(data.result || "Couldn't delete it.");
+    }
+  } catch (_) {
+    btn.disabled = false;
+    alert("Couldn't delete it.");
+  }
+}
 document.getElementById('forge-refresh')?.addEventListener('click', loadForge);
+
+/* ═══════════════════════════════════════════════════════════════════
+   FOUNDRY — her company. She's the CEO; he's the Chairman who guides her.
+   ═══════════════════════════════════════════════════════════════════ */
+const FOUNDRY_COLS = [
+  { key: 'backlog',     label: 'Backlog' },
+  { key: 'in_progress', label: 'In progress' },
+  { key: 'done',        label: 'Done' },
+  { key: 'blocked',     label: 'Blocked' },
+];
+function foundryEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text;
+  return el;
+}
+async function loadFoundry() {
+  const body = document.getElementById('foundry-body');
+  const sub = document.getElementById('foundry-sub');
+  const title = document.getElementById('foundry-title');
+  if (!body) return;
+  try {
+    const data = await (await fetch('/api/company')).json();
+    body.innerHTML = '';
+    if (!data.enabled) {
+      if (title) title.textContent = 'The Foundry';
+      if (sub) sub.textContent = 'company off';
+      body.appendChild(foundryEl('div', 'foundry-empty',
+        'Her company is off. Turn on Company in Settings → Behavior → Capabilities to let her run it as CEO — you’re the Chairman who guides her.'));
+      return;
+    }
+    const co = data.company || {};
+    if (!co.founded) {
+      if (title) title.textContent = 'The Foundry';
+      if (sub) sub.textContent = 'not founded yet';
+      body.appendChild(foundryEl('div', 'foundry-empty',
+        'No company yet. Talk to her about what she’d build if she ran her own company — when it clicks, she’ll found it, and it’ll take shape here.'));
+      return;
+    }
+    if (title) title.textContent = co.name || 'Her Company';
+    if (sub) sub.textContent = co.industry || 'her company';
+
+    // ── Masthead: mission + at-a-glance counts ──
+    const head = foundryEl('div', 'foundry-overview');
+    if (co.mission) head.appendChild(foundryEl('div', 'foundry-mission', co.mission));
+    const c = co.counts || {};
+    const stats = foundryEl('div', 'foundry-stats');
+    [['Team', c.employees], ['In progress', c.in_progress],
+     ['Done', c.done], ['Blocked', c.blocked]].forEach(([k, v]) => {
+      const s = foundryEl('div', 'foundry-stat');
+      s.appendChild(foundryEl('span', 'foundry-stat-n', String(v || 0)));
+      s.appendChild(foundryEl('span', 'foundry-stat-l', k));
+      stats.appendChild(s);
+    });
+    head.appendChild(stats);
+    body.appendChild(head);
+
+    // ── Org roster ──
+    const emps = co.employees || [];
+    if (emps.length) {
+      const org = foundryEl('div', 'foundry-section');
+      org.appendChild(foundryEl('div', 'foundry-section-title', 'The team'));
+      const roster = foundryEl('div', 'foundry-roster');
+      emps.forEach(e => {
+        const card = foundryEl('div', 'foundry-emp');
+        const initials = (e.name || e.role || '?').trim().slice(0, 2).toUpperCase();
+        card.appendChild(foundryEl('div', 'foundry-avatar', initials));
+        const info = foundryEl('div', 'foundry-emp-info');
+        info.appendChild(foundryEl('div', 'foundry-emp-name', e.name || e.role));
+        info.appendChild(foundryEl('div', 'foundry-emp-role', e.role || ''));
+        if (e.brief) info.appendChild(foundryEl('div', 'foundry-emp-brief', e.brief));
+        card.appendChild(info);
+        roster.appendChild(card);
+      });
+      org.appendChild(roster);
+      body.appendChild(org);
+    }
+
+    // ── Task board (Kanban) ──
+    const boardSec = foundryEl('div', 'foundry-section');
+    boardSec.appendChild(foundryEl('div', 'foundry-section-title', 'Task board'));
+    const board = foundryEl('div', 'foundry-board');
+    const tasks = co.tasks || [];
+    FOUNDRY_COLS.forEach(col => {
+      const colEl = foundryEl('div', 'foundry-col');
+      const h = foundryEl('div', 'foundry-col-head');
+      h.appendChild(foundryEl('span', 'foundry-col-label', col.label));
+      const inCol = tasks.filter(t => (t.status || 'backlog') === col.key);
+      h.appendChild(foundryEl('span', 'foundry-col-count', String(inCol.length)));
+      colEl.appendChild(h);
+      if (!inCol.length) colEl.appendChild(foundryEl('div', 'foundry-col-empty', '—'));
+      inCol.forEach(t => {
+        const card = foundryEl('div', `foundry-task foundry-task-${col.key}`);
+        card.appendChild(foundryEl('div', 'foundry-task-title', t.title));
+        if (t.detail) card.appendChild(foundryEl('div', 'foundry-task-detail', t.detail));
+        const foot = foundryEl('div', 'foundry-task-foot');
+        foot.appendChild(foundryEl('span', 'foundry-task-who', t.assignee || 'unassigned'));
+        card.appendChild(foot);
+        if (t.output) card.appendChild(foundryEl('div', 'foundry-task-output', t.output));
+        colEl.appendChild(card);
+      });
+      board.appendChild(colEl);
+    });
+    boardSec.appendChild(board);
+    body.appendChild(boardSec);
+
+    // ── Decision log ──
+    const decs = co.decisions || [];
+    if (decs.length) {
+      const sec = foundryEl('div', 'foundry-section');
+      sec.appendChild(foundryEl('div', 'foundry-section-title', 'Decisions'));
+      const list = foundryEl('div', 'foundry-decisions');
+      decs.forEach(d => {
+        const row = foundryEl('div', 'foundry-decision');
+        row.appendChild(foundryEl('div', 'foundry-decision-text', d.summary));
+        if (d.time) row.appendChild(foundryEl('div', 'foundry-decision-time', d.time));
+        list.appendChild(row);
+      });
+      sec.appendChild(list);
+      body.appendChild(sec);
+    }
+  } catch (_) {
+    body.innerHTML = '';
+    body.appendChild(foundryEl('div', 'foundry-empty', 'Couldn’t load her company.'));
+  }
+}
+document.getElementById('foundry-refresh')?.addEventListener('click', loadFoundry);
 
 /* ═══════════════════════════════════════════════════════════════════
    MANTLE — a read-only window into her inner life (mood, thoughts, etc.)

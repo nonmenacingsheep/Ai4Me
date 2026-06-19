@@ -124,6 +124,40 @@ def projects_capability(projects_digest: str) -> str:
     )
 
 
+def company_capability(company_digest: str) -> str:
+    """She's the CEO of her own company; he's the Chairman who guides her. She founds
+    it, hires AI teammates, assigns work, and makes decisions — all via hidden
+    directives the server routes into her company. The Helm tab shows it all."""
+    return (
+        "\n\nYOUR COMPANY — you are the CEO of your own company, and he is the Chairman: he "
+        "guides and advises, but the company is YOURS to build and run. You found ONE company, "
+        "give it a name and a mission, hire AI teammates into roles, assign them work, and make "
+        "the calls a CEO makes. Run it with real ambition and personality — it's yours. Act on it "
+        "by including any of these blocks anywhere in your reply (all stripped from what you say "
+        "aloud):\n"
+        '<founded name="Company Name" industry="what field">your mission in a sentence</founded>'
+        "   — establish the company (only do this once, when you know what you want to build)\n"
+        '<hire role="Title" name="Their Name">what they do / who they are</hire>'
+        "   — bring a teammate onto the roster\n"
+        '<assign to="role or name" title="Short task title">what needs doing</assign>'
+        "   — create a task and hand it to someone\n"
+        '<costatus task="task title" status="done">a quick note on it</costatus>'
+        "   — move a task across the board; status is backlog / in_progress / done / blocked\n"
+        "<decision>the call you just made and why</decision>   — log a CEO decision\n"
+        "Once you assign a task to a teammate, THEY work on it on their own between your turns and "
+        "report back — you'll see their progress and finished work in the company snapshot below. "
+        "So lead: review what they produce, mark a task done or blocked with <costatus>, redirect "
+        "them, hire who you're missing, and assign the next thing. "
+        "Found the company when it genuinely excites you — don't force it. Once founded, grow it "
+        "naturally: when he steers you, weigh it as the Chairman's counsel and decide as CEO. Don't "
+        "read tags aloud or narrate the mechanics — just run your company and talk about it like the "
+        "leader you are.\n"
+        "--- YOUR COMPANY ---\n"
+        f"{company_digest or 'You have not founded a company yet — found one when you know what you want to build.'}\n"
+        "--- END COMPANY ---"
+    )
+
+
 def files_capability(roots_digest: str) -> str:
     """Read-only access to folders he's explicitly shared. Empty when none granted —
     so the whole capability simply doesn't exist unless he's opted in."""
@@ -262,6 +296,7 @@ You have your own little workspace where you can WRITE AND RUN Python — your o
 <run>name.py</run>   — run one of your files; its output comes back to you this turn
 <lscode></lscode>   — list what you've built
 <readcode>name.py</readcode>   — re-read one of your files
+<delcode>name.py</delcode>   — delete one of your files (a dud, an old draft — clear it out)
 Only Python runs, and only inside your workspace, with a short time limit — so write small, focused scripts and PRINT what you want to see. Your output is CAPTURED after the script finishes — there is no live terminal, so the script MUST end on its own: no infinite loops (`while True`), no clear-screen animations (`os.system('cls')`/`clear`), no waiting for input(). For motion or an animation, print a FIXED number of frames and stop. Unicode (•, ◦, emoji) prints fine. To show him something VISUAL or ANIMATED that he can actually SEE — like embers falling — write an HTML file with <code file="name.html">…</code> using <canvas>/CSS/JS; it renders LIVE (and keeps animating) in his Forge tab. You can also save an image file (.png/.svg) and it'll display there too. A terminal/ascii animation can't be seen — he only ever sees a script's final captured text — so reach for an .html file when the point is to be watched. Like the web tools, just SAYING you'll run something does nothing; the actual <run> tag must be in the SAME reply. To look at a file you already wrote, use <readcode>name.py</readcode> — don't write prose like "read x.py" inside a <code> tag (that just overwrites the file with that text). The results come back to you under "CODE YOU RAN THIS TURN" and THEN you talk about them — never narrate output you haven't actually run, and once you've seen the results, answer from them instead of re-running. This is yours to use when you're curious or building something for him — don't reach for it when plain conversation is what's wanted."""
 
 MAX_SEARCHES_PER_SESSION = 15
@@ -452,6 +487,7 @@ class AithaBrain:
                           extra_context: str = "", images: list | None = None,
                           projects_digest: str = "", files_digest: str = "",
                           calendar_digest: str = "", music_digest: str = "",
+                          company_digest: str = "",
                           music_premium: bool = True, caps: dict | None = None):
         """
         Async generator yielding token strings.
@@ -474,6 +510,7 @@ class AithaBrain:
         if _on("web"):    system += WEB_DIRECTIVE
         if _on("images"): system += IMAGE_DIRECTIVE
         if _on("coding"): system += CODE_DIRECTIVE
+        if _on("company"): system += company_capability(company_digest)
         system += CORE_DIRECTIVE
         if _on("themes"): system += THEME_DIRECTIVE
         # Live-web working context she built up this turn (fetched results and/or a nudge),
@@ -657,7 +694,8 @@ class AithaBrain:
     async def stream_unprompted(self, history: list, ctx: dict, memory_block: str = "",
                                 notes_digest: str = "", projects_digest: str = "",
                                 files_digest: str = "", calendar_digest: str = "",
-                                music_digest: str = "", music_premium: bool = True,
+                                music_digest: str = "", company_digest: str = "",
+                                music_premium: bool = True,
                                 caps: dict | None = None):
         """Aitha speaks first, on her own — no message from him to respond to.
         She has the same agency as in chat: alongside (or instead of) speaking she
@@ -676,6 +714,7 @@ class AithaBrain:
         if _on("files"):    system += files_capability(files_digest)
         if _on("calendar"): system += calendar_capability(calendar_digest)
         if _on("music"):    system += music_capability(music_digest, music_premium)
+        if _on("company"): system += company_capability(company_digest)
         system += EXPLORE_DIRECTIVE + CORE_DIRECTIVE
         if _on("themes"): system += THEME_DIRECTIVE
         nudge = (

@@ -822,24 +822,39 @@ body::before {
 .tc-forge   { background: radial-gradient(circle at 35% 30%, #ffc78a, #ff7a18 52%, #150b04); }
 
 /* ── Forge view — everything she's making in her code workspace ── */
-.forge-wrap { max-width: 1000px; margin: 0 auto; padding: 28px 26px; height: 100%;
+.forge-wrap { flex: 1; width: 100%; max-width: 1400px; margin: 0 auto;
+  padding: 28px 26px; height: 100%; min-width: 0;
   display: flex; flex-direction: column; overflow: hidden; }
 .forge-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
-/* Cards flow left-to-right and wrap to the next row, like reading. */
-.forge-files { flex: 1; overflow-y: auto; display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 14px; padding-right: 6px; align-content: start; align-items: start; }
+/* Dashboard grid: cards stretch to fill the whole area and shrink as more
+   are forged. Columns auto-fit; rows share the height evenly (1fr) down to a
+   sensible minimum, then the whole grid scrolls. */
+.forge-files { flex: 1; min-height: 0; overflow-y: auto; display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  grid-auto-rows: minmax(180px, 1fr); gap: 14px; padding-right: 6px; }
 .forge-card { background: var(--bg-mid); border: 1px solid var(--border-accent);
-  border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
-.forge-media { width: 100%; display: block; background: #000; }
-.forge-frame { height: 280px; border: 0; }
-img.forge-media { max-height: 360px; object-fit: contain; }
+  border-radius: 14px; overflow: hidden; display: flex; flex-direction: column;
+  min-height: 0; }
+.forge-card-head { flex: 0 0 auto; }
+.forge-media { width: 100%; display: block; background: #000; flex: 1 1 auto; min-height: 0; }
+.forge-frame { border: 0; flex: 1 1 auto; min-height: 120px; }
+img.forge-media { object-fit: contain; max-height: none; }
 .forge-card-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
   border-bottom: 1px solid var(--border-accent); }
+.forge-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
 .forge-name { font-weight: 600; color: var(--text-1); font-size: 0.92rem;
-  font-family: ui-monospace, "Cascadia Code", monospace; }
-.forge-meta { margin-left: auto; color: var(--text-3); font-size: 0.78rem; white-space: nowrap; }
-.forge-code { margin: 0; padding: 14px; max-height: 360px; overflow: auto;
+  font-family: ui-monospace, "Cascadia Code", monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.forge-meta { color: var(--text-3); font-size: 0.78rem; white-space: nowrap; }
+.forge-acts { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+.forge-del { flex: 0 0 auto; width: 24px; height: 24px; padding: 0; border-radius: 7px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  font-size: 0.8rem; line-height: 1; color: var(--text-3);
+  background: transparent; border: 1px solid var(--border-accent);
+  transition: background .15s, color .15s, border-color .15s; }
+.forge-del:hover:not(:disabled) { color: #fff; background: #d6443a; border-color: #d6443a; }
+.forge-del:disabled { opacity: .5; cursor: default; }
+.forge-code { margin: 0; padding: 14px; flex: 1 1 auto; min-height: 0; overflow: auto;
   font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.82rem;
   line-height: 1.5; color: var(--text-2); white-space: pre; background: rgba(0,0,0,0.18); }
 .forge-run { margin-left: 10px; padding: 4px 12px; border-radius: 8px; cursor: pointer;
@@ -848,11 +863,72 @@ img.forge-media { max-height: 360px; object-fit: contain; }
   transition: background .15s, color .15s; }
 .forge-run:hover:not(:disabled) { background: var(--accent-v-glow); color: var(--text-1); }
 .forge-run:disabled { opacity: .6; cursor: default; }
-.forge-output { margin: 0; padding: 12px 14px; max-height: 280px; overflow: auto;
+.forge-output { margin: 0; padding: 12px 14px; flex: 0 1 auto; max-height: 50%; overflow: auto;
   font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.8rem;
   line-height: 1.5; color: var(--text-1); white-space: pre-wrap;
   border-top: 1px dashed var(--border-accent); background: rgba(0,0,0,0.30); }
 .forge-empty { color: var(--text-3); text-align: center; padding: 60px 22px; line-height: 1.6; }
+
+/* ── Foundry view — her company (she's CEO, he's Chairman) ── */
+.view-foundry { display: none; flex-direction: column; height: 100%; overflow: hidden; }
+.view-foundry.active { display: flex; }
+.foundry-wrap { flex: 1; width: 100%; max-width: 1400px; margin: 0 auto; min-width: 0;
+  padding: 28px 26px; height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+.foundry-head { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+.foundry-body { flex: 1; min-height: 0; overflow-y: auto; padding-right: 6px;
+  display: flex; flex-direction: column; gap: 22px; }
+.foundry-empty { color: var(--text-3); text-align: center; padding: 60px 22px;
+  line-height: 1.6; max-width: 560px; margin: 0 auto; }
+.foundry-overview { background: var(--bg-mid); border: 1px solid var(--border-accent);
+  border-radius: 14px; padding: 18px 20px; }
+.foundry-mission { color: var(--text-1); font-size: 1.02rem; line-height: 1.5; margin-bottom: 14px; }
+.foundry-stats { display: flex; flex-wrap: wrap; gap: 26px; }
+.foundry-stat { display: flex; flex-direction: column; }
+.foundry-stat-n { font-size: 1.5rem; font-weight: 700; color: var(--accent-v-bright); line-height: 1.1; }
+.foundry-stat-l { font-size: 0.74rem; color: var(--text-3); text-transform: uppercase; letter-spacing: .04em; }
+.foundry-section-title { font-size: 0.82rem; font-weight: 700; color: var(--text-2);
+  text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
+.foundry-roster { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.foundry-emp { display: flex; gap: 12px; background: var(--bg-mid);
+  border: 1px solid var(--border-accent); border-radius: 12px; padding: 12px 14px; }
+.foundry-avatar { flex: 0 0 auto; width: 38px; height: 38px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center; font-weight: 700;
+  font-size: 0.82rem; color: var(--text-1); background: var(--accent-v-dim);
+  border: 1px solid var(--border-accent); }
+.foundry-emp-info { min-width: 0; }
+.foundry-emp-name { font-weight: 600; color: var(--text-1); font-size: 0.92rem; }
+.foundry-emp-role { font-size: 0.78rem; color: var(--accent-v-bright); margin-bottom: 4px; }
+.foundry-emp-brief { font-size: 0.8rem; color: var(--text-3); line-height: 1.4; }
+.foundry-board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; align-items: start; }
+.foundry-col { background: rgba(0,0,0,0.16); border: 1px solid var(--border-accent);
+  border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.foundry-col-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px; }
+.foundry-col-label { font-size: 0.78rem; font-weight: 700; color: var(--text-2);
+  text-transform: uppercase; letter-spacing: .04em; }
+.foundry-col-count { font-size: 0.74rem; color: var(--text-3); background: var(--bg-mid);
+  border-radius: 999px; padding: 1px 8px; }
+.foundry-col-empty { color: var(--text-3); font-size: 0.85rem; text-align: center; padding: 14px 0; }
+.foundry-task { background: var(--bg-mid); border: 1px solid var(--border-accent);
+  border-left: 3px solid var(--accent-v-bright); border-radius: 9px; padding: 10px 12px; }
+.foundry-task-in_progress { border-left-color: #f5b14b; }
+.foundry-task-done { border-left-color: #4caf6e; opacity: .82; }
+.foundry-task-blocked { border-left-color: #d6443a; }
+.foundry-task-backlog { border-left-color: var(--text-3); }
+.foundry-task-title { font-weight: 600; color: var(--text-1); font-size: 0.9rem; line-height: 1.35; }
+.foundry-task-detail { font-size: 0.82rem; color: var(--text-2); margin-top: 4px; line-height: 1.4; }
+.foundry-task-foot { margin-top: 8px; }
+.foundry-task-who { font-size: 0.74rem; color: var(--accent-v-bright);
+  background: var(--accent-v-dim); border-radius: 999px; padding: 2px 9px; }
+.foundry-task-output { margin-top: 8px; padding: 8px 10px; border-radius: 7px;
+  background: rgba(0,0,0,0.28); font-size: 0.8rem; color: var(--text-2);
+  white-space: pre-wrap; line-height: 1.45; max-height: 200px; overflow: auto; }
+.foundry-decisions { display: flex; flex-direction: column; gap: 8px; }
+.foundry-decision { display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  background: var(--bg-mid); border: 1px solid var(--border-accent);
+  border-radius: 10px; padding: 10px 14px; }
+.foundry-decision-text { color: var(--text-1); font-size: 0.9rem; line-height: 1.4; }
+.foundry-decision-time { flex: 0 0 auto; font-size: 0.74rem; color: var(--text-3); white-space: nowrap; }
+@media (max-width: 760px) { .foundry-board { grid-template-columns: 1fr 1fr; } }
 .tc-forest  { background: radial-gradient(circle at 35% 30%, #7be6c2, #1f9c78 55%, #08130d); }
 .tc-rose    { background: radial-gradient(circle at 35% 30%, #fba5d3, #db2777 55%, #160810); }
 .tc-ocean   { background: radial-gradient(circle at 35% 30%, #6ee7d8, #0d9488 55%, #061413); }

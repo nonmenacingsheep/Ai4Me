@@ -67,6 +67,23 @@ def read_file(name: str) -> str:
         return f"error: {e}"
 
 
+def delete_file(name: str) -> str:
+    """Delete a file from the workspace. Jailed to the workspace like the others."""
+    try:
+        full = _safe_path(name)
+    except ValueError as e:
+        return f"error: {e}"
+    if full == _root():
+        return "error: that's the workspace itself, not a file"
+    if not os.path.isfile(full):
+        return f"error: no such file '{name}'"
+    try:
+        os.remove(full)
+        return f"deleted {os.path.relpath(full, _root())}"
+    except OSError as e:
+        return f"error: {e}"
+
+
 def list_files() -> str:
     root = _root()
     out = []
