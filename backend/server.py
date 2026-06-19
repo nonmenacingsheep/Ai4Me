@@ -27,6 +27,7 @@ import memory as mem_store
 import notes as notes_store
 import projects as projects_store
 import company as company_store
+import room as room_store
 import files as files_store
 import events as events_store
 import spotify as spotify_store
@@ -867,6 +868,15 @@ async def api_company_chat(req: Request):
     return {"ok": True, "message": msg}
 
 
+@app.get("/api/room")
+async def api_room():
+    """Everything the Room tab shows: the space she's built — name, atmosphere,
+    the objects she's placed, and what she's doing in it right now."""
+    enabled = bool((settings.get("capabilities") or {}).get("room", True))
+    data = await asyncio.to_thread(room_store.view)
+    return {"enabled": enabled, "room": data}
+
+
 @app.post("/api/company/meeting")
 async def api_company_meeting(req: Request):
     """Convene a structured team meeting on a topic: everyone weighs in, the CEO
@@ -1606,6 +1616,48 @@ _COADVANCE_DIRECTIVE = _re.compile(
     rf'(?:\s+status\s*=\s*[{_Q}]?(active|done|shelved)[{_Q}]?)?\s*>'
     r'(.*?)</coadvance\s*>', _re.S | _re.I,
 )
+# Her Room — a space she authors herself. <room ...>desc</room> sets identity +
+# atmosphere; <place> / <unplace> manage objects; <roomvibe> is her live presence.
+_ROOM_DIRECTIVE = _re.compile(
+    rf'<room\b'
+    rf'(?:\s+name\s*=\s*[{_Q}]([^{_Q}]*)[{_Q}])?'
+    rf'(?:\s+accent\s*=\s*[{_Q}]?(#?[0-9a-fA-F]{{3,6}})[{_Q}]?)?'
+    rf'(?:\s+bg\s*=\s*[{_Q}]?(#?[0-9a-fA-F]{{3,6}})[{_Q}]?)?'
+    rf'(?:\s+glow\s*=\s*[{_Q}]?(#?[0-9a-fA-F]{{3,6}})[{_Q}]?)?'
+    rf'(?:\s+lighting\s*=\s*[{_Q}]?(\w+)[{_Q}]?)?'
+    rf'(?:\s+motion\s*=\s*[{_Q}]?(\w+)[{_Q}]?)?'
+    r'\s*>(.*?)</room\s*>', _re.S | _re.I,
+)
+_PLACE_DIRECTIVE = _re.compile(
+    rf'<place\s+name\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
+    rf'(?:\s+icon\s*=\s*[{_Q}]([^{_Q}]*)[{_Q}])?\s*>'
+    r'(.*?)</place\s*>', _re.S | _re.I,
+)
+
+
+def apply_room_directives(room_raw: str, place_raw: str, unplace_reqs: list,
+                          vibe_reqs: list) -> list[str]:
+    """Apply her room directives against the room store. Returns short summaries."""
+    changed: list[str] = []
+    for m in _ROOM_DIRECTIVE.finditer(room_raw or ""):
+        name, accent, bg, glow, lighting, motion = (m.group(i) for i in range(1, 7))
+        desc = m.group(7).strip()
+        room_store.set_room(name=name, description=desc, accent=accent, bg=bg,
+                            glow=glow, lighting=lighting, motion=motion)
+        changed.append("room" + (f" — {name.strip()}" if name and name.strip() else ""))
+    for m in _PLACE_DIRECTIVE.finditer(place_raw or ""):
+        name = m.group(1).strip()
+        icon = (m.group(2) or "").strip()
+        note = m.group(3).strip()
+        if room_store.place(name, note=note, icon=icon):
+            changed.append(f"placed {name}")
+    for key in unplace_reqs:
+        if room_store.unplace(key):
+            changed.append(f"removed {key}")
+    for v in vibe_reqs:
+        room_store.set_vibe(v)
+        changed.append("vibe")
+    return changed
 
 
 # An event she adds: <event date="YYYY-MM-DD" time="HH:MM" title="X">notes</event>
@@ -1886,6 +1938,10 @@ _HIDDEN_SPECS = [
     ("coadvance", "<coadvance", "</coadvance>", True), # log progress on a company project
     ("meeting", "<meeting>", "</meeting>", False),     # convene a structured team meeting
     ("decision", "<decision>", "</decision>", False),  # log a CEO decision
+    ("room", "<room", "</room>", True),                # set/update her own Room
+    ("place", "<place", "</place>", True),             # place an object in the Room
+    ("unplace", "<unplace>", "</unplace>", False),     # remove an object from the Room
+    ("roomvibe", "<roomvibe>", "</roomvibe>", False),  # her live presence in the Room
 ]
 
 # <code file="name.py">…python…</code> — parse the filename + body out of the block.
@@ -2062,6 +2118,22 @@ class _HiddenBlockFilter:
     def meeting_requests(self) -> list[str]:
         """Topics she chose to convene a team meeting on this turn."""
         return [t.strip() for n, t in self.captured if n == "meeting" and t.strip()]
+
+    def room_blocks(self) -> str:
+        """Raw <room> blocks (she set/updated her space)."""
+        return "".join(t for n, t in self.captured if n == "room")
+
+    def place_blocks(self) -> str:
+        """Raw <place> blocks (objects she placed in her room)."""
+        return "".join(t for n, t in self.captured if n == "place")
+
+    def unplace_requests(self) -> list[str]:
+        """Objects she took out of her room this turn."""
+        return [t.strip() for n, t in self.captured if n == "unplace" and t.strip()]
+
+    def roomvibe_requests(self) -> list[str]:
+        """Her live room presence lines this turn (last one wins)."""
+        return [t.strip() for n, t in self.captured if n == "roomvibe" and t.strip()]
 
     def decision_blocks(self) -> str:
         """CEO decisions she logged this turn, NUL-joined (one per entry)."""
@@ -2402,6 +2474,15 @@ async def ws_endpoint(websocket: WebSocket):
         if meeting_reqs and (settings.get("capabilities") or {}).get("company", False):
             asyncio.create_task(company_meeting(meeting_reqs[0]))
 
+        # Her Room — the space she shapes herself (set look, place/remove objects, vibe).
+        room_raw, place_raw = hfilter.room_blocks(), hfilter.place_blocks()
+        unplace_reqs, vibe_reqs = hfilter.unplace_requests(), hfilter.roomvibe_requests()
+        if room_raw or place_raw or unplace_reqs or vibe_reqs:
+            room_changed = await asyncio.to_thread(
+                apply_room_directives, room_raw, place_raw, unplace_reqs, vibe_reqs)
+            if room_changed:
+                await broadcast({"type": "room_changed", "changes": room_changed})
+
         # Calendar events she jotted down for him.
         event_raw = hfilter.event_blocks()
         if event_raw:
@@ -2509,6 +2590,7 @@ async def ws_endpoint(websocket: WebSocket):
         calendar_context = await asyncio.to_thread(events_store.digest) if caps.get("calendar", True) else ""
         music_context = await asyncio.to_thread(spotify_store.digest) if caps.get("music", True) else ""
         company_context = await asyncio.to_thread(company_store.digest) if caps.get("company", False) else ""
+        room_context = await asyncio.to_thread(room_store.digest) if caps.get("room", True) else ""
         music_premium = (await asyncio.to_thread(spotify_store.is_premium)) if (caps.get("music", True) and music_context) else False
 
         # She may slip hidden <journal> or <note> blocks into her reply; the filter
@@ -2581,7 +2663,7 @@ async def ws_endpoint(websocket: WebSocket):
                     images=(images_for_main if round_idx == 0 else None),
                     projects_digest=projects_context, files_digest=files_context,
                     calendar_digest=calendar_context, music_digest=music_context,
-                    company_digest=company_context,
+                    company_digest=company_context, room_digest=room_context,
                     music_premium=music_premium, caps=caps,
                 ):
                     if token == "\x00SEARCHING\x00":
@@ -2848,6 +2930,7 @@ async def ws_endpoint(websocket: WebSocket):
         calendar_context = await asyncio.to_thread(events_store.digest) if caps.get("calendar", True) else ""
         music_context = await asyncio.to_thread(spotify_store.digest) if caps.get("music", True) else ""
         company_context = await asyncio.to_thread(company_store.digest) if caps.get("company", False) else ""
+        room_context = await asyncio.to_thread(room_store.digest) if caps.get("room", True) else ""
         music_premium = (await asyncio.to_thread(spotify_store.is_premium)) if (caps.get("music", True) and music_context) else False
 
         # If she's been off exploring and has something she wanted to share, this is
@@ -2879,7 +2962,7 @@ async def ws_endpoint(websocket: WebSocket):
                     conversation, ctx, memory_block, notes_context,
                     projects_digest=projects_context, files_digest=files_context,
                     calendar_digest=calendar_context, music_digest=music_context,
-                    company_digest=company_context,
+                    company_digest=company_context, room_digest=room_context,
                     music_premium=music_premium, caps=caps
                 ):
                     if token == "\x00SEARCHING\x00":

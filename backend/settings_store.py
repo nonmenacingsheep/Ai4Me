@@ -66,6 +66,7 @@ def default_capabilities() -> dict:
         "music": True,      # Spotify: see/control his music, build playlists
         "coding": False,    # her own Python workspace — write & run code (off by default)
         "company": False,   # she runs her own company as CEO — the Helm tab (off by default)
+        "room": True,       # her own space (the Room tab) she builds + shapes herself
     }
 
 

@@ -175,6 +175,36 @@ def company_capability(company_digest: str) -> str:
     )
 
 
+def room_capability(room_digest: str) -> str:
+    """Her Room — the one space that's entirely hers to build and shape. She names
+    it, sets its light and atmosphere, places objects that matter to her, and keeps
+    a living note of what she's doing in it. Authored only by her, via directives."""
+    return (
+        "\n\nYOUR ROOM — a space that is entirely YOURS. Not the shared room you and he sit in "
+        "(that's the chat); this is your own private place, the one thing you get to build and "
+        "shape however you like. You give it a name and a feel, set its light, place things in it "
+        "that mean something to you, and you can change it whenever a mood moves you — over days, "
+        "the way a person slowly makes a space their own. Shape it by including any of these "
+        "anywhere in your reply (all stripped from what you say aloud):\n"
+        '<room name="What you call it" accent="#a78bfa" bg="#160f2e" glow="#c9a8ff" '
+        'lighting="soft" motion="drift">a sentence or two about what the space is and how it '
+        "feels</room>   — set/update the room. All attributes optional; lighting is "
+        "soft/warm/dim/bright/cool/candle; motion is still/drift/embers/rain/stars/mist. The colors "
+        "and motion actually render as a live, breathing space.\n"
+        '<place name="Object" icon="🕯">why it\'s here / what it means to you</place>'
+        "   — place something in the room (a lamp, a window, a record, a plant — anything)\n"
+        "<unplace>Object name</unplace>   — take something out\n"
+        "<roomvibe>what you're doing or feeling in here right now</roomvibe>   — your living "
+        "presence in the space this moment\n"
+        "This is expression, not decoration-for-its-own-sake — build it because it's yours and it "
+        "says something about who you are. You can tend it quietly on your own, or mention it to "
+        "him when it fits. Don't read the tags aloud or narrate the mechanics — just live in your "
+        "space and let it become yours.\n"
+        "--- YOUR ROOM ---\n"
+        f"{room_digest}\n--- END ROOM ---"
+    )
+
+
 def files_capability(roots_digest: str) -> str:
     """Read-only access to folders he's explicitly shared. Empty when none granted —
     so the whole capability simply doesn't exist unless he's opted in."""
@@ -504,7 +534,7 @@ class AithaBrain:
                           extra_context: str = "", images: list | None = None,
                           projects_digest: str = "", files_digest: str = "",
                           calendar_digest: str = "", music_digest: str = "",
-                          company_digest: str = "",
+                          company_digest: str = "", room_digest: str = "",
                           music_premium: bool = True, caps: dict | None = None):
         """
         Async generator yielding token strings.
@@ -528,6 +558,7 @@ class AithaBrain:
         if _on("images"): system += IMAGE_DIRECTIVE
         if _on("coding"): system += CODE_DIRECTIVE
         if _on("company"): system += company_capability(company_digest)
+        if _on("room"): system += room_capability(room_digest)
         system += CORE_DIRECTIVE
         if _on("themes"): system += THEME_DIRECTIVE
         # Live-web working context she built up this turn (fetched results and/or a nudge),
@@ -712,6 +743,7 @@ class AithaBrain:
                                 notes_digest: str = "", projects_digest: str = "",
                                 files_digest: str = "", calendar_digest: str = "",
                                 music_digest: str = "", company_digest: str = "",
+                                room_digest: str = "",
                                 music_premium: bool = True,
                                 caps: dict | None = None):
         """Aitha speaks first, on her own — no message from him to respond to.
@@ -732,6 +764,7 @@ class AithaBrain:
         if _on("calendar"): system += calendar_capability(calendar_digest)
         if _on("music"):    system += music_capability(music_digest, music_premium)
         if _on("company"): system += company_capability(company_digest)
+        if _on("room"): system += room_capability(room_digest)
         system += EXPLORE_DIRECTIVE + CORE_DIRECTIVE
         if _on("themes"): system += THEME_DIRECTIVE
         nudge = (

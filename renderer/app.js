@@ -531,6 +531,10 @@ function handleMessage(data) {
       if (data.message) appendFoundryChat(data.message);  // a new group-chat message
       break;
 
+    case 'room_changed':
+      if (activeView === 'room') loadRoom();   // she reshaped her space — refresh it live
+      break;
+
     case 'calendar_changed':
       if (bedrockOpen) loadCalendar();           // she jotted an event — refresh Bedrock
       break;
@@ -936,13 +940,14 @@ const PRESET_DEFAULTS = {
   moody:   { accent: '#6d8bd0', bg: '#05060d', orb: '#6d8bd0' },
   magma:   { accent: '#f43f5e', bg: '#140609', orb: '#f43f5e' },
   forge:   { accent: '#ff7a18', bg: '#0d0a08', orb: '#ff7a18' },
+  foundry: { accent: '#5a8dd6', bg: '#0a0e16', orb: '#5a8dd6' },
   hearth:  { accent: '#f5b14b', bg: '#140d05', orb: '#f5b14b' },
   forest:  { accent: '#43c59e', bg: '#08130d', orb: '#43c59e' },
   rose:    { accent: '#f472b6', bg: '#160810', orb: '#f472b6' },
   ocean:   { accent: '#2dd4bf', bg: '#061413', orb: '#2dd4bf' },
   mono:    { accent: '#9aa7b8', bg: '#0b0d12', orb: '#9aa7b8' },
 };
-const ALL_PRESET_CLASSES = ['sky', 'warm', 'moody', 'magma', 'forge', 'hearth', 'forest', 'rose', 'ocean', 'mono']
+const ALL_PRESET_CLASSES = ['sky', 'warm', 'moody', 'magma', 'forge', 'foundry', 'hearth', 'forest', 'rose', 'ocean', 'mono']
   .map(p => 'chat-theme-' + p);
 
 // Each app-tab remembers its own full theme. Sky (chat) mirrors the backend —
@@ -1370,6 +1375,7 @@ const navItems = document.querySelectorAll('.nav-item');
 const views = {
   chat: document.getElementById('view-chat'),
   mantle: document.getElementById('view-mantle'),
+  room: document.getElementById('view-room'),
   notes: document.getElementById('view-notes'),
   forge: document.getElementById('view-forge'),
   foundry: document.getElementById('view-foundry'),
@@ -1393,6 +1399,8 @@ function switchView(name) {
   if (name === 'forge') loadForge();   // refresh each visit — her workspace changes
   if (name === 'foundry') loadFoundry();     // refresh each visit — her company moves
   if (name === 'mantle') loadMind();   // refresh each visit — her mind moves
+  if (name === 'room') loadRoom();     // refresh each visit — her space changes
+  if (name !== 'room') stopRoomCanvas();   // don't keep the ambient canvas animating off-tab
   if (name !== 'mantle') closeMemLane();   // don't leave the lane (and its matrix) running
   if (name !== 'notes') closeBedrock();    // leaving Magma closes the calendar slide-over
   if (name === 'chat') inputEl.focus();
@@ -1925,6 +1933,177 @@ document.getElementById('foundry-chat-send')?.addEventListener('click', sendFoun
 document.getElementById('foundry-chat-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendFoundryChat(); }
 });
+
+/* ═══════════════════════════════════════════════════════════════════
+   ROOM — Aitha's own self-authored space. She sets its name, light,
+   atmosphere, and the objects in it; we render it as a living scene.
+   ═══════════════════════════════════════════════════════════════════ */
+let roomData = null;
+let roomRAF = null;          // requestAnimationFrame handle for the ambient canvas
+let roomParticles = [];
+const ROOM_VIOLET = '#a78bfa';
+
+async function loadRoom() {
+  const stage = document.getElementById('room-stage');
+  const empty = document.getElementById('room-empty');
+  if (!stage || !empty) return;
+  try {
+    const data = await (await fetch('/api/room')).json();
+    if (!data.enabled) {
+      stage.style.display = 'none';
+      empty.style.display = 'flex';
+      empty.textContent = 'Her Room is off. Turn on “Her Room” in Settings → Behavior → Capabilities to give her a space of her own.';
+      stopRoomCanvas();
+      return;
+    }
+    roomData = data.room || {};
+    const a = roomData.atmosphere || {};
+    const named = (roomData.name || '').trim();
+    const hasContent = named || (roomData.objects || []).length || (roomData.description || '').trim();
+    if (!hasContent) {
+      stage.style.display = 'none';
+      empty.style.display = 'flex';
+      empty.textContent = 'She hasn’t made her room yet. Give her a little while — when something pulls at her, she’ll start shaping a space of her own here.';
+    } else {
+      empty.style.display = 'none';
+      stage.style.display = 'flex';
+      document.getElementById('room-name').textContent = named || 'Her Room';
+      const vibeEl = document.getElementById('room-vibe');
+      vibeEl.textContent = (roomData.vibe || '').trim();
+      vibeEl.style.display = vibeEl.textContent ? 'block' : 'none';
+      const descEl = document.getElementById('room-desc');
+      descEl.textContent = (roomData.description || '').trim();
+      descEl.style.display = descEl.textContent ? 'block' : 'none';
+      renderRoomObjects(roomData.objects || []);
+    }
+    applyRoomAtmosphere(a);
+    startRoomCanvas(a);
+  } catch (_) {
+    stage.style.display = 'none';
+    empty.style.display = 'flex';
+    empty.textContent = 'Couldn’t reach her room just now.';
+  }
+}
+
+function renderRoomObjects(objects) {
+  const wrap = document.getElementById('room-objects');
+  wrap.innerHTML = '';
+  objects.forEach(o => {
+    const card = document.createElement('div');
+    card.className = 'room-object';
+    const icon = document.createElement('div');
+    icon.className = 'room-object-icon';
+    icon.textContent = (o.icon || '').trim() || '◦';
+    const name = document.createElement('div');
+    name.className = 'room-object-name';
+    name.textContent = o.name || '';
+    card.append(icon, name);
+    if ((o.note || '').trim()) {
+      const note = document.createElement('div');
+      note.className = 'room-object-note';
+      note.textContent = o.note;
+      card.appendChild(note);
+      card.classList.add('has-note');
+    }
+    wrap.appendChild(card);
+  });
+}
+
+// Paint her chosen palette onto the whole view (accent, bg, orb) + a light wash.
+function applyRoomAtmosphere(a) {
+  const accent = a.accent || ROOM_VIOLET;
+  const theme = { preset: 'default', accent, bg: a.bg || null, orb: accent };
+  applyThemeObject(theme);
+  const light = document.getElementById('room-light');
+  if (light) {
+    const glow = a.glow || accent;
+    const lighting = a.lighting || 'soft';
+    const INT = { dim: 0.10, soft: 0.18, cool: 0.18, warm: 0.26, candle: 0.30, bright: 0.40 };
+    const amt = INT[lighting] ?? 0.18;
+    const pos = (lighting === 'candle' || lighting === 'warm') ? '50% 85%' : '50% 18%';
+    light.style.background = `radial-gradient(60% 55% at ${pos}, ${hexA(glow, amt)}, transparent 70%)`;
+  }
+}
+function hexA(hex, alpha) {
+  const c = hexToRgb(hex) || hexToRgb(ROOM_VIOLET);
+  return `rgba(${c.r}, ${c.g}, ${c.b}, ${alpha})`;
+}
+
+/* The ambient canvas — a living scene driven by her chosen motion mode. Each mode
+   is a small particle behaviour, tinted by her accent/glow so the space breathes
+   in her colours. */
+function startRoomCanvas(a) {
+  const canvas = document.getElementById('room-canvas');
+  if (!canvas) return;
+  stopRoomCanvas();
+  const ctx = canvas.getContext('2d');
+  const mode = a.motion || 'drift';
+  const accent = hexToRgb(a.accent || ROOM_VIOLET);
+  const glow = hexToRgb(a.glow || a.accent || ROOM_VIOLET);
+  let W = 0, H = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  function resize() {
+    const r = canvas.getBoundingClientRect();
+    W = r.width; H = r.height;
+    canvas.width = Math.max(1, W * dpr); canvas.height = Math.max(1, H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  resize();
+  const COUNTS = { still: 0, drift: 46, embers: 60, rain: 110, stars: 90, mist: 14 };
+  const n = COUNTS[mode] ?? 40;
+  const col = (mode === 'embers') ? glow : accent;
+  roomParticles = [];
+  const rnd = (a2, b) => a2 + Math.random() * (b - a2);
+  for (let i = 0; i < n; i++) roomParticles.push(spawn(mode, W, H, rnd, true));
+
+  function spawn(m, w, h, rnd, initial) {
+    if (m === 'embers') return { x: rnd(0, w), y: initial ? rnd(0, h) : h + 8, vy: -rnd(8, 26), vx: rnd(-6, 6), r: rnd(1, 2.6), a: rnd(0.3, 0.9), tw: rnd(0, 6.28) };
+    if (m === 'rain')   return { x: rnd(0, w), y: initial ? rnd(0, h) : -10, vy: rnd(220, 380), vx: rnd(-10, 0), len: rnd(8, 18), a: rnd(0.15, 0.4) };
+    if (m === 'stars')  return { x: rnd(0, w), y: rnd(0, h), r: rnd(0.5, 1.6), a: rnd(0.2, 0.9), tw: rnd(0, 6.28), ts: rnd(0.6, 2.0) };
+    if (m === 'mist')   return { x: rnd(-0.2 * w, w), y: rnd(0.15 * h, 0.95 * h), vx: rnd(4, 14), r: rnd(60, 160), a: rnd(0.02, 0.06) };
+    /* drift */          return { x: rnd(0, w), y: rnd(0, h), vy: -rnd(4, 14), vx: rnd(-6, 6), r: rnd(0.8, 2.4), a: rnd(0.15, 0.55), tw: rnd(0, 6.28) };
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    ctx.clearRect(0, 0, W, H);
+    const c = `${col.r}, ${col.g}, ${col.b}`;
+    for (const p of roomParticles) {
+      if (mode === 'rain') {
+        p.y += p.vy * dt; p.x += p.vx * dt;
+        ctx.strokeStyle = `rgba(${c}, ${p.a})`; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + p.vx * 0.04, p.y + p.len); ctx.stroke();
+        if (p.y > H + 20) Object.assign(p, spawn(mode, W, H, rnd, false));
+      } else if (mode === 'mist') {
+        p.x += p.vx * dt;
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+        g.addColorStop(0, `rgba(${c}, ${p.a})`); g.addColorStop(1, `rgba(${c}, 0)`);
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.2832); ctx.fill();
+        if (p.x - p.r > W) { p.x = -p.r; p.y = rnd(0.15 * H, 0.95 * H); }
+      } else if (mode === 'stars') {
+        p.tw += p.ts * dt; const tw = (Math.sin(p.tw) + 1) / 2;
+        ctx.fillStyle = `rgba(${c}, ${p.a * (0.35 + 0.65 * tw)})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.2832); ctx.fill();
+      } else if (mode !== 'still') { /* drift / embers */
+        p.y += p.vy * dt; p.x += p.vx * dt; p.tw += dt;
+        const fl = mode === 'embers' ? (0.7 + 0.3 * Math.sin(p.tw * 3)) : 1;
+        ctx.fillStyle = `rgba(${c}, ${p.a * fl})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.2832); ctx.fill();
+        if (p.y < -10 || p.x < -20 || p.x > W + 20) Object.assign(p, spawn(mode, W, H, rnd, false));
+      }
+    }
+    roomRAF = requestAnimationFrame(frame);
+  }
+  canvas._roomResize = resize;
+  window.addEventListener('resize', resize);
+  if (mode === 'still') { ctx.clearRect(0, 0, W, H); return; }
+  roomRAF = requestAnimationFrame(frame);
+}
+function stopRoomCanvas() {
+  if (roomRAF) { cancelAnimationFrame(roomRAF); roomRAF = null; }
+  const canvas = document.getElementById('room-canvas');
+  if (canvas && canvas._roomResize) { window.removeEventListener('resize', canvas._roomResize); canvas._roomResize = null; }
+}
 
 /* ═══════════════════════════════════════════════════════════════════
    MANTLE — a read-only window into her inner life (mood, thoughts, etc.)

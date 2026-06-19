@@ -127,6 +127,20 @@ body.chat-theme-forge::before {
     radial-gradient(ellipse 75% 50% at 50% 100%, rgba(255,122,24,0.16) 0%, transparent 62%),
     radial-gradient(ellipse 45% 40% at 85% 12%, rgba(154,167,184,0.07) 0%, transparent 60%);
 }
+body.chat-theme-foundry {
+  --bg-deep:#0a0e16; --bg-mid:#121824;
+  --accent-v:#5a8dd6; --accent-v-bright:#8fb4e8;
+  --accent-v-dim:rgba(90,141,214,0.15); --accent-v-glow:rgba(90,141,214,0.30);
+  --accent-r:#cfae6a; --accent-r-dim:rgba(207,174,106,0.12);
+  --border-accent:rgba(120,150,190,0.32);
+  --text-1:#e6edf6; --text-2:#a7b6cc; --text-3:#5f7390;
+  --orb-rgb:90,141,214; --orb-core:170,200,240; --orb-deep:40,80,150;
+}
+body.chat-theme-foundry::before {
+  background:
+    radial-gradient(ellipse 75% 52% at 50% 0%, rgba(90,141,214,0.13) 0%, transparent 60%),
+    radial-gradient(ellipse 45% 40% at 88% 92%, rgba(207,174,106,0.06) 0%, transparent 60%);
+}
 body.chat-theme-forest {
   --bg-deep:#08130d; --bg-mid:#0c1b13;
   --accent-v:#43c59e; --accent-v-bright:#7be6c2;
@@ -820,6 +834,7 @@ body::before {
 .tc-magma   { background: radial-gradient(circle at 35% 30%, #fda4af, #be123c 55%, #140609); }
 .tc-hearth  { background: radial-gradient(circle at 35% 30%, #ffd98a, #e8b558 50%, #1a1206); }
 .tc-forge   { background: radial-gradient(circle at 35% 30%, #ffc78a, #ff7a18 52%, #150b04); }
+.tc-foundry { background: radial-gradient(circle at 35% 30%, #aecbf0, #5a8dd6 52%, #0a0e16); }
 
 /* ── Forge view — everything she's making in her code workspace ── */
 .forge-wrap { flex: 1; width: 100%; max-width: 1400px; margin: 0 auto;
@@ -986,6 +1001,46 @@ img.forge-media { object-fit: contain; max-height: none; }
 .foundry-meeting-btn { width: auto !important; padding: 0 14px; height: 40px; white-space: nowrap;
   font-size: 0.82rem !important; font-weight: 600; }
 
+/* ─── Room: Aitha's own self-authored, living space ──────────────────── */
+.view-room { position: relative; overflow: hidden; padding: 0; }
+.room-canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
+.room-light { position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  transition: background 1.2s ease; }
+.room-wrap { position: relative; z-index: 1; height: 100%; overflow-y: auto;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 48px 40px; }
+.room-empty { flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--text-3); text-align: center; line-height: 1.7; max-width: 520px;
+  margin: auto; font-size: 0.95rem; }
+.room-stage { width: 100%; max-width: 760px; margin: auto 0;
+  display: flex; flex-direction: column; gap: 28px; }
+.room-head { display: flex; align-items: center; gap: 18px; }
+.room-orb-wrap { flex: 0 0 auto; }
+.room-orb { width: 54px; height: 54px; }
+.room-headtext { min-width: 0; }
+.room-name { font-size: 1.7rem; font-weight: 600; color: var(--text-1); line-height: 1.2;
+  letter-spacing: .005em; }
+.room-vibe { margin-top: 4px; font-size: 0.92rem; color: var(--accent-v-bright);
+  font-style: italic; }
+.room-desc { font-size: 1.04rem; line-height: 1.7; color: var(--text-1);
+  max-width: 620px; opacity: .92; }
+.room-objects { display: flex; flex-wrap: wrap; gap: 14px; }
+.room-object { position: relative; display: flex; flex-direction: column; align-items: center;
+  gap: 7px; min-width: 92px; padding: 16px 14px 13px; border-radius: 14px;
+  background: rgba(255,255,255,0.035); border: 1px solid var(--border-accent);
+  backdrop-filter: blur(3px); transition: transform .15s, background .15s, border-color .15s; }
+.room-object.has-note { cursor: default; }
+.room-object:hover { transform: translateY(-2px); background: var(--accent-v-dim);
+  border-color: var(--accent-v-glow); }
+.room-object-icon { font-size: 1.7rem; line-height: 1; filter: drop-shadow(0 0 8px var(--accent-v-glow)); }
+.room-object-name { font-size: 0.82rem; color: var(--text-1); text-align: center; max-width: 120px; }
+.room-object-note { position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  width: max-content; max-width: 220px; padding: 8px 11px; border-radius: 9px;
+  background: #161425; border: 1px solid var(--accent-v-glow); color: var(--text-2);
+  font-size: 0.78rem; line-height: 1.45; text-align: center; z-index: 5;
+  opacity: 0; pointer-events: none; transition: opacity .15s; box-shadow: 0 12px 30px rgba(0,0,0,0.5); }
+.room-object.has-note:hover .room-object-note { opacity: 1; }
+
 /* ─── Foundry: corporate theme ─────────────────────────────────────────
    A cooler, more structured look than the rest of the app — steel-blue
    accents, crisp cards, a quiet "company HQ" feel. Scoped to the Foundry so
@@ -1124,6 +1179,12 @@ img.forge-media { object-fit: contain; max-height: none; }
 }
 .binder-tab {
   position: relative;
+  flex: 1 1 0;          /* share the row evenly so every tab fits + stays clickable */
+  min-width: 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   background: var(--bg-mid);
   border: 1px solid var(--border-soft);
   border-bottom: none;
@@ -1132,7 +1193,7 @@ img.forge-media { object-fit: contain; max-height: none; }
   font-size: 11.5px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  padding: 7px 13px 9px;
+  padding: 7px 8px 9px;
   margin-right: -1px;
   cursor: pointer;
   border-radius: 9px 9px 0 0;
