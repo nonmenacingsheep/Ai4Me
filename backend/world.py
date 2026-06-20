@@ -22,6 +22,7 @@ Design notes that shape everything here:
 """
 
 import base64
+import heapq
 import json
 import os
 import time
@@ -45,7 +46,7 @@ H = 2048
 # satisfy. A save stamped with a different (or missing) schema is treated as
 # incompatible and regenerated on load, so a world written by a broken/older
 # build self-heals on the next launch instead of staying frozen forever.
-SCHEMA = 5
+SCHEMA = 6
 CHUNK = 64                      # tiles per chunk → (W//CHUNK)² dormancy bookkeeping cells
 NCHUNK = W // CHUNK
 SEA_LEVEL = 0.36                # elevation below this is ocean
@@ -84,6 +85,7 @@ PATH_META = os.path.join(_DIR, "world.json")    # clock, weather, entities, log
 BIOMES = (
     "ocean", "beach", "grassland", "forest", "rainforest", "desert",
     "savanna", "tundra", "snow", "swamp", "mountain", "rock",
+    "shingle",       # gravel/pebble shore — steep, wave-eroded, sediment-starved coasts
 )
 B = {name: i for i, name in enumerate(BIOMES)}
 
@@ -371,15 +373,16 @@ class World:
         self.moisture = moist.astype(np.float32)
 
         self.water = np.where(elev < SEA_LEVEL, WATER_OCEAN, WATER_NONE).astype(np.uint8)
-        self._carve_lakes_and_rivers()
+        self._carve_hydrology()
         # Damp ground near any water.
         self._dampen_near_water()
 
         self.biome = self._classify_biomes()
+        self._shape_beaches()
         # Soil: fertile where moist & low, poor on rock/desert/snow; plus noise.
         soil = np.clip(0.35 + self.moisture * 0.5 - elev * 0.25, 0, 1)
         soil += (_fractal_noise(H, W, 6, np.random.default_rng(self.seed ^ 0x12345)) - 0.5) * 0.2
-        for bad in ("rock", "mountain", "snow", "desert", "ocean"):
+        for bad in ("rock", "mountain", "snow", "desert", "ocean", "shingle"):
             soil[self.biome == B[bad]] *= 0.35
         self.soil = np.clip(soil, 0, 1).astype(np.float32)
 
@@ -470,64 +473,111 @@ class World:
                 return (int(cx), int(cy))
         return (W // 2, H // 2)
 
-    def _carve_lakes_and_rivers(self):
-        elev = self.elevation
-        # Lakes: only TRUE interior basins (a tile no higher than all 4 neighbours), not
-        # every shallow dip — so we get a scattering of real ponds & mountain tarns rather
-        # than a marshy speckle. Each basin is dilated by one ring into a small lake.
-        nbr_min = np.full_like(elev, 1.0)
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            nbr_min = np.minimum(nbr_min, np.roll(np.roll(elev, dy, 0), dx, 1))
-        basin = (elev <= nbr_min) & (elev >= SEA_LEVEL + 0.02) & (elev < 0.80)
-        lake = basin.copy()
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):       # grow ponds a little
-            lake |= np.roll(np.roll(basin, dy, 0), dx, 1)
-        self.water[lake & (self.water == WATER_NONE)] = WATER_LAKE
-        # Rivers: springs rise from high, wettish ground (and overflowing tarns) and run
-        # downhill by steepest descent to the sea — high→low, fed by run-off, sometimes
-        # starting at a mountain lake and occasionally crossing from one coast to another.
-        springs = np.argwhere((elev > 0.55) & (self.moisture > 0.45)
-                              & (self.water == WATER_NONE))
-        if len(springs):
-            n = min(len(springs), max(16, (W * H) // 60000))
-            picks = self.rng.choice(len(springs), size=n, replace=False)
-            for idx in picks:
-                self._trace_river(int(springs[idx][0]), int(springs[idx][1]))
+    # ── hydrology: a real drainage network (flow accumulation) ──────────────────
+    _DIRS8 = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
 
-    def _trace_river(self, y: int, x: int):
-        """Follow steepest descent from a spring to the sea, with a little meander and a
-        momentum bias so channels curve naturally instead of marching in straight diagonals.
-        Tributaries that meet an existing river merge into it (forming dendritic trunks)."""
-        elev = self.elevation
-        rng = self.rng
-        pdy, pdx = 0, 0                                # previous step (momentum)
-        for step in range(4 * max(W, H)):
-            cur = self.water[y, x]
-            if cur in (WATER_OCEAN, WATER_LAKE):
-                return
-            if cur == WATER_RIVER and step > 0:        # met another river → merge & stop
-                return
-            self.water[y, x] = WATER_RIVER
-            best, by, bx = 1e9, y, x
-            for dy in (-1, 0, 1):
-                for dx in (-1, 0, 1):
-                    if dy == 0 and dx == 0:
-                        continue
-                    ny, nx = y + dy, x + dx
-                    if not (0 <= ny < H and 0 <= nx < W):
-                        continue
-                    # Score = elevation, minus a momentum bonus for going straight, plus a
-                    # touch of noise — together these meander the channel without backtracking.
-                    score = (elev[ny, nx]
-                             - (0.0009 if (dy, dx) == (pdy, pdx) else 0.0)
-                             + (rng.random() - 0.5) * 0.0011)
-                    if score < best:
-                        best, by, bx = score, ny, nx
-            if (by, bx) == (y, x) or elev[by, bx] > elev[y, x] + 0.02:   # pit → small lake
-                self.water[y, x] = WATER_LAKE
-                return
-            pdy, pdx = by - y, bx - x
-            y, x = by, bx
+    def _carve_hydrology(self):
+        """Carve lakes and rivers from a proper drainage model instead of tracing springs.
+        Working on a coarse grid (for speed on 4M tiles): fill depressions so every land
+        cell drains to the sea (Barnes priority-flood), accumulate each cell's rainfall +
+        snowmelt downhill, then the rivers are wherever enough water has gathered — so they
+        bend naturally, grow THICKER downstream (width ∝ √volume), pool into lakes at filled
+        basins, and always reach the ocean (a lake simply overflows onward to the sea)."""
+        DS = 4
+        rh, rw = H // DS, W // DS
+        ce = self.elevation[:rh * DS, :rw * DS].reshape(rh, DS, rw, DS).mean((1, 3)).astype(np.float64)
+        cm = self.moisture[:rh * DS, :rw * DS].reshape(rh, DS, rw, DS).mean((1, 3))
+        sea = ce < SEA_LEVEL
+        # The displayed terrain is heavily smoothed (clean coasts), but a near-flat surface
+        # makes D8 flow snap into long parallel diagonals. Give the DRAINAGE surface real
+        # fractal valleys (generated at the coarse resolution so they survive) on land only:
+        # flow then converges down these valleys into branching, dendritic river networks.
+        valleys = _fractal_noise(rh, rw, 7, np.random.default_rng(self.seed ^ 0x2B1D77C4))
+        ce = ce + np.where(sea, 0.0, (valleys - 0.5) * 0.14)
+
+        # Priority-flood depression fill (+ε so flats still drain): fe = hydrologically
+        # corrected elevation that descends monotonically from every land cell to the sea.
+        INF = 1e18
+        fe = np.where(sea, ce, INF)
+        closed = sea.copy()
+        eps = 1e-6
+        pq = [(float(ce[y, x]), int(y), int(x)) for y, x in zip(*np.nonzero(sea))]
+        heapq.heapify(pq)
+        while pq:
+            e, y, x = heapq.heappop(pq)
+            for dy, dx in self._DIRS8:
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < rh and 0 <= nx < rw and not closed[ny, nx]:
+                    closed[ny, nx] = True
+                    fe[ny, nx] = ce[ny, nx] if ce[ny, nx] > e else e + eps
+                    heapq.heappush(pq, (float(fe[ny, nx]), ny, nx))
+
+        # D8 receiver (steepest-descent neighbour on the filled surface).
+        bestv = fe.copy()
+        rdy = np.zeros((rh, rw), np.int64); rdx = np.zeros((rh, rw), np.int64)
+        for dy, dx in self._DIRS8:
+            s = np.roll(np.roll(fe, -dy, 0), -dx, 1)
+            m = s < bestv
+            bestv[m] = s[m]; rdy[m] = dy; rdx[m] = dx
+        yy = np.arange(rh)[:, None]; xx = np.arange(rw)[None, :]
+        ry = np.clip(yy + rdy, 0, rh - 1); rx = np.clip(xx + rdx, 0, rw - 1)
+        recv = (ry * rw + rx).ravel()
+
+        # Flow accumulation: each cell sources rainfall (∝ moisture) plus snowmelt (cold,
+        # high ground) and passes its running total to its receiver, processed high→low.
+        lat = np.abs(yy / (rh - 1) - 0.5) * 2
+        ctemp = np.clip(0.92 - lat * 0.62 - ce * 0.42, 0, 1)
+        rain = 0.35 + cm + np.clip(0.32 - ctemp, 0, 1) * 1.6     # +snowmelt where cold
+        acc = np.where(sea, 0.0, rain).ravel().astype(np.float64)
+        seaf = sea.ravel()
+        order = np.argsort(fe, axis=None)[::-1]
+        for idx in order:
+            if seaf[idx]:
+                continue
+            r = recv[idx]
+            if r != idx:
+                acc[r] += acc[idx]
+        acc = acc.reshape(rh, rw)
+
+        # Lakes = basins the flood actually filled (water would pond there).
+        lake_c = (~sea) & (fe > ce + 5e-4)
+        # Rivers = land cells carrying more than a threshold volume; width grows with √flow.
+        land_acc = acc[~sea]
+        thresh = np.quantile(land_acc, 0.93) if land_acc.size else 1e9
+        river_c = (~sea) & (acc > thresh)
+
+        # Paint lakes (upscaled blocks) onto the full-res water grid.
+        if lake_c.any():
+            big_lake = np.repeat(np.repeat(lake_c, DS, 0), DS, 1)
+            self.water[big_lake & (self.water == WATER_NONE)] = WATER_LAKE
+
+        # Paint rivers: stamp variable-width channels from each river cell to its receiver,
+        # so the line is continuous and thickens downstream. Carve the bed down a touch too.
+        rmask = np.zeros((H, W), bool)
+        wfac = np.sqrt(np.clip(acc / max(thresh, 1e-9), 1.0, 400.0))   # 1..20
+        ys, xs = np.nonzero(river_c)
+        for cy, cx in zip(ys.tolist(), xs.tolist()):
+            r_tiles = float(np.clip(wfac[cy, cx] * 0.9, 1.0, 9.0))
+            fy0, fx0 = cy * DS + DS // 2, cx * DS + DS // 2
+            ny, nx = int(ry[cy, cx]), int(rx[cy, cx])
+            fy1, fx1 = ny * DS + DS // 2, nx * DS + DS // 2
+            steps = max(1, int(max(abs(fy1 - fy0), abs(fx1 - fx0))))
+            for s in range(steps + 1):
+                t = s / steps
+                self._stamp_disc(rmask, int(fy0 + (fy1 - fy0) * t), int(fx0 + (fx1 - fx0) * t), r_tiles)
+        place = rmask & (self.water == WATER_NONE) & (self.elevation >= SEA_LEVEL)
+        self.water[place] = WATER_RIVER
+        self.elevation[place] = np.maximum(SEA_LEVEL - 0.005,
+                                           self.elevation[place] - 0.02).astype(np.float32)
+
+    def _stamp_disc(self, mask, fy, fx, r):
+        r = max(1, int(round(r)))
+        y0, y1 = max(0, fy - r), min(H, fy + r + 1)
+        x0, x1 = max(0, fx - r), min(W, fx + r + 1)
+        if y1 <= y0 or x1 <= x0:
+            return
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        mask[y0:y1, x0:x1] |= (xx - fx) ** 2 + (yy - fy) ** 2 <= r * r
 
     def _dampen_near_water(self):
         # A narrow, gentle damp fringe by the water — wide/strong dampening was turning
@@ -578,6 +628,63 @@ class World:
         bm[coast & ~ocean & (elev < SEA_LEVEL + 0.05)] = B["beach"]
         bm[ocean] = B["ocean"]
         return bm
+
+    def _shape_beaches(self):
+        """Give shores realistic variety instead of a uniform one-tile sand ring. Real
+        beaches depend on: SEDIMENT washed down by rivers (sandy, wide deltas at river
+        mouths); coastal SLOPE (gentle → broad sand, steep cliffs → narrow gravel/pebble
+        'shingle'); and COASTLINE SHAPE (sand piles up in sheltered bays; exposed headlands
+        are scoured to shingle). We score each coastal tile on these and grow the beach
+        inland by a width that follows the score, choosing sand vs. shingle by exposure.
+        (Seasonal/tidal widening is a future dynamic layer; this is the static geography.)"""
+        ocean = self.water == WATER_OCEAN
+        land = self.water == WATER_NONE
+        if not ocean.any():
+            return
+        adj = np.zeros((H, W), bool)
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            adj |= np.roll(np.roll(ocean, dy, 0), dx, 1)
+        coast = land & adj
+        if not coast.any():
+            return
+        elev = self.elevation
+        # Coastal slope (how fast the land rises behind the shore): steep ⇒ cliff/shingle.
+        gy = np.roll(elev, -1, 0) - np.roll(elev, 1, 0)
+        gx = np.roll(elev, -1, 1) - np.roll(elev, 1, 1)
+        slope = np.sqrt(gy * gy + gx * gx)
+        # Exposure: how much open sea surrounds a spot — high on jutting headlands, low in
+        # sheltered bays. Sediment: a soft halo around river mouths (sand supply).
+        exposure = _smooth(ocean.astype(np.float32), 6)
+        sediment = _smooth((self.water == WATER_RIVER).astype(np.float32), 5)
+        # Width budget per coastal tile: sediment & shelter widen it, slope narrows it.
+        wf = np.clip(1.6 + sediment * 14.0 - slope * 22.0 - exposure * 2.2, 0.0, 6.0)
+        # Shingle where steep, exposed and starved of river sand; sand everywhere else.
+        # Thresholds are relative to THIS coast's own distribution so a sensible fraction
+        # of the steep, wave-exposed shore turns to gravel regardless of overall relief.
+        cs, cx_ = slope[coast], exposure[coast]
+        s_hi = np.quantile(cs, 0.55) if cs.size else 1.0
+        e_hi = np.quantile(cx_, 0.50) if cx_.size else 1.0
+        shingle = coast & (slope > s_hi) & (exposure > e_hi) & (sediment < 0.03)
+        mat = np.zeros((H, W), np.uint8)
+        mat[coast] = B["beach"]
+        mat[shingle] = B["shingle"]
+        budget = np.where(coast, wf, 0.0).astype(np.float32)
+        inbeach = coast.copy()
+        for _ in range(6):                      # grow the beach inland, width ∝ budget
+            best = np.zeros((H, W), np.float32)
+            bestmat = np.zeros((H, W), np.uint8)
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nb = np.roll(np.roll(budget, dy, 0), dx, 1) - 1.0
+                nm = np.roll(np.roll(mat, dy, 0), dx, 1)
+                take = nb > best
+                best = np.where(take, nb, best)
+                bestmat = np.where(take, nm, bestmat)
+            grow = land & ~inbeach & (best > 0)
+            budget = np.where(grow, best, budget)
+            mat = np.where(grow, bestmat, mat)
+            inbeach |= grow
+        set_tiles = inbeach & (mat != 0) & land
+        self.biome[set_tiles] = mat[set_tiles]
 
     def _suitability(self, species: int, reg=None) -> np.ndarray:
         """Per-tile growth suitability in [-1,1] for a plant *right now* (season-aware).

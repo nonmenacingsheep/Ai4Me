@@ -3576,6 +3576,7 @@ const WBIOME_RGB = {
   forest: [56, 102, 65], rainforest: [30, 86, 49], desert: [224, 192, 104],
   savanna: [179, 161, 66], tundra: [138, 160, 160], snow: [232, 238, 242],
   swamp: [74, 93, 58], mountain: [138, 128, 115], rock: [107, 107, 107],
+  shingle: [150, 140, 120],            // gravel/pebble shore
 };
 const WWATER_RGB = { 1: [79, 155, 217], 2: [47, 111, 176], 3: [22, 52, 90] }; // river/lake/ocean
 const WPLANT_TINT = {
