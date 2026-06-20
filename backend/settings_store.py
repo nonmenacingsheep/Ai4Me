@@ -226,6 +226,37 @@ def list_vision_models() -> list[str]:
     return out
 
 
+# ── Cached option lists ──────────────────────────────────────────────────────
+# Building these is slow & blocking (httpx to Ollama, audio-device enumeration),
+# so we compute once and reuse. Callers refresh explicitly via refresh_options().
+_options_cache: dict | None = None
+
+
+def build_options() -> dict:
+    """Compute the dropdown option lists. Blocking — call off the event loop."""
+    return {
+        "models": list_models(),
+        "vision_models": list_vision_models(),
+        "voices": KOKORO_VOICES,
+        "devices": list_output_devices(),
+    }
+
+
+def get_options(refresh: bool = False) -> dict:
+    """Return the cached option lists.
+
+    With refresh=True (or no cache yet on a refresh call) it rebuilds — that's
+    blocking, so run it inside asyncio.to_thread. Without refresh it NEVER builds:
+    it returns the warm cache, or a safe empty set if the cache isn't ready, so
+    it's always cheap to call on the event loop (e.g. from settings_payload)."""
+    global _options_cache
+    if refresh:
+        _options_cache = build_options()
+    if _options_cache is None:
+        return {"models": [], "vision_models": [], "voices": KOKORO_VOICES, "devices": []}
+    return _options_cache
+
+
 def list_output_devices() -> list[str]:
     """Unique output device names, ordered for a dropdown."""
     try:

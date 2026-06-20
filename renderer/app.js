@@ -95,8 +95,10 @@ chatClearBtn?.addEventListener('click', () => {
   }
 });
 
+let awaitingSettings = false;   // true between asking for settings and the reply
 function openSettings() {
   if (connected && ws?.readyState === WebSocket.OPEN) {
+    awaitingSettings = true;   // let the next 'settings' message fully populate
     ws.send(JSON.stringify({ type: 'get_settings' }));
   }
   loadMemory();
@@ -127,6 +129,19 @@ function fillSelect(el, items, selected) {
 function populateSettings(data) {
   const cur = data.current || {};
   const opt = data.options || {};
+
+  // A 'settings' broadcast can arrive from another client (or our own save)
+  // while you're mid-edit. Re-syncing the staged buffers below would silently
+  // discard unsaved toggles, so when the panel is already open (and this isn't
+  // the reply to our own open request) we only refresh the dropdown option
+  // lists and leave the in-progress edits untouched.
+  if (settingsModal.classList.contains('open') && !awaitingSettings) {
+    const models = opt.models?.length ? opt.models : [cur.model];
+    fillSelect(setModel, models, setModel.value || cur.model);
+    fillSelect(setVoice, opt.voices || [cur.tts_voice], setVoice.value || cur.tts_voice);
+    fillSelect(setDevice, opt.devices?.length ? opt.devices : [cur.tts_device], setDevice.value || cur.tts_device);
+    return;
+  }
 
   const models = opt.models?.length ? opt.models : [cur.model];
   fillSelect(setModel, models, cur.model);
@@ -164,6 +179,7 @@ function populateSettings(data) {
   renderFileRoots();
 
   if (cur.char_name) applyCharName(cur.char_name);
+  awaitingSettings = false;
 }
 
 settingsBtn.addEventListener('click', openSettings);

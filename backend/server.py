@@ -150,16 +150,15 @@ def discoveries_title() -> str:
 
 
 def settings_payload() -> dict:
-    """Current settings plus the option lists the UI needs to populate dropdowns."""
+    """Current settings plus the option lists the UI needs to populate dropdowns.
+
+    Uses the cached option lists so this stays cheap and non-blocking — safe to
+    call on the event loop and to broadcast after every save. Refresh the cache
+    out-of-band (see get_settings) when the user actually opens the panel."""
     return {
         "type": "settings",
         "current": settings,
-        "options": {
-            "models": settings_store.list_models(),
-            "vision_models": settings_store.list_vision_models(),
-            "voices": settings_store.KOKORO_VOICES,
-            "devices": settings_store.list_output_devices(),
-        },
+        "options": settings_store.get_options(),
     }
 
 
@@ -222,7 +221,7 @@ async def apply_settings(new: dict) -> dict:
         settings["behavior"] = settings_store.save_behavior(new["behavior"])
         _apply_voice_expression(settings["behavior"])
 
-    settings_store.save(settings)
+    await asyncio.to_thread(settings_store.save, settings)
     if changed_model:
         asyncio.create_task(brain.warm_up())  # reload new model/ctx into VRAM
     return settings
@@ -659,6 +658,9 @@ async def lifespan(app: FastAPI):
     conversation[:] = mem_store.load_conversation()
     # Load the LLM into VRAM now so the first message isn't a slow cold start.
     asyncio.create_task(brain.warm_up())
+    # Warm the dropdown-option cache in the background so the first settings
+    # broadcast doesn't block the event loop building it.
+    asyncio.create_task(asyncio.to_thread(settings_store.get_options, True))
     # Warm up Kokoro + resolve the audio device without blocking startup.
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, tts.warm_up)
@@ -3482,7 +3484,16 @@ async def ws_endpoint(websocket: WebSocket):
                 settings_store.save(settings)
 
             elif msg_type == "get_settings":
+                # Answer instantly from the warm cache so the panel opens snappily,
+                # then refresh the option lists in the background (the blocking
+                # enumeration runs off the loop) and push the update when ready.
                 await websocket.send_json(settings_payload())
+
+                async def _refresh_options():
+                    await asyncio.to_thread(settings_store.get_options, True)
+                    await broadcast(settings_payload())
+
+                asyncio.create_task(_refresh_options())
 
             elif msg_type == "set_settings":
                 await apply_settings(data.get("settings", {}))
