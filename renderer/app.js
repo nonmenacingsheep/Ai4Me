@@ -531,6 +531,12 @@ function handleMessage(data) {
       if (data.message) appendFoundryChat(data.message);  // a new group-chat message
       break;
 
+    case 'world_tick':
+      worldOnTick(msg);   // entities + clock move forward (cheap; layers come via snapshot)
+      break;
+    case 'world_changed':
+      worldOnChanged();   // terrain/flora/wildlife was reshaped — refresh the map
+      break;
     case 'room_changed':
       if (activeView === 'room') loadRoom();   // she reshaped her space — refresh it live
       break;
@@ -959,8 +965,9 @@ const TAB_DEFAULTS = {
   forge:  { preset: 'forge',   accent: null, bg: null, orb: null },
   foundry:   { preset: 'moody',   accent: null, bg: null, orb: null },
   hearth: { preset: 'hearth',  accent: null, bg: null, orb: null },
+  world:  { preset: 'forge',   accent: '#6fcf97', bg: '#0a1410', orb: '#6fcf97' },
 };
-const VIEW_ORDER = ['chat', 'mantle', 'notes', 'forge', 'foundry', 'hearth'];
+const VIEW_ORDER = ['chat', 'mantle', 'notes', 'forge', 'foundry', 'hearth', 'world'];
 
 function emptyTheme() { return { preset: 'default', accent: null, bg: null, orb: null }; }
 
@@ -1380,6 +1387,7 @@ const views = {
   forge: document.getElementById('view-forge'),
   foundry: document.getElementById('view-foundry'),
   hearth: document.getElementById('view-hearth'),
+  world: document.getElementById('view-world'),
 };
 let notesLoaded = false;
 let hearthLoaded = false;
@@ -1400,6 +1408,8 @@ function switchView(name) {
   if (name === 'foundry') loadFoundry();     // refresh each visit — her company moves
   if (name === 'mantle') loadMind();   // refresh each visit — her mind moves
   if (name === 'room') loadRoom();     // refresh each visit — her space changes
+  if (name === 'world') loadWorld();   // (re)open the living map
+  if (name !== 'world') stopWorld();   // pause the periodic refresh when off-tab
   if (name !== 'room') stopRoomCanvas();   // don't keep the ambient canvas animating off-tab
   if (name !== 'mantle') closeMemLane();   // don't leave the lane (and its matrix) running
   if (name !== 'notes') closeBedrock();    // leaving Magma closes the calendar slide-over
@@ -3541,3 +3551,420 @@ setInterval(() => {
     ws.send(JSON.stringify({ type: 'ping' }));
   }
 }, 25000);
+
+/* ═══════════════════════════════════════════════════════════════════
+   WORLD — the living god-sim map + brush god-tools
+   ═══════════════════════════════════════════════════════════════════ */
+const WBIOME_RGB = {
+  ocean: [29, 58, 95], beach: [217, 200, 154], grassland: [106, 153, 78],
+  forest: [56, 102, 65], rainforest: [30, 86, 49], desert: [224, 192, 104],
+  savanna: [179, 161, 66], tundra: [138, 160, 160], snow: [232, 238, 242],
+  swamp: [74, 93, 58], mountain: [138, 128, 115], rock: [107, 107, 107],
+};
+const WWATER_RGB = { 1: [79, 155, 217], 2: [47, 111, 176], 3: [22, 52, 90] }; // river/lake/ocean
+const WPLANT_TINT = {
+  grass: [120, 180, 70], shrub: [110, 150, 70], oak: [40, 95, 45], pine: [28, 72, 50],
+  cactus: [80, 140, 90], reeds: [95, 155, 80], palm: [50, 125, 70],
+};
+const WANIMAL_RGB = { rabbit: [232, 230, 224], deer: [201, 160, 106], wolf: [86, 92, 104] };
+
+const WORLD = {
+  data: null, base: null, baseCtx: null,
+  cam: null,                       // { zoom: px/tile, camX, camY (top-left tile, float) }
+  tool: 'inspect', arg: null,
+  dragging: false, panning: false, panLX: 0, panLY: 0, bound: false,
+  refreshTimer: null, refreshPending: false, lastPaint: 0,
+};
+
+function _wb64(b64) {
+  const bin = atob(b64); const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+
+async function loadWorld() {
+  const off = document.getElementById('world-off');
+  const stage = document.getElementById('world-stage');
+  if (!stage) return;
+  bindWorld();
+  try {
+    const j = await (await fetch('/api/world')).json();
+    if (!j.enabled || !j.world) {
+      off.style.display = 'flex'; stage.style.display = 'none';
+      stopWorld();
+      return;
+    }
+    off.style.display = 'none'; stage.style.display = 'flex';
+    setWorld(j.world);
+    startWorldRefresh();
+  } catch (e) { console.warn('[world] load failed', e); }
+}
+
+function setWorld(s) {
+  WORLD.data = {
+    w: s.w, h: s.h, biomes: s.biomes, plants: s.plants || {}, animals: s.animals || [],
+    elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
+    water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
+    vegGrowth: _wb64(s.layers.veg_growth),
+    day: s.day, time: s.time, season: s.season, weather: s.weather,
+    census: null, version: s.version,
+  };
+  buildWorldBase();
+  computeWorldCamera();
+  renderWorld();
+  updateWorldHud();
+}
+
+// Paint the terrain once into a 1px-per-tile offscreen canvas; the visible canvas
+// just scales this up (pixelated). Rebuilt only when terrain/flora actually change.
+function buildWorldBase() {
+  const d = WORLD.data; if (!d) return;
+  if (!WORLD.base) { WORLD.base = document.createElement('canvas'); }
+  WORLD.base.width = d.w; WORLD.base.height = d.h;
+  WORLD.baseCtx = WORLD.base.getContext('2d');
+  const img = WORLD.baseCtx.createImageData(d.w, d.h);
+  const px = img.data;
+  for (let y = 0; y < d.h; y++) {
+    for (let x = 0; x < d.w; x++) {
+      const i = y * d.w + x;
+      const elev = d.elevation[i] / 255;
+      let r, g, b;
+      const water = d.water[i];
+      if (water) {
+        const c = WWATER_RGB[water] || WWATER_RGB[2];
+        const sh = 0.7 + 0.6 * elev;
+        r = c[0] * sh; g = c[1] * sh; b = c[2] * sh;
+      } else {
+        const c = WBIOME_RGB[d.biomes[d.biome[i]]] || [120, 120, 120];
+        // Hillshade: light from the west — west-facing slopes brighten, lee darkens.
+        const wj = x > 0 ? d.elevation[i - 1] / 255 : elev;
+        let shade = 0.74 + elev * 0.34 + (elev - wj) * 1.7;
+        shade = Math.max(0.42, Math.min(1.4, shade));
+        r = c[0] * shade; g = c[1] * shade; b = c[2] * shade;
+        const sp = d.vegSp[i];
+        if (sp) {
+          const t = WPLANT_TINT[d.plants[sp]] || [90, 150, 70];
+          const k = 0.14 + 0.5 * (d.vegGrowth[i] / 255);
+          r = r * (1 - k) + t[0] * k; g = g * (1 - k) + t[1] * k; b = b * (1 - k) + t[2] * k;
+        }
+      }
+      const o = i * 4;
+      px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 255;
+    }
+  }
+  WORLD.baseCtx.putImageData(img, 0, 0);
+}
+
+// Size the canvas to fill its wrapper and set up a camera that *covers* the view
+// (the map always fills the stage; never a tiny centered square). Keeps the
+// existing camera (zoom/pan) across refreshes; only re-seeds for a new map.
+function computeWorldCamera() {
+  const d = WORLD.data; if (!d) return;
+  const wrap = document.getElementById('world-canvas-wrap');
+  const cv = document.getElementById('world-canvas');
+  if (!wrap || !cv) return;
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  if (cw <= 0 || ch <= 0) return;
+  cv.width = cw; cv.height = ch;
+  if (!WORLD.cam || WORLD.cam._w !== d.w || WORLD.cam._h !== d.h) {
+    const z = Math.max(cw / d.w, ch / d.h);           // cover
+    WORLD.cam = { zoom: z, camX: (d.w - cw / z) / 2, camY: (d.h - ch / z) / 2, _w: d.w, _h: d.h };
+  }
+  clampCamera();
+}
+
+// Keep zoom ≥ cover and the viewport inside the map bounds.
+function clampCamera() {
+  const d = WORLD.data, cv = document.getElementById('world-canvas');
+  if (!d || !cv || !WORLD.cam) return;
+  const cam = WORLD.cam, cw = cv.width, ch = cv.height;
+  const minZoom = Math.max(cw / d.w, ch / d.h);
+  cam.zoom = Math.max(minZoom, Math.min(48, cam.zoom));
+  const viewW = cw / cam.zoom, viewH = ch / cam.zoom;
+  cam.camX = Math.max(0, Math.min(d.w - viewW, cam.camX));
+  cam.camY = Math.max(0, Math.min(d.h - viewH, cam.camY));
+}
+
+function renderWorld() {
+  const d = WORLD.data; if (!d || !WORLD.base || !WORLD.cam) return;
+  const cv = document.getElementById('world-canvas');
+  if (!cv || activeView !== 'world') return;
+  const ctx = cv.getContext('2d');
+  const cam = WORLD.cam, z = cam.zoom;
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = '#06100c';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(WORLD.base, 0, 0, d.w, d.h, -cam.camX * z, -cam.camY * z, d.w * z, d.h * z);
+  // Wildlife as crisp pixel sprites (squares scaled with zoom), culled to view.
+  for (const a of d.animals) {
+    const sx = (a.x - cam.camX) * z, sy = (a.y - cam.camY) * z;
+    if (sx < -z || sy < -z || sx > cv.width || sy > cv.height) continue;
+    const c = WANIMAL_RGB[a.sp] || [220, 220, 220];
+    const s = Math.max(2.5, z * (a.sp === 'wolf' ? 0.9 : 0.62));
+    const ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;
+    ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+    ctx.fillRect(ox, oy, s, s);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1;
+    ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
+  }
+}
+
+function updateWorldHud() {
+  const d = WORLD.data; if (!d) return;
+  const hh = Math.floor(d.time), mm = Math.round((d.time - hh) * 60);
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+  set('whud-day', `Day ${d.day}`);
+  set('whud-time', `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`);
+  set('whud-season', d.season);
+  set('whud-weather', d.weather);
+  const cen = d.census;
+  if (cen && cen.animals) {
+    const a = cen.animals;
+    document.getElementById('whud-census').innerHTML =
+      Object.entries(a).map(([k, v]) => `${k} <span>${v}</span>`).join('') || '';
+  }
+}
+
+// A light per-tick update (entities + clock move; terrain doesn't).
+function worldOnTick(msg) {
+  if (!WORLD.data) return;
+  Object.assign(WORLD.data, {
+    day: msg.day, time: msg.time, season: msg.season,
+    weather: msg.weather, animals: msg.animals || [], census: msg.census, version: msg.version,
+  });
+  if (activeView === 'world') { renderWorld(); updateWorldHud(); }
+}
+
+// Terrain/flora was reshaped (a god acted) — pull a fresh snapshot, debounced.
+function worldOnChanged() {
+  if (activeView !== 'world') return;
+  if (WORLD.refreshPending) return;
+  WORLD.refreshPending = true;
+  setTimeout(async () => {
+    WORLD.refreshPending = false;
+    try {
+      const j = await (await fetch('/api/world')).json();
+      if (j.enabled && j.world) setWorld(j.world);
+    } catch (_) {}
+  }, 250);
+}
+
+function startWorldRefresh() {
+  stopWorld();
+  // Periodically refresh the full snapshot so slow changes (plant growth, spread,
+  // seasonal recolouring) show up even without an explicit god-action.
+  WORLD.refreshTimer = setInterval(() => { if (activeView === 'world') worldOnChanged(); }, 20000);
+}
+function stopWorld() { if (WORLD.refreshTimer) { clearInterval(WORLD.refreshTimer); WORLD.refreshTimer = null; } }
+
+// Translate a pointer event to a tile coordinate via the camera.
+function worldTileAt(ev) {
+  const cv = document.getElementById('world-canvas');
+  if (!cv || !WORLD.cam) return { x: -1, y: -1 };
+  const r = cv.getBoundingClientRect();
+  const px = (ev.clientX - r.left) * (cv.width / r.width);
+  const py = (ev.clientY - r.top) * (cv.height / r.height);
+  return {
+    x: Math.floor(WORLD.cam.camX + px / WORLD.cam.zoom),
+    y: Math.floor(WORLD.cam.camY + py / WORLD.cam.zoom),
+  };
+}
+
+function worldInspect(x, y) {
+  const d = WORLD.data; if (!d) return;
+  if (x < 0 || y < 0 || x >= d.w || y >= d.h) return;
+  const i = y * d.w + x;
+  const ro = document.getElementById('world-readout');
+  const water = d.water[i];
+  const biome = water ? ['', 'river', 'lake', 'ocean'][water] : d.biomes[d.biome[i]];
+  const sp = d.vegSp[i];
+  const flora = sp ? `${d.plants[sp]} (${Math.round(d.vegGrowth[i] / 255 * 100)}%)` : '—';
+  const here = d.animals.filter(a => a.x === x && a.y === y).map(a => a.sp);
+  ro.innerHTML = `<strong>(${x}, ${y})</strong> · ${biome}<br>` +
+    `elevation ${Math.round(d.elevation[i] / 255 * 100)}% · flora: ${flora}` +
+    (here.length ? `<br>here: ${here.join(', ')}` : '');
+  ro.classList.add('show');
+  clearTimeout(WORLD._roTimer);
+  WORLD._roTimer = setTimeout(() => ro.classList.remove('show'), 3500);
+}
+
+async function worldPaint(x, y) {
+  const d = WORLD.data; if (!d || x < 0 || y < 0 || x >= d.w || y >= d.h) return;
+  const r = +(document.getElementById('wbrush')?.value || 4);
+  let body = { x, y, r };
+  switch (WORLD.tool) {
+    case 'raise': body.tool = 'sculpt'; body.d = 0.12; break;
+    case 'lower': body.tool = 'sculpt'; body.d = -0.12; break;
+    case 'water': body.tool = 'water'; body.kind = WORLD.arg; break;
+    case 'biome': body.tool = 'biome'; body.name = WORLD.arg; break;
+    case 'plant': body.tool = 'plant'; body.species = WORLD.arg; break;
+    case 'spawn': body.tool = 'spawn'; body.species = WORLD.arg; body.n = 1; break;
+    default: return;
+  }
+  try {
+    await fetch('/api/world/action', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    // The server broadcasts world_changed; worldOnChanged() refreshes the map.
+  } catch (_) {}
+}
+
+const _wRgb = (c) => `rgb(${c[0]},${c[1]},${c[2]})`;
+
+// Build one swatch+label tool button.
+function _wToolBtn(tool, arg, label, color) {
+  const b = document.createElement('button');
+  b.className = 'wbtn'; b.dataset.tool = tool; b.dataset.arg = arg;
+  const sw = document.createElement('span'); sw.className = 'wsw'; sw.style.background = _wRgb(color);
+  const t = document.createElement('span'); t.textContent = label;
+  b.append(sw, t);
+  return b;
+}
+
+// Fill the four accordion grids from the palettes (once).
+function populateWorldTools() {
+  if (WORLD._toolsBuilt) return;
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const biome = document.getElementById('wbiome-grid');
+  const water = document.getElementById('wwater-grid');
+  const flora = document.getElementById('wflora-grid');
+  const wild = document.getElementById('wwild-grid');
+  if (!biome || !water || !flora || !wild) return;
+  for (const [name, c] of Object.entries(WBIOME_RGB)) biome.appendChild(_wToolBtn('biome', name, cap(name), c));
+  for (const [kind, code] of [['river', 1], ['lake', 2], ['ocean', 3]])
+    water.appendChild(_wToolBtn('water', kind, cap(kind), WWATER_RGB[code]));
+  for (const [sp, c] of Object.entries(WPLANT_TINT)) flora.appendChild(_wToolBtn('plant', sp, cap(sp), c));
+  for (const [sp, c] of Object.entries(WANIMAL_RGB)) wild.appendChild(_wToolBtn('spawn', sp, cap(sp), c));
+  WORLD._toolsBuilt = true;
+}
+
+function bindWorld() {
+  // The sidebar toggle lives outside the world view — bind it independently so it
+  // works even before the World tab is ever opened.
+  bindSidebarToggle();
+  if (WORLD.bound) return;
+  WORLD.bound = true;
+  const cv = document.getElementById('world-canvas');
+  const panel = document.getElementById('world-panel');
+  const fab = document.getElementById('world-fab');
+
+  populateWorldTools();
+
+  // FAB opens/closes the god-tools panel.
+  fab?.addEventListener('click', () => {
+    const open = panel.classList.toggle('open');
+    fab.setAttribute('aria-expanded', String(open));
+    panel.setAttribute('aria-hidden', String(!open));
+  });
+  document.getElementById('wpanel-close')?.addEventListener('click', () => {
+    panel.classList.remove('open');
+    fab?.setAttribute('aria-expanded', 'false');
+    panel.setAttribute('aria-hidden', 'true');
+  });
+
+  // Accordion menu headers.
+  panel?.querySelectorAll('.wmenu-head').forEach(head => {
+    head.addEventListener('click', () => head.parentElement.classList.toggle('open'));
+  });
+
+  // Tool selection (delegated — covers both static and generated buttons).
+  panel?.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.wbtn[data-tool]');
+    if (!btn) return;
+    panel.querySelectorAll('.wbtn[data-tool]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    WORLD.tool = btn.dataset.tool;
+    WORLD.arg = btn.dataset.arg || null;
+  });
+
+  const brush = document.getElementById('wbrush');
+  brush?.addEventListener('input', () => { document.getElementById('wbrush-val').textContent = brush.value; });
+
+  document.getElementById('wreset')?.addEventListener('click', async () => {
+    if (!confirm('Generate a brand-new world? The current one will be replaced.')) return;
+    try {
+      const j = await (await fetch('/api/world/reset', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      })).json();
+      if (j.world) { WORLD.cam = null; setWorld(j.world); }
+    } catch (_) {}
+  });
+
+  // Pointer: inspect-tool drags pan the camera; any paint tool paints.
+  cv?.addEventListener('pointerdown', (ev) => {
+    const { x, y } = worldTileAt(ev);
+    if (WORLD.tool === 'inspect') {
+      WORLD.panning = true; WORLD.panLX = ev.clientX; WORLD.panLY = ev.clientY;
+      cv.setPointerCapture(ev.pointerId);
+      worldInspect(x, y);
+      return;
+    }
+    WORLD.dragging = true; cv.setPointerCapture(ev.pointerId);
+    worldPaint(x, y);
+  });
+  cv?.addEventListener('pointermove', (ev) => {
+    const { x, y } = worldTileAt(ev);
+    const co = document.getElementById('whud-coords');
+    if (co) co.textContent = `${x}, ${y}`;
+    if (WORLD.panning && WORLD.cam) {
+      const r = cv.getBoundingClientRect();
+      const dx = (ev.clientX - WORLD.panLX) * (cv.width / r.width);
+      const dy = (ev.clientY - WORLD.panLY) * (cv.height / r.height);
+      WORLD.panLX = ev.clientX; WORLD.panLY = ev.clientY;
+      WORLD.cam.camX -= dx / WORLD.cam.zoom;
+      WORLD.cam.camY -= dy / WORLD.cam.zoom;
+      clampCamera(); renderWorld();
+      return;
+    }
+    if (WORLD.dragging && WORLD.tool !== 'spawn') {
+      const now = Date.now();
+      if (now - WORLD.lastPaint > 90) { WORLD.lastPaint = now; worldPaint(x, y); }
+    }
+  });
+  const stop = () => { WORLD.dragging = false; WORLD.panning = false; };
+  cv?.addEventListener('pointerup', stop);
+  cv?.addEventListener('pointercancel', stop);
+  cv?.addEventListener('pointerleave', () => {
+    const co = document.getElementById('whud-coords'); if (co) co.textContent = '';
+  });
+
+  // Wheel zooms toward the cursor.
+  cv?.addEventListener('wheel', (ev) => {
+    if (!WORLD.cam) return;
+    ev.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const px = (ev.clientX - r.left) * (cv.width / r.width);
+    const py = (ev.clientY - r.top) * (cv.height / r.height);
+    const cam = WORLD.cam;
+    const tileX = cam.camX + px / cam.zoom, tileY = cam.camY + py / cam.zoom;
+    cam.zoom *= ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const minZoom = Math.max(cv.width / WORLD.data.w, cv.height / WORLD.data.h);
+    cam.zoom = Math.max(minZoom, Math.min(48, cam.zoom));
+    cam.camX = tileX - px / cam.zoom;
+    cam.camY = tileY - py / cam.zoom;
+    clampCamera(); renderWorld();
+  }, { passive: false });
+
+  window.addEventListener('resize', () => {
+    if (activeView === 'world' && WORLD.data) { computeWorldCamera(); renderWorld(); }
+  });
+}
+
+let _sidebarToggleBound = false;
+function bindSidebarToggle() {
+  if (_sidebarToggleBound) return;
+  const btn = document.getElementById('sidebar-toggle');
+  if (!btn) return;
+  _sidebarToggleBound = true;
+  btn.addEventListener('click', () => {
+    document.body.classList.toggle('sidebar-collapsed');
+    // The sidebar width animates (~.22s); recompute the map after it settles.
+    if (activeView === 'world' && WORLD.data) {
+      requestAnimationFrame(() => { computeWorldCamera(); renderWorld(); });
+      setTimeout(() => { computeWorldCamera(); renderWorld(); }, 260);
+    }
+  });
+}
+
+// Wire the sidebar collapse toggle at startup (independent of the World tab).
+bindSidebarToggle();
