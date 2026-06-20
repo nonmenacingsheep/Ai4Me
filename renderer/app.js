@@ -3618,58 +3618,115 @@ async function loadWorld() {
 
 function setWorld(s) {
   WORLD.data = {
-    w: s.w, h: s.h, biomes: s.biomes, plants: s.plants || {}, animals: s.animals || [],
+    // True world size (entities + camera live in this 0..w/0..h tile space)…
+    w: s.w, h: s.h,
+    // …while terrain ships as a downsampled OVERVIEW (ovw×ovh, each cell = ovStep tiles).
+    ovw: s.ovw || s.w, ovh: s.ovh || s.h, ovStep: s.ov_step || 1,
+    biomes: s.biomes, plants: s.plants || {}, animals: s.animals || [],
     people: s.people || [], structures: s.structures || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
+    detail: null,                           // crisp window streamed when zoomed in
     day: s.day, time: s.time, season: s.season, weather: s.weather,
     census: null, version: s.version,
   };
   buildWorldBase();
   computeWorldCamera();
   renderWorld();
+  refreshWorldDetail();
   updateWorldHud();
 }
 
-// Paint the terrain once into a 1px-per-tile offscreen canvas; the visible canvas
-// just scales this up (pixelated). Rebuilt only when terrain/flora actually change.
+// Colour one tile pixel (biome + west-light hillshade + veg tint, or shaded water).
+function _wPaintPixel(px, o, i, el, bi, wa, vs, vg, leftElev, biomes, plants) {
+  const elev = el[i] / 255;
+  let r, g, b;
+  const water = wa[i];
+  if (water) {
+    const c = WWATER_RGB[water] || WWATER_RGB[2];
+    const sh = 0.7 + 0.6 * elev;
+    r = c[0] * sh; g = c[1] * sh; b = c[2] * sh;
+  } else {
+    const c = WBIOME_RGB[biomes[bi[i]]] || [120, 120, 120];
+    let shade = 0.74 + elev * 0.34 + (elev - leftElev) * 1.7;
+    shade = Math.max(0.42, Math.min(1.4, shade));
+    r = c[0] * shade; g = c[1] * shade; b = c[2] * shade;
+    const sp = vs[i];
+    if (sp) {
+      const t = WPLANT_TINT[plants[sp]] || [90, 150, 70];
+      const k = 0.14 + 0.5 * (vg[i] / 255);
+      r = r * (1 - k) + t[0] * k; g = g * (1 - k) + t[1] * k; b = b * (1 - k) + t[2] * k;
+    }
+  }
+  px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 255;
+}
+
+// Paint the downsampled overview into an offscreen canvas (ovw×ovh). renderWorld
+// stretches it across the whole world; a crisp detail window overlays it when zoomed.
 function buildWorldBase() {
   const d = WORLD.data; if (!d) return;
   if (!WORLD.base) { WORLD.base = document.createElement('canvas'); }
-  WORLD.base.width = d.w; WORLD.base.height = d.h;
+  WORLD.base.width = d.ovw; WORLD.base.height = d.ovh;
   WORLD.baseCtx = WORLD.base.getContext('2d');
-  const img = WORLD.baseCtx.createImageData(d.w, d.h);
+  const img = WORLD.baseCtx.createImageData(d.ovw, d.ovh);
   const px = img.data;
-  for (let y = 0; y < d.h; y++) {
-    for (let x = 0; x < d.w; x++) {
-      const i = y * d.w + x;
-      const elev = d.elevation[i] / 255;
-      let r, g, b;
-      const water = d.water[i];
-      if (water) {
-        const c = WWATER_RGB[water] || WWATER_RGB[2];
-        const sh = 0.7 + 0.6 * elev;
-        r = c[0] * sh; g = c[1] * sh; b = c[2] * sh;
-      } else {
-        const c = WBIOME_RGB[d.biomes[d.biome[i]]] || [120, 120, 120];
-        // Hillshade: light from the west — west-facing slopes brighten, lee darkens.
-        const wj = x > 0 ? d.elevation[i - 1] / 255 : elev;
-        let shade = 0.74 + elev * 0.34 + (elev - wj) * 1.7;
-        shade = Math.max(0.42, Math.min(1.4, shade));
-        r = c[0] * shade; g = c[1] * shade; b = c[2] * shade;
-        const sp = d.vegSp[i];
-        if (sp) {
-          const t = WPLANT_TINT[d.plants[sp]] || [90, 150, 70];
-          const k = 0.14 + 0.5 * (d.vegGrowth[i] / 255);
-          r = r * (1 - k) + t[0] * k; g = g * (1 - k) + t[1] * k; b = b * (1 - k) + t[2] * k;
-        }
-      }
-      const o = i * 4;
-      px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 255;
+  for (let y = 0; y < d.ovh; y++) {
+    for (let x = 0; x < d.ovw; x++) {
+      const i = y * d.ovw + x;
+      const leftElev = (x > 0 ? d.elevation[i - 1] : d.elevation[i]) / 255;
+      _wPaintPixel(px, i * 4, i, d.elevation, d.biome, d.water, d.vegSp, d.vegGrowth,
+        leftElev, d.biomes, d.plants);
     }
   }
   WORLD.baseCtx.putImageData(img, 0, 0);
+}
+
+// Build a crisp tile-accurate canvas from a streamed view window.
+function buildDetailCanvas(v) {
+  const vw = v.vw, vh = v.vh;
+  const el = _wb64(v.layers.elevation), bi = _wb64(v.layers.biome), wa = _wb64(v.layers.water);
+  const vs = _wb64(v.layers.veg_sp), vg = _wb64(v.layers.veg_growth);
+  const cvs = document.createElement('canvas'); cvs.width = vw; cvs.height = vh;
+  const cx = cvs.getContext('2d');
+  const img = cx.createImageData(vw, vh); const px = img.data;
+  const d = WORLD.data;
+  for (let y = 0; y < vh; y++) {
+    for (let x = 0; x < vw; x++) {
+      const i = y * vw + x;
+      const leftElev = (x > 0 ? el[i - 1] : el[i]) / 255;
+      _wPaintPixel(px, i * 4, i, el, bi, wa, vs, vg, leftElev, d.biomes, d.plants);
+    }
+  }
+  cx.putImageData(img, 0, 0);
+  return { canvas: cvs, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, vw, vh };
+}
+
+// When zoomed in enough that the overview looks blocky, stream a crisp window of the
+// visible area at an appropriate level-of-detail (debounced; skipped when overview suffices).
+let _wDetailTimer = null, _wDetailKey = '';
+function refreshWorldDetail() {
+  const d = WORLD.data, cv = document.getElementById('world-canvas');
+  if (!d || !cv || !WORLD.cam) return;
+  const cam = WORLD.cam, z = cam.zoom;
+  if (z * d.ovStep < 6) { d.detail = null; _wDetailKey = ''; return; }   // overview is crisp enough
+  const x0 = Math.max(0, Math.floor(cam.camX));
+  const y0 = Math.max(0, Math.floor(cam.camY));
+  const x1 = Math.min(d.w, Math.ceil(cam.camX + cv.width / z) + 1);
+  const y1 = Math.min(d.h, Math.ceil(cam.camY + cv.height / z) + 1);
+  const step = Math.max(1, Math.ceil(Math.max(x1 - x0, y1 - y0) / 512));
+  const key = `${x0},${y0},${x1},${y1},${step}`;
+  if (key === _wDetailKey) return;
+  clearTimeout(_wDetailTimer);
+  _wDetailTimer = setTimeout(async () => {
+    try {
+      const j = await (await fetch(`/api/world/view?x0=${x0}&y0=${y0}&x1=${x1}&y1=${y1}&step=${step}`)).json();
+      if (!j.view || !j.view.vw) return;
+      _wDetailKey = key;
+      WORLD.data.detail = buildDetailCanvas(j.view);
+      renderWorld();
+    } catch (_) {}
+  }, 120);
 }
 
 // Size the canvas to fill its wrapper and set up a camera that *covers* the view
@@ -3715,7 +3772,14 @@ function renderWorld() {
   ctx.imageSmoothingEnabled = false;
   ctx.fillStyle = '#06100c';
   ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.drawImage(WORLD.base, 0, 0, d.w, d.h, -cam.camX * z, -cam.camY * z, d.w * z, d.h * z);
+  // Overview terrain: the ovw×ovh base stretched across the whole world extent.
+  ctx.drawImage(WORLD.base, 0, 0, d.ovw, d.ovh, -cam.camX * z, -cam.camY * z, d.w * z, d.h * z);
+  // Crisp detail window overlaid where we've streamed it (when zoomed in).
+  if (d.detail) {
+    const dt = d.detail;
+    ctx.drawImage(dt.canvas, 0, 0, dt.vw, dt.vh,
+      (dt.x0 - cam.camX) * z, (dt.y0 - cam.camY) * z, (dt.x1 - dt.x0) * z, (dt.y1 - dt.y0) * z);
+  }
   // Wildlife as crisp pixel sprites (squares scaled with zoom), culled to view.
   for (const a of d.animals) {
     const sx = (a.x - cam.camX) * z, sy = (a.y - cam.camY) * z;
@@ -3834,7 +3898,10 @@ function worldTileAt(ev) {
 function worldInspect(x, y) {
   const d = WORLD.data; if (!d) return;
   if (x < 0 || y < 0 || x >= d.w || y >= d.h) return;
-  const i = y * d.w + x;
+  // Terrain layers are the downsampled overview — map the true tile to its overview cell.
+  const ox = Math.min(d.ovw - 1, Math.floor(x / d.ovStep));
+  const oy = Math.min(d.ovh - 1, Math.floor(y / d.ovStep));
+  const i = oy * d.ovw + ox;
   const ro = document.getElementById('world-readout');
   const water = d.water[i];
   const biome = water ? ['', 'river', 'lake', 'ocean'][water] : d.biomes[d.biome[i]];
@@ -3986,7 +4053,7 @@ function bindWorld() {
       WORLD.panLX = ev.clientX; WORLD.panLY = ev.clientY;
       WORLD.cam.camX -= dx / WORLD.cam.zoom;
       WORLD.cam.camY -= dy / WORLD.cam.zoom;
-      clampCamera(); renderWorld();
+      clampCamera(); renderWorld(); refreshWorldDetail();
       return;
     }
     if (WORLD.dragging && WORLD.tool !== 'spawn' && WORLD.tool !== 'person') {
@@ -4015,7 +4082,7 @@ function bindWorld() {
     cam.zoom = Math.max(minZoom, Math.min(48, cam.zoom));
     cam.camX = tileX - px / cam.zoom;
     cam.camY = tileY - py / cam.zoom;
-    clampCamera(); renderWorld();
+    clampCamera(); renderWorld(); refreshWorldDetail();
   }, { passive: false });
 
   window.addEventListener('resize', () => {

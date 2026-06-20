@@ -30,17 +30,31 @@ import uuid
 import numpy as np
 
 # ─── Dimensions & clock ───────────────────────────────────────────────────
-W = 128
-H = 128
+# A large world (2048×2048 ≈ 4.2M tiles) that still runs smoothly because we never
+# touch the whole grid on a tick. The cheap per-tick work (movement) is bounded by
+# the entity count, and the expensive work (ecology) runs only inside an "active
+# region" around the people — chunks no one is near go dormant and fast-forward
+# their growth when life returns (catch-up-on-revisit). See _active_region /
+# _tick_ecology_active below.
+W = 2048
+H = 2048
 
 # Bumped whenever the saved-world layout changes in a way older saves can't
 # satisfy. A save stamped with a different (or missing) schema is treated as
 # incompatible and regenerated on load, so a world written by a broken/older
 # build self-heals on the next launch instead of staying frozen forever.
-SCHEMA = 2
-CHUNK = 16                      # chunk size for later level-of-detail / streaming
+SCHEMA = 3
+CHUNK = 64                      # tiles per chunk → (W//CHUNK)² dormancy bookkeeping cells
+NCHUNK = W // CHUNK
 SEA_LEVEL = 0.36                # elevation below this is ocean
 MOUNTAIN_LEVEL = 0.78           # elevation above this reads as mountain/rock
+
+# Ecology only ever runs inside a box around the people, capped to this many tiles
+# on a side so a scattered population can't blow the cost up; dormant chunks that
+# re-enter the box fast-forward up to this many game-hours of growth at once.
+ACTIVE_MAX = 768
+ECO_CATCHUP_CAP = 48
+OVERVIEW_MAX = 256              # the whole-world snapshot is downsampled to ≤ this per side
 
 # Accelerated time: 1 game-day == 1 real hour  →  1 real second == 24 game-seconds.
 GAME_SEC_PER_REAL_SEC = 24.0
@@ -136,6 +150,7 @@ PERSON = dict(
     starve_dmg=0.0008, heal=0.0006,                    # hp lost when a need maxes / regained when sated
 )
 EDIBLE_PLANTS = {"grass", "oak", "reeds", "palm", "shrub"}   # plants people can forage
+EDIBLE_IDS = [sp for sp, info in PLANTS.items() if info["name"] in EDIBLE_PLANTS]
 NAMES_M = ("Aren", "Bram", "Cael", "Doran", "Eli", "Finn", "Garreth", "Holt",
            "Ivo", "Joss", "Korin", "Lugh", "Mato", "Niall", "Osric", "Pell")
 NAMES_F = ("Ada", "Bel", "Cyra", "Dara", "Esme", "Fern", "Greta", "Hana",
@@ -148,6 +163,7 @@ NAMES_F = ("Ada", "Bel", "Cyra", "Dara", "Esme", "Fern", "Greta", "Hana",
 # felling trees, stone from bare rock/mountain. Stone houses / workbench are a
 # later slice. Tools/materials live in the person's inv dict alongside food.
 WOOD_PLANTS = {"oak", "pine", "palm"}       # trees that yield wood when felled
+WOOD_IDS = [sp for sp, info in PLANTS.items() if info["name"] in WOOD_PLANTS]
 BUILD = dict(
     chop_growth_min=0.35, chop_take=0.5,    # a chop needs a grown tree; removes this much growth
     chop_yield=1, axe_bonus=1,              # wood gained per chop; an axe adds this much
@@ -219,6 +235,8 @@ class World:
         self.log: list[dict] = []        # recent god actions / notable events
         self.version = 0                 # bumped on any mutation, for render diffing
         self.rng = np.random.default_rng()
+        self._origin = (W // 2, H // 2)  # founding-valley centre
+        self._chunk_eco = None           # per-chunk game-min of last ecology pass (dormancy)
         # Tile fields (allocated in generate()/load()).
         self.elevation = self.biome = self.soil = self.moisture = None
         self.water = self.veg_sp = self.veg_growth = None
@@ -229,7 +247,9 @@ class World:
         self.rng = np.random.default_rng(self.seed)
         rng = self.rng
 
-        elev = _fractal_noise(H, W, 6, rng)
+        # More octaves than the old 128² map so a 2048² world has both continental
+        # shapes and fine coastal/hill detail rather than smooth blobs.
+        elev = _fractal_noise(H, W, 9, rng)
         # Pull the borders down a touch so the map tends to sit in an ocean frame.
         yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
         edge = np.minimum.reduce([xx, yy, (W - 1 - xx), (H - 1 - yy)]) / (min(W, H) / 2)
@@ -237,7 +257,7 @@ class World:
         elev -= elev.min(); elev /= (elev.max() + 1e-9)
         self.elevation = elev.astype(np.float32)
 
-        moist = _fractal_noise(H, W, 5, np.random.default_rng(self.seed ^ 0x9E3779B9))
+        moist = _fractal_noise(H, W, 7, np.random.default_rng(self.seed ^ 0x9E3779B9))
         # Latitude wetness: a damp temperate belt, drier toward the hot middle band.
         lat = np.abs(yy / (H - 1) - 0.5) * 2
         moist = np.clip(moist * 0.7 + (0.5 - np.abs(lat - 0.45)) * 0.6, 0, 1)
@@ -251,7 +271,7 @@ class World:
         self.biome = self._classify_biomes()
         # Soil: fertile where moist & low, poor on rock/desert/snow; plus noise.
         soil = np.clip(0.35 + self.moisture * 0.5 - elev * 0.25, 0, 1)
-        soil += (_fractal_noise(H, W, 4, np.random.default_rng(self.seed ^ 0x12345)) - 0.5) * 0.2
+        soil += (_fractal_noise(H, W, 6, np.random.default_rng(self.seed ^ 0x12345)) - 0.5) * 0.2
         for bad in ("rock", "mountain", "snow", "desert", "ocean"):
             soil[self.biome == B[bad]] *= 0.35
         self.soil = np.clip(soil, 0, 1).astype(np.float32)
@@ -259,14 +279,66 @@ class World:
         self.veg_sp = np.zeros((H, W), np.uint8)
         self.veg_growth = np.zeros((H, W), np.float32)
         self._seed_initial_vegetation()
-        self._seed_initial_wildlife(count=130)
-        self._seed_initial_people(count=6)
+        # On a vast map, life starts clustered in one hospitable valley (the rest of the
+        # world is generated but unpopulated, awaiting exploration / a god's hand).
+        self._origin = self._choose_origin()
+        self._seed_grove(self._origin)          # a copse so the band has wood within reach
+        self._seed_initial_wildlife(count=340, center=self._origin, radius=600)
+        self._seed_initial_people(count=7, center=self._origin)
 
         self.clock = 8 * 60.0            # start at 08:00 on day 0
         self._last_eco = self.clock
+        # Every chunk starts "freshly grown"; dormant ones fast-forward on revisit.
+        self._chunk_eco = np.full((NCHUNK, NCHUNK), self.clock, np.float32)
         self.version += 1
         self._note("world", f"A new world took shape (seed {self.seed}).")
         return self
+
+    def _seed_grove(self, center, r: int = 7):
+        """Scatter mature, biome-appropriate trees around the founding valley so the band
+        can immediately gather wood (without it, a treeless valley = no building)."""
+        cx, cy = center
+        ob = BIOMES[self.biome[cy, cx]]
+        name = ("palm" if ob in ("beach", "rainforest")
+                else "pine" if ob in ("tundra", "mountain", "snow", "rock")
+                else "oak")
+        sp = PLANT_BY_NAME[name]
+        sl = (slice(max(0, cy - r), min(H, cy + r + 1)), slice(max(0, cx - r), min(W, cx + r + 1)))
+        land = self.water[sl] == WATER_NONE
+        place = land & (self.rng.random(land.shape) < 0.33)
+        self.veg_sp[sl][place] = sp
+        gr = self.veg_growth[sl]
+        gr[place] = np.maximum(gr[place], 0.6)         # mature → choppable right away
+
+    def _choose_origin(self):
+        """Pick a hospitable founding spot near both water AND woodland, so the band can
+        drink and also gather wood to build. Returns (cx, cy)."""
+        # Beach is excluded: it's effectively treeless, so a beach founding valley can't
+        # supply wood to build. Grassland/forest/savanna have trees natively + a grove.
+        habitable = np.isin(self.biome, [B["grassland"], B["forest"], B["savanna"]])
+        land = self.water == WATER_NONE
+
+        def dilate(mask, n):
+            out = mask.copy()
+            for _ in range(n):
+                acc = out.copy()
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    acc |= np.roll(np.roll(out, dy, 0), dx, 1)
+                out = acc
+            return out
+
+        near_water = dilate(self.water != WATER_NONE, 5)
+        # Tree-bearing ground within a short range, so a crude axe & shelter are reachable.
+        near_wood = dilate(np.isin(self.biome, [B["forest"], B["rainforest"], B["tundra"]]), 14)
+        for cond in (land & habitable & near_water & near_wood,
+                     land & habitable & near_water,
+                     land & near_water,
+                     land):
+            good = np.argwhere(cond)
+            if len(good):
+                cy, cx = good[self.rng.integers(len(good))]
+                return (int(cx), int(cy))
+        return (W // 2, H // 2)
 
     def _carve_lakes_and_rivers(self):
         elev = self.elevation
@@ -279,13 +351,15 @@ class World:
         # Rivers: from a handful of high, wet springs, follow steepest descent to water.
         springs = np.argwhere((elev > 0.62) & (self.moisture > 0.5))
         if len(springs):
-            picks = self.rng.choice(len(springs), size=min(12, len(springs)), replace=False)
+            # ~1 spring per 40k tiles, so river density scales with the map.
+            n = min(len(springs), max(12, (W * H) // 40000))
+            picks = self.rng.choice(len(springs), size=n, replace=False)
             for idx in picks:
                 self._trace_river(int(springs[idx][0]), int(springs[idx][1]))
 
     def _trace_river(self, y: int, x: int):
         elev = self.elevation
-        for _ in range(400):
+        for _ in range(4 * max(W, H)):     # long enough to reach the sea across a big map
             if self.water[y, x] in (WATER_OCEAN, WATER_LAKE):
                 return
             self.water[y, x] = WATER_RIVER
@@ -310,11 +384,16 @@ class World:
             near = acc
         self.moisture = np.clip(self.moisture + near * 0.35, 0, 1).astype(np.float32)
 
-    def _annual_temperature(self) -> np.ndarray:
-        """Mean annual temperature field in [0,1] from latitude and elevation."""
-        yy = np.mgrid[0:H, 0:W][0].astype(np.float32)
-        lat = np.abs(yy / (H - 1) - 0.5) * 2         # 0 at equator-ish middle, 1 at poles
-        temp = 0.92 - lat * 0.62 - self.elevation * 0.42
+    def _annual_temperature(self, reg=None) -> np.ndarray:
+        """Mean annual temperature field in [0,1] from latitude and elevation. With a
+        region (y0,y1,x0,x1) it computes only that slice (ecology stays off the full map)."""
+        if reg is None:
+            y0, y1, x0, x1 = 0, H, 0, W
+        else:
+            y0, y1, x0, x1 = reg
+        yy = np.arange(y0, y1, dtype=np.float32)[:, None]
+        lat = np.abs(yy / (H - 1) - 0.5) * 2          # 0 at equator-ish middle, 1 at poles
+        temp = 0.92 - lat * 0.62 - self.elevation[y0:y1, x0:x1] * 0.42
         return np.clip(temp, 0, 1).astype(np.float32)
 
     def _classify_biomes(self) -> np.ndarray:
@@ -343,18 +422,24 @@ class World:
         bm[ocean] = B["ocean"]
         return bm
 
-    def _suitability(self, species: int) -> np.ndarray:
-        """Per-tile growth suitability in [-1,1] for a plant *right now* (season-aware)."""
+    def _suitability(self, species: int, reg=None) -> np.ndarray:
+        """Per-tile growth suitability in [-1,1] for a plant *right now* (season-aware).
+        Optionally restricted to a region slice so ecology stays off the full map."""
+        if reg is None:
+            sl = (slice(None), slice(None))
+        else:
+            y0, y1, x0, x1 = reg
+            sl = (slice(y0, y1), slice(x0, x1))
         p = PLANTS[species]
-        temp = self.temperature_field()
-        biome_ok = np.isin(self.biome, [B[b] for b in p["biomes"]]).astype(np.float32)
+        temp = self.temperature_field(reg)
+        biome_ok = np.isin(self.biome[sl], [B[b] for b in p["biomes"]]).astype(np.float32)
         t_ok = _band(temp, *p["t"])
-        m_ok = _band(self.moisture, *p["m"])
-        suit = biome_ok * np.minimum(t_ok, m_ok) * (0.4 + 0.6 * self.soil)
+        m_ok = _band(self.moisture[sl], *p["m"])
+        suit = biome_ok * np.minimum(t_ok, m_ok) * (0.4 + 0.6 * self.soil[sl])
         # No land plants in water.
-        suit[self.water != WATER_NONE] = 0
+        suit[self.water[sl] != WATER_NONE] = 0
         # Below 0 means actively dying conditions (out of comfort band on a live tile).
-        return (suit * 2 - (biome_ok * 0.0)).astype(np.float32) - (1 - np.minimum(t_ok, m_ok)) * 0.15
+        return suit.astype(np.float32) * 2 - (1 - np.minimum(t_ok, m_ok)) * 0.15
 
     def _seed_initial_vegetation(self):
         for sp in PLANTS:
@@ -364,15 +449,24 @@ class World:
             self.veg_sp[place] = sp
             self.veg_growth[place] = self.rng.random((H, W))[place].astype(np.float32) * 0.6 + 0.2
 
-    def _seed_initial_wildlife(self, count: int):
-        land = np.argwhere((self.water == WATER_NONE) & (self.biome != B["ocean"]))
+    def _seed_initial_wildlife(self, count: int, center=None, radius: int = 600):
+        """Seed wildlife on land, clustered within `radius` of `center` so the founding
+        valley is alive (the rest of the vast map is left to be discovered / stocked)."""
+        if center is None:
+            y0, y1, x0, x1 = 0, H, 0, W
+        else:
+            cx, cy = center
+            x0, x1 = max(0, cx - radius), min(W, cx + radius)
+            y0, y1 = max(0, cy - radius), min(H, cy + radius)
+        land = np.argwhere((self.water[y0:y1, x0:x1] == WATER_NONE)
+                           & (self.biome[y0:y1, x0:x1] != B["ocean"]))
         if not len(land):
             return
         weights = {"rabbit": 0.62, "deer": 0.31, "wolf": 0.07}
         for _ in range(count):
             sp = self.rng.choice(list(weights), p=list(weights.values()))
-            y, x = land[self.rng.integers(len(land))]
-            self._add_animal(sp, int(x), int(y), age=self.rng.integers(0, 60))
+            ly, lx = land[self.rng.integers(len(land))]
+            self._add_animal(sp, int(x0 + lx), int(y0 + ly), age=self.rng.integers(0, 60))
 
     def _add_animal(self, species: str, x: int, y: int, age: float = 0):
         species = str(species)
@@ -400,9 +494,10 @@ class World:
         """0..1 through the current season (for smooth seasonal transitions)."""
         return ((self.day() % DAYS_PER_SEASON) + self.time_of_day() / 24) / DAYS_PER_SEASON
 
-    def temperature_field(self) -> np.ndarray:
-        """Current temperature field: annual mean shifted by season and time of day."""
-        base = self._annual_temperature()
+    def temperature_field(self, reg=None) -> np.ndarray:
+        """Current temperature field (whole grid, or just a region slice): annual mean
+        shifted by season and time of day. Region form keeps ecology off the full map."""
+        base = self._annual_temperature(reg)
         season_off = {"spring": 0.0, "summer": 0.18, "autumn": -0.02, "winter": -0.22}[self.season()]
         diurnal = np.cos((self.time_of_day() / 24 - 0.5) * 2 * np.pi) * -0.06  # cool nights
         cold = -0.10 if self.weather in ("rain", "storm", "snow") else 0.0
@@ -411,18 +506,50 @@ class World:
     # ── stepping ────────────────────────────────────────────────────────────────
     def step(self, dt_real_sec: float):
         """Advance the world by `dt_real_sec` of wall-clock time. Movement/wildlife run
-        every call; heavy ecology batches once per game-hour to stay cheap."""
+        every call (bounded by entity count); ecology runs once per game-hour and ONLY
+        inside the active region around the people, so the 4M-tile map stays cheap."""
         dt_game_min = dt_real_sec * GAME_SEC_PER_REAL_SEC / 60.0
         self.clock += dt_game_min
         self._update_weather()
         self._tick_wildlife(dt_game_min)
         self._tick_people(dt_game_min)
         if self.clock - self._last_eco >= 60.0:                    # one game-hour elapsed
-            steps = int((self.clock - self._last_eco) // 60.0)
-            for _ in range(min(steps, 6)):                         # cap catch-up bursts
-                self._tick_ecology()
+            self._tick_ecology_active()
             self._last_eco = self.clock
         self.version += 1
+
+    # ── active region & dormancy (the key to a huge, smooth world) ───────────────
+    def _active_region(self):
+        """Tile box (y0,y1,x0,x1) around the living population — the only place ecology
+        runs. Snapped to chunk edges and capped to ACTIVE_MAX per side. None if empty."""
+        pts = self.people or self.animals
+        if not pts:
+            return None
+        xs = [int(e["x"]) for e in pts]; ys = [int(e["y"]) for e in pts]
+        m = 2 * CHUNK                                   # margin so nearby grazing stays fresh
+        x0, x1 = max(0, min(xs) - m), min(W, max(xs) + m + 1)
+        y0, y1 = max(0, min(ys) - m), min(H, max(ys) + m + 1)
+        if x1 - x0 > ACTIVE_MAX:
+            cx = (x0 + x1) // 2; x0 = max(0, cx - ACTIVE_MAX // 2); x1 = min(W, x0 + ACTIVE_MAX)
+        if y1 - y0 > ACTIVE_MAX:
+            cy = (y0 + y1) // 2; y0 = max(0, cy - ACTIVE_MAX // 2); y1 = min(H, y0 + ACTIVE_MAX)
+        x0 = (x0 // CHUNK) * CHUNK; y0 = (y0 // CHUNK) * CHUNK
+        x1 = min(W, -(-x1 // CHUNK) * CHUNK); y1 = min(H, -(-y1 // CHUNK) * CHUNK)
+        return (y0, y1, x0, x1)
+
+    def _tick_ecology_active(self):
+        reg = self._active_region()
+        if reg is None:
+            return
+        y0, y1, x0, x1 = reg
+        cy0, cy1 = y0 // CHUNK, (y1 - 1) // CHUNK
+        cx0, cx1 = x0 // CHUNK, (x1 - 1) // CHUNK
+        # Fast-forward by however stale the most-dormant chunk in the box is (capped).
+        lag_hours = (self.clock - float(self._chunk_eco[cy0:cy1 + 1, cx0:cx1 + 1].min())) / 60.0
+        passes = int(min(max(lag_hours, 1), ECO_CATCHUP_CAP))
+        for _ in range(passes):
+            self._tick_ecology(reg)
+        self._chunk_eco[cy0:cy1 + 1, cx0:cx1 + 1] = self.clock
 
     def _update_weather(self):
         if self.clock < self._weather_until:
@@ -438,59 +565,61 @@ class World:
         self.weather_intensity = float(self.rng.random() * 0.6 + 0.4) if self.weather != "clear" else 0.0
         self._weather_until = self.clock + self.rng.random() * 240 + 60   # 1–5 game-hours
 
-    def _tick_ecology(self):
-        """One game-hour of plant growth, spread, soil and moisture dynamics."""
-        # Rain refills moisture; sun/heat dries it. Diffuse gently toward equilibrium.
+    def _tick_ecology(self, reg):
+        """One game-hour of plant growth, spread, soil and moisture dynamics — confined
+        to the region slice `reg` (y0,y1,x0,x1). Sub-array views write back in place."""
+        y0, y1, x0, x1 = reg
+        sl = (slice(y0, y1), slice(x0, x1))
+        moist = self.moisture[sl]; vsp = self.veg_sp[sl]
+        vgr = self.veg_growth[sl]; soil = self.soil[sl]
+        # Rain refills moisture; sun/heat dries it.
         if self.weather in ("rain", "storm"):
-            self.moisture = np.clip(self.moisture + 0.04 * self.weather_intensity, 0, 1)
+            np.clip(moist + 0.04 * self.weather_intensity, 0, 1, out=moist)
         elif self.weather == "clear":
-            dry = 0.012 + 0.02 * np.clip(self.temperature_field() - 0.5, 0, 1)
-            self.moisture = np.clip(self.moisture - dry, 0, 1)
-        # Keep water-adjacent ground from drying out.
-        self._dampen_tick()
+            dry = 0.012 + 0.02 * np.clip(self.temperature_field(reg) - 0.5, 0, 1)
+            np.clip(moist - dry, 0, 1, out=moist)
+        self._dampen_tick(reg)
 
-        grown_any = False
         for sp in PLANTS:
-            mask = self.veg_sp == sp
+            mask = vsp == sp
             if not mask.any():
                 continue
-            suit = self._suitability(sp)
+            suit = self._suitability(sp, reg)
             rate = PLANTS[sp]["grow"]
             delta = np.where(suit > 0, suit * rate, suit * 0.05)   # thrive vs. wither
-            self.veg_growth[mask] = self.veg_growth[mask] + delta[mask]
-            # Death: growth fell to/below zero.
-            dead = mask & (self.veg_growth <= 0)
-            self.veg_sp[dead] = VEG_NONE
-            self.veg_growth[dead] = 0
-            self.veg_growth = np.clip(self.veg_growth, 0, 1)
-            # Spread: mature plants seed an empty, suitable neighbour.
-            mature = (self.veg_sp == sp) & (self.veg_growth > 0.75)
+            vgr[mask] = vgr[mask] + delta[mask]
+            dead = mask & (vgr <= 0)                                # withered to nothing
+            vsp[dead] = VEG_NONE
+            vgr[dead] = 0
+            np.clip(vgr, 0, 1, out=vgr)
+            mature = (vsp == sp) & (vgr > 0.75)
             if mature.any():
-                self._spread(sp, mature, suit)
-                grown_any = True
-            # Soil: growing plants slowly draw it down.
-            self.soil[self.veg_sp == sp] = np.clip(self.soil[self.veg_sp == sp] - 0.0008, 0, 1)
-        # Fallow soil slowly recovers.
-        fallow = self.veg_sp == VEG_NONE
-        self.soil[fallow] = np.clip(self.soil[fallow] + 0.0004, 0, 1)
-        if grown_any:
-            pass
+                self._spread(sp, mature, suit, reg)
+            soil[vsp == sp] = np.clip(soil[vsp == sp] - 0.0008, 0, 1)
+        fallow = vsp == VEG_NONE
+        soil[fallow] = np.clip(soil[fallow] + 0.0004, 0, 1)
 
-    def _spread(self, sp: int, mature: np.ndarray, suit: np.ndarray):
-        empty = (self.veg_sp == VEG_NONE) & (suit > 0.15) & (self.water == WATER_NONE)
+    def _spread(self, sp: int, mature: np.ndarray, suit: np.ndarray, reg):
+        y0, y1, x0, x1 = reg
+        vsp = self.veg_sp[y0:y1, x0:x1]; vgr = self.veg_growth[y0:y1, x0:x1]
+        wat = self.water[y0:y1, x0:x1]
+        empty = (vsp == VEG_NONE) & (suit > 0.15) & (wat == WATER_NONE)
         chance = PLANTS[sp]["spread"]
+        h, w = mature.shape
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             src = np.roll(np.roll(mature, dy, 0), dx, 1)
-            cand = src & empty & (self.rng.random((H, W)) < chance)
-            self.veg_sp[cand] = sp
-            self.veg_growth[cand] = 0.05
+            cand = src & empty & (self.rng.random((h, w)) < chance)
+            vsp[cand] = sp
+            vgr[cand] = 0.05
             empty &= ~cand
 
-    def _dampen_tick(self):
-        wet = self.water != WATER_NONE
+    def _dampen_tick(self, reg):
+        y0, y1, x0, x1 = reg
+        moist = self.moisture[y0:y1, x0:x1]
+        wet = self.water[y0:y1, x0:x1] != WATER_NONE
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             adj = np.roll(np.roll(wet, dy, 0), dx, 1)
-            self.moisture[adj] = np.maximum(self.moisture[adj], 0.6)
+            moist[adj] = np.maximum(moist[adj], 0.6)
 
     def _tick_wildlife(self, dt_game_min: float):
         if not self.animals:
@@ -635,6 +764,8 @@ class World:
             "inv": {},                                   # carried goods, e.g. {"food":3,"wood":2,"axe":1}
             "home": (int(x), int(y)),                    # anchor: idle wandering drifts back here
             "home_struct": None,                         # id of their shelter once built
+            "known": {},                                 # remembered resource spots {water/food/wood: [x,y]}
+            "heading": None,                             # persistent roaming direction while searching
             "action": "wander",                          # current body behaviour (for the renderer)
         })
 
@@ -648,28 +779,10 @@ class World:
         self._note("build", f"{by} built a {kind} at ({x},{y}).")
         return sid
 
-    def _seed_initial_people(self, count: int):
-        """Settle a small founding band together on hospitable ground *within reach of
-        water* — people drink, and thirst is the fastest need, so a dry start is a
-        death sentence."""
-        habitable = np.isin(self.biome, [B["grassland"], B["forest"], B["savanna"], B["beach"]])
-        # Tiles a short walk (~5) from a drink: dilate the land-beside-water mask.
-        watery = self.water != WATER_NONE
-        near_water = watery.copy()
-        for _ in range(5):
-            acc = near_water.copy()
-            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                acc |= np.roll(np.roll(near_water, dy, 0), dx, 1)
-            near_water = acc
-        land = self.water == WATER_NONE
-        good = np.argwhere(land & habitable & near_water)
-        if not len(good):
-            good = np.argwhere(land & near_water)        # any watered land
-        if not len(good):
-            good = np.argwhere(land)                      # last resort: anywhere dry
-        if not len(good):
-            return
-        cy, cx = good[self.rng.integers(len(good))]
+    def _seed_initial_people(self, count: int, center=None):
+        """Settle a small founding band together near the chosen origin (hospitable,
+        watered ground — thirst is the fastest need, so a dry start is a death sentence)."""
+        cx, cy = center if center is not None else self._choose_origin()
         for _ in range(count):
             jx = int(np.clip(cx + self.rng.integers(-4, 5), 0, W - 1))
             jy = int(np.clip(cy + self.rng.integers(-4, 5), 0, H - 1))
@@ -683,24 +796,6 @@ class World:
         dt_day = dt_game_min / (24 * 60)
         hod = self.time_of_day()
         night = hod < 6 or hod >= 21
-        # Perception fields, computed once per tick and shared by everyone.
-        edible = np.zeros((H, W), bool)
-        for sp, info in PLANTS.items():
-            if info["name"] in EDIBLE_PLANTS:
-                edible |= (self.veg_sp == sp)
-        edible &= (self.veg_growth > 0.12)
-        watery = self.water != WATER_NONE
-        drinkable = np.zeros((H, W), bool)               # land tiles bordering water (drink spots)
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            drinkable |= np.roll(np.roll(watery, dy, 0), dx, 1)
-        drinkable &= (self.water == WATER_NONE)
-        # Crafting resources: trees yield wood, bare rock/mountain yields stone.
-        tree = np.zeros((H, W), bool)
-        for sp, info in PLANTS.items():
-            if info["name"] in WOOD_PLANTS:
-                tree |= (self.veg_sp == sp)
-        tree &= (self.veg_growth > BUILD["chop_growth_min"])
-        stone = np.isin(self.biome, [B["rock"], B["mountain"]]) & (self.water == WATER_NONE)
 
         dead = []
         for p in self.people:
@@ -709,12 +804,24 @@ class World:
             p["thirst"] = min(1.0, p["thirst"] + PERSON["thirst_rate"] * dt_game_min)
             p["fatigue"] = min(1.0, p["fatigue"] + PERSON["fatigue_rate"] * dt_game_min)
 
-            action, movedir = self._person_decide(p, edible, drinkable, tree, stone, night)
-            p["action"] = action
             x, y = p["x"], p["y"]
+            # Perception is a SMALL window around this person (vision-sized), so people
+            # cost stays the same whether the map is 128² or 2048². lx,ly = the person's
+            # position inside the window; masks are indexed in window coords.
+            edible, drinkable, tree, stone, lx, ly, wx0, wy0 = self._perceive(x, y)
+            # Remember where resources are, so a future need can be navigated to rather
+            # than stumbled upon. (A body-level memory; the LLM "mind" can keep richer
+            # ones later.) Only overwrite when something is actually in sight.
+            known = p["known"]
+            for key, mask in (("water", drinkable), ("food", edible), ("wood", tree), ("stone", stone)):
+                loc = self._nearest_loc(mask, lx, ly, wx0, wy0)
+                if loc:
+                    known[key] = loc
+            action, movedir = self._person_decide(p, edible, drinkable, tree, stone, night, lx, ly)
+            p["action"] = action
             if action == "eat":
                 g = float(self.veg_growth[y, x])
-                if edible[y, x] and g > 0.12:                    # graze the tile
+                if edible[ly, lx] and g > 0.12:                  # graze the tile
                     bite = min(g, PERSON["eat_bite"] * dt_game_min)
                     self.veg_growth[y, x] = g - bite
                     p["hunger"] = max(0.0, p["hunger"] - bite * PERSON["food_value"])
@@ -730,12 +837,12 @@ class World:
                 p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
-                if edible[y, x] and g > PERSON["gather_min"] and p["inv"].get("food", 0) < PERSON["inv_cap"]:
+                if edible[ly, lx] and g > PERSON["gather_min"] and p["inv"].get("food", 0) < PERSON["inv_cap"]:
                     take = min(g - 0.2, 0.3)
                     self.veg_growth[y, x] = g - take
                     p["inv"]["food"] = p["inv"].get("food", 0) + 1
             elif action == "chop":
-                if tree[y, x]:
+                if tree[ly, lx]:
                     self.veg_growth[y, x] = max(0.0, float(self.veg_growth[y, x]) - BUILD["chop_take"])
                     if self.veg_growth[y, x] <= 0.05:        # felled — the tile clears
                         self.veg_sp[y, x] = VEG_NONE
@@ -743,7 +850,7 @@ class World:
                     gain = BUILD["chop_yield"] + (BUILD["axe_bonus"] if p["inv"].get("axe", 0) else 0)
                     p["inv"]["wood"] = p["inv"].get("wood", 0) + gain
             elif action == "mine":
-                if stone[y, x]:
+                if stone[ly, lx]:
                     p["inv"]["stone"] = p["inv"].get("stone", 0) + BUILD["mine_yield"]
             elif action == "craft":
                 if p["inv"].get("axe", 0) < 1 and p["inv"].get("wood", 0) >= BUILD["axe_wood"]:
@@ -775,95 +882,142 @@ class World:
             ids = {id(p) for p in dead}
             self.people = [p for p in self.people if id(p) not in ids]
 
-    def _person_decide(self, p, edible, drinkable, tree, stone, night):
-        """Pick the most pressing body action. Returns (action, movedir|None).
-        Priority: thirst → hunger → rest → opportunistic forage → (when comfortable)
-        craft & build → wander."""
-        x, y, v = p["x"], p["y"], PERSON["vision"]
+    def _perceive(self, x, y):
+        """Build this person's small perception windows (edible/drinkable/tree/stone)
+        around (x,y), plus their position (lx,ly) inside the window. Cost is O(vision²),
+        independent of world size — the key to people staying cheap on a 4M-tile map."""
+        v = PERSON["vision"]
+        wy0, wy1 = max(0, y - v - 1), min(H, y + v + 2)
+        wx0, wx1 = max(0, x - v - 1), min(W, x + v + 2)
+        vsp = self.veg_sp[wy0:wy1, wx0:wx1]; vgr = self.veg_growth[wy0:wy1, wx0:wx1]
+        wat = self.water[wy0:wy1, wx0:wx1]; bio = self.biome[wy0:wy1, wx0:wx1]
+        edible = np.isin(vsp, EDIBLE_IDS) & (vgr > 0.12)
+        tree = np.isin(vsp, WOOD_IDS) & (vgr > BUILD["chop_growth_min"])
+        stone = np.isin(bio, [B["rock"], B["mountain"]]) & (wat == WATER_NONE)
+        watery = wat != WATER_NONE
+        drinkable = np.zeros_like(watery)               # land tiles bordering water
+        if watery.shape[0] > 2 and watery.shape[1] > 2:
+            drinkable[1:-1, 1:-1] = (
+                (watery[:-2, 1:-1] | watery[2:, 1:-1] | watery[1:-1, :-2] | watery[1:-1, 2:])
+                & (wat[1:-1, 1:-1] == WATER_NONE))
+        return edible, drinkable, tree, stone, x - wx0, y - wy0, wx0, wy0
+
+    def _nearest_local(self, mask, lx, ly):
+        """Step direction toward the nearest True tile in a window mask (centre lx,ly)."""
+        if not mask.any():
+            return None
+        ys, xs = np.nonzero(mask)
+        k = int(np.argmin(np.abs(xs - lx) + np.abs(ys - ly)))
+        dx, dy = int(np.sign(xs[k] - lx)), int(np.sign(ys[k] - ly))
+        return (dx, dy) if (dx or dy) else None
+
+    def _nearest_loc(self, mask, lx, ly, wx0, wy0):
+        """Global (x,y) of the nearest True tile in a window, or None — for memory."""
+        if not mask.any():
+            return None
+        ys, xs = np.nonzero(mask)
+        k = int(np.argmin(np.abs(xs - lx) + np.abs(ys - ly)))
+        return [int(xs[k] + wx0), int(ys[k] + wy0)]
+
+    def _explore_dir(self, p):
+        """A persistent roaming heading (re-rolled now and then) so a searching person
+        covers ground instead of jittering in place."""
+        h = p.get("heading")
+        if not h or (h[0] == 0 and h[1] == 0) or self.rng.random() < 0.04:
+            h = [int(self.rng.integers(-1, 2)), int(self.rng.integers(-1, 2))]
+            if h[0] == 0 and h[1] == 0:
+                h = [1, 0]
+            p["heading"] = h
+        return (h[0], h[1])
+
+    def _seek(self, p, x, y, here, mask, lx, ly, key, act_here, act_seek):
+        """Resolve 'go get a resource': use it if standing on it, else head to the nearest
+        one in sight, else toward the last-known spot (memory), else explore to find it.
+        People never give up and die next to an out-of-sight resource."""
+        if here:
+            return act_here, None
+        d = self._nearest_local(mask, lx, ly)
+        if d:
+            return act_seek, d
+        kloc = p["known"].get(key)
+        if kloc:
+            kx, ky = kloc
+            if abs(kx - x) + abs(ky - y) <= 1:        # arrived but it's gone — forget it
+                p["known"][key] = None
+            else:
+                return act_seek, (int(np.sign(kx - x)), int(np.sign(ky - y)))
+        return act_seek, self._explore_dir(p)
+
+    def _person_decide(self, p, edible, drinkable, tree, stone, night, lx, ly):
+        """Pick the most pressing body action. Returns (action, movedir|None). Masks are
+        window-local; lx,ly is the person's position inside them.
+        Priority: thirst → hunger → rest → opportunistic forage → craft/build → wander."""
+        x, y = p["x"], p["y"]
         if p["thirst"] >= PERSON["t_thirst"]:
-            if drinkable[y, x]:
-                return "drink", None
-            d = self._nearest_dir(x, y, drinkable, v)
-            if d:
-                return "seek_water", d
+            # Drink here, else head to water in sight / remembered / go search for it.
+            return self._seek(p, x, y, bool(drinkable[ly, lx]), drinkable, lx, ly,
+                              "water", "drink", "seek_water")
         if p["hunger"] >= PERSON["t_hunger"]:
-            if (edible[y, x] and self.veg_growth[y, x] > 0.12) or p["inv"].get("food", 0) > 0:
+            if p["inv"].get("food", 0) > 0:
                 return "eat", None
-            d = self._nearest_dir(x, y, edible, v)
-            # Food in sight → head for it; none in sight → range outward to find new
-            # grazing (NOT back home — the local patch is what's exhausted).
-            return "seek_food", d
+            return self._seek(p, x, y, bool(edible[ly, lx]) and self.veg_growth[y, x] > 0.12,
+                              edible, lx, ly, "food", "eat", "seek_food")
         if p["fatigue"] >= PERSON["t_rest"] or (night and p["fatigue"] > 0.35):
             return "rest", None
-        # Opportunistic top-ups: sip or nibble while standing on a resource so needs
-        # never build to a crisis when supplies are close at hand.
-        if drinkable[y, x] and p["thirst"] > 0.25:
+        # Opportunistic top-ups: sip or nibble while standing on a resource.
+        if drinkable[ly, lx] and p["thirst"] > 0.25:
             return "drink", None
-        if edible[y, x] and self.veg_growth[y, x] > 0.12 and p["hunger"] > 0.30:
+        if edible[ly, lx] and self.veg_growth[y, x] > 0.12 and p["hunger"] > 0.30:
             return "eat", None
-        if (edible[y, x] and self.veg_growth[y, x] > PERSON["gather_min"]
-                and p["inv"].get("food", 0) < PERSON["inv_cap"]):
+        # Always keep a small emergency food reserve in the pack before doing anything else.
+        if (edible[ly, lx] and self.veg_growth[y, x] > PERSON["gather_min"]
+                and p["inv"].get("food", 0) < 3):
             return "gather", None
-        # Secondary drives — only when survival is comfortable and it's daytime:
-        # build a shelter, craft an axe, lay in some stone.
+        # Then, when comfortable and daylit, work on the project (axe → shelter → stone)
+        # rather than hoarding food beyond the reserve.
         if (p["hunger"] < 0.5 and p["thirst"] < 0.5 and p["fatigue"] < 0.6 and not night):
-            proj = self._person_build_decide(p, tree, stone)
+            proj = self._person_build_decide(p, tree, stone, lx, ly)
             if proj:
                 return proj
+        # Otherwise lay in a little food while standing on a rich patch.
+        if (edible[ly, lx] and self.veg_growth[y, x] > PERSON["gather_min"]
+                and p["inv"].get("food", 0) < PERSON["inv_cap"]):
+            return "gather", None
         # Idle: drift back toward home if we've strayed, else amble.
         hx, hy = p["home"]
         if abs(hx - x) + abs(hy - y) > 6:
             return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         return "wander", None
 
-    def _person_build_decide(self, p, tree, stone):
+    def _person_build_decide(self, p, tree, stone, lx, ly):
         """The crafting/building drive (a comfortable person's 'project'). Returns an
         action like build/craft/chop/mine or a seek_* move toward a resource, or None."""
-        x, y, v = p["x"], p["y"], PERSON["vision"]
+        x, y = p["x"], p["y"]
         inv = p["inv"]
         hx, hy = p["home"]
 
-        def get_wood_or(action):
-            """Chop wood toward the current project, returning `action` once we have
-            enough; otherwise head for / fell a tree."""
-            if tree[y, x]:
-                return "chop", None
-            d = self._nearest_dir(x, y, tree, v)
-            return ("seek_wood", d) if d else None    # no trees in sight — give up for now
+        def get_wood():
+            # Chop here, else go to wood in sight / remembered / search for a stand of trees.
+            return self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly,
+                              "wood", "chop", "seek_wood")
 
         # First project: a crude axe — cheap, and it makes every later chop yield more.
         if inv.get("axe", 0) < 1:
             if inv.get("wood", 0) >= BUILD["axe_wood"]:
                 return "craft", None
-            return get_wood_or("craft")
+            return get_wood()
         # Second project: a shelter. Gather wood, carry it home, raise it.
         if p.get("home_struct") is None:
             if inv.get("wood", 0) >= BUILD["shelter_wood"]:
                 if abs(hx - x) + abs(hy - y) <= 1:
                     return "build", None
                 return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
-            return get_wood_or("build")
+            return get_wood()
         # Then lay in stone for later (stone houses are the next slice).
         if inv.get("stone", 0) < BUILD["stone_stock"]:
-            # Lay in stone for later (stone houses are the next slice).
-            if stone[y, x]:
-                return "mine", None
-            d = self._nearest_dir(x, y, stone, v)
-            if d:
-                return "seek_stone", d
+            return self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly,
+                              "stone", "mine", "seek_stone")
         return None
-
-    def _nearest_dir(self, x: int, y: int, mask: np.ndarray, v: int):
-        """Step direction toward the nearest True tile within a vision box, or None."""
-        y0, y1 = max(0, y - v), min(H, y + v + 1)
-        x0, x1 = max(0, x - v), min(W, x + v + 1)
-        sub = mask[y0:y1, x0:x1]
-        if not sub.any():
-            return None
-        ys, xs = np.nonzero(sub)
-        gx, gy = xs + x0, ys + y0
-        k = int(np.argmin(np.abs(gx - x) + np.abs(gy - y)))
-        return (int(np.sign(gx[k] - x)), int(np.sign(gy[k] - y)))
 
     def _move_person(self, p, direction):
         """One step (people can't walk onto water). None → a random amble."""
@@ -959,24 +1113,49 @@ class World:
         decodes each layer straight into a Uint8Array (one byte per tile, row-major)."""
         return base64.b64encode(np.ascontiguousarray(arr, dtype=np.uint8).tobytes()).decode("ascii")
 
-    def snapshot(self) -> dict:
-        """Full world for an initial render (tile layers as base64 uint8 grids) + entities."""
+    def _pack_layers(self, y0, y1, x0, x1, step) -> dict:
+        """Base64 uint8 layers for a tile window [y0:y1, x0:x1] sampled every `step`."""
+        ys, xs = slice(y0, y1, step), slice(x0, x1, step)
         return {
-            "w": W, "h": H, "version": self.version, "seed": self.seed,
+            "elevation": self._b64u8((self.elevation[ys, xs] * 255).astype(np.uint8)),
+            "biome": self._b64u8(self.biome[ys, xs]),
+            "water": self._b64u8(self.water[ys, xs]),
+            "veg_sp": self._b64u8(self.veg_sp[ys, xs]),
+            "veg_growth": self._b64u8((self.veg_growth[ys, xs] * 255).astype(np.uint8)),
+        }
+
+    def snapshot(self) -> dict:
+        """Whole-world overview for the initial render: tile layers DOWNSAMPLED to
+        ≤ OVERVIEW_MAX per side (so a 4M-tile map ships as ~64KB, not 20MB). Entities
+        stay in TRUE tile coords; the renderer stretches the overview across W×H and
+        fetches crisp detail via view() when zoomed in."""
+        step = max(1, -(-max(W, H) // OVERVIEW_MAX))   # ceil(max(W,H)/OVERVIEW_MAX)
+        ovw = len(range(0, W, step)); ovh = len(range(0, H, step))
+        return {
+            "w": W, "h": H, "ovw": ovw, "ovh": ovh, "ov_step": step,
+            "version": self.version, "seed": self.seed,
             "clock": round(self.clock, 1), "day": self.day(), "time": round(self.time_of_day(), 2),
             "season": self.season(), "weather": self.weather,
             "biomes": BIOMES, "sea_level": int(SEA_LEVEL * 255),
             "plants": {sp: PLANTS[sp]["name"] for sp in PLANTS},
-            "layers": {
-                "elevation": self._b64u8((self.elevation * 255).astype(np.uint8)),
-                "biome": self._b64u8(self.biome),
-                "water": self._b64u8(self.water),
-                "veg_sp": self._b64u8(self.veg_sp),
-                "veg_growth": self._b64u8((self.veg_growth * 255).astype(np.uint8)),
-            },
+            "layers": self._pack_layers(0, H, 0, W, step),
             "animals": self.animals,
             "people": self.people,
             "structures": self.structures,
+        }
+
+    def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
+        """Crisp tile layers for a clamped window — used by the renderer to stream the
+        visible area at the current zoom (level-of-detail)."""
+        x0 = max(0, min(W, int(x0))); x1 = max(0, min(W, int(x1)))
+        y0 = max(0, min(H, int(y0))); y1 = max(0, min(H, int(y1)))
+        if x1 <= x0 or y1 <= y0:
+            return {"x0": x0, "y0": y0, "x1": x0, "y1": y0, "step": 1, "vw": 0, "vh": 0, "layers": {}}
+        step = max(1, int(step))
+        return {
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1, "step": step,
+            "vw": len(range(x0, x1, step)), "vh": len(range(y0, y1, step)),
+            "version": self.version, "layers": self._pack_layers(y0, y1, x0, x1, step),
         }
 
     def tick_state(self) -> dict:
@@ -1041,11 +1220,12 @@ class World:
             np.savez_compressed(
                 PATH_GRID, elevation=self.elevation, biome=self.biome, soil=self.soil,
                 moisture=self.moisture, water=self.water, veg_sp=self.veg_sp,
-                veg_growth=self.veg_growth,
+                veg_growth=self.veg_growth, chunk_eco=self._chunk_eco,
             )
             meta = {
                 "schema": SCHEMA,
                 "seed": self.seed, "clock": self.clock, "last_eco": self._last_eco,
+                "origin": list(self._origin),
                 "weather": self.weather, "weather_intensity": self.weather_intensity,
                 "weather_until": self._weather_until, "animals": self.animals,
                 "people": self.people, "structures": self.structures,
@@ -1074,11 +1254,15 @@ class World:
                 self.elevation = z["elevation"]; self.biome = z["biome"]; self.soil = z["soil"]
                 self.moisture = z["moisture"]; self.water = z["water"]
                 self.veg_sp = z["veg_sp"]; self.veg_growth = z["veg_growth"]
+                self._chunk_eco = z["chunk_eco"] if "chunk_eco" in z else None
             # Guard against arrays saved at a different grid size.
             if self.biome.shape != (H, W):
                 print(f"[world] saved grid {self.biome.shape} != {(H, W)}; regenerating")
                 return False
+            if self._chunk_eco is None or self._chunk_eco.shape != (NCHUNK, NCHUNK):
+                self._chunk_eco = np.full((NCHUNK, NCHUNK), meta.get("clock", 0.0), np.float32)
             self.seed = meta.get("seed", 0); self.clock = meta.get("clock", 0.0)
+            self._origin = tuple(meta.get("origin", [W // 2, H // 2]))
             self._last_eco = meta.get("last_eco", self.clock)
             self.weather = meta.get("weather", "clear")
             self.weather_intensity = meta.get("weather_intensity", 0.0)
@@ -1136,7 +1320,7 @@ if __name__ == "__main__":
     dist = {BIOMES[int(n)]: int(c) for n, c in zip(names, counts)}
     water_tiles = int((w.water != WATER_NONE).sum())
 
-    print(f"generated 128×128 world (seed {w.seed}) in {gen_ms:.0f} ms")
+    print(f"generated {W}×{H} world (seed {w.seed}) in {gen_ms:.0f} ms")
     print(f"  water tiles: {water_tiles}  ({water_tiles*100//(W*H)}%)")
     print(f"  biomes: {dist}")
     print(f"  start census: {w.census()}")
@@ -1174,19 +1358,19 @@ if __name__ == "__main__":
     print(f"  crafting/building — {len(w.structures)} shelters, {axes} axes crafted, "
           f"{sheltered}/{len(w.people)} people sheltered")
 
-    # Death test: a person stranded on barren rock (no food/water in reach) must die.
-    rock = np.argwhere(w.biome == B["rock"])
-    if len(rock):
-        ry, rx = rock[0]
-        w._add_person(int(rx), int(ry), name="Stranded")
-        before = len(w.people)
-        for _ in range(3 * 3600):                  # up to 3 game-days
-            w.step(dt_real_sec=1.0)
-            if not any(p["name"] == "Stranded" for p in w.people):
-                break
-        gone = not any(p["name"] == "Stranded" for p in w.people)
-        print(f"  death test: stranded person {'died as expected' if gone else 'SURVIVED (unexpected)'} "
-              f"(pop {before}->{len(w.people)})")
+    # Death mechanic: a body whose needs stay maxed (no relief reachable) must decline
+    # and die. People now SEARCH for resources rather than dying in place, so we verify
+    # the mechanic deterministically by holding the needs at the limit.
+    wd = World().generate(seed=5); wd.people = []
+    land = np.argwhere(wd.water == WATER_NONE)
+    ly0, lx0 = land[len(land) // 2]
+    wd._add_person(int(lx0), int(ly0), name="Doomed")
+    for _ in range(6000):
+        if not wd.people:
+            break
+        wd.people[0]["hunger"] = 1.0; wd.people[0]["thirst"] = 1.0
+        wd._tick_people(0.4)
+    print(f"  death test: a body in unrelieved crisis {'died as expected' if not wd.people else 'SURVIVED (unexpected)'}")
     print(f"\nsimulated {steps} steps in {sim_s:.2f}s "
           f"({steps/sim_s:.0f} steps/s, {sim_s*1000/steps:.2f} ms/step avg)")
 

@@ -932,6 +932,16 @@ async def api_world():
     return {"enabled": True, "world": await asyncio.to_thread(w.snapshot)}
 
 
+@app.get("/api/world/view")
+async def api_world_view(x0: int = 0, y0: int = 0, x1: int = 0, y1: int = 0, step: int = 1):
+    """Crisp tile layers for a visible window at the requested level-of-detail — lets the
+    renderer stream just the on-screen area of the big world instead of all 4M tiles."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"enabled": False}
+    w = await asyncio.to_thread(world_store.get_world)
+    return {"enabled": True, "view": await asyncio.to_thread(w.view, x0, y0, x1, y1, step)}
+
+
 @app.post("/api/world/action")
 async def api_world_action(req: Request):
     """A god-tool action from the UI brush (his hand). Mirrors the directive actions
