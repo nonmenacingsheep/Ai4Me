@@ -32,6 +32,12 @@ import numpy as np
 # ─── Dimensions & clock ───────────────────────────────────────────────────
 W = 128
 H = 128
+
+# Bumped whenever the saved-world layout changes in a way older saves can't
+# satisfy. A save stamped with a different (or missing) schema is treated as
+# incompatible and regenerated on load, so a world written by a broken/older
+# build self-heals on the next launch instead of staying frozen forever.
+SCHEMA = 2
 CHUNK = 16                      # chunk size for later level-of-detail / streaming
 SEA_LEVEL = 0.36                # elevation below this is ocean
 MOUNTAIN_LEVEL = 0.78           # elevation above this reads as mountain/rock
@@ -929,6 +935,7 @@ class World:
                 veg_growth=self.veg_growth,
             )
             meta = {
+                "schema": SCHEMA,
                 "seed": self.seed, "clock": self.clock, "last_eco": self._last_eco,
                 "weather": self.weather, "weather_intensity": self.weather_intensity,
                 "weather_until": self._weather_until, "animals": self.animals,
@@ -942,13 +949,25 @@ class World:
             print(f"[world] save failed: {e}")
 
     def load(self) -> bool:
+        """Restore a saved world. Returns False (→ caller regenerates) if the save
+        is missing, corrupt, or from an incompatible schema/size, so a world left
+        broken by an older build heals itself instead of staying frozen."""
         try:
+            with open(PATH_META, encoding="utf-8") as f:
+                meta = json.load(f)
+            # Reject saves from a different layout version up front — loading them
+            # would let step() crash every tick (the tab would look frozen).
+            if meta.get("schema") != SCHEMA:
+                print(f"[world] save schema {meta.get('schema')!r} != {SCHEMA}; regenerating")
+                return False
             with np.load(PATH_GRID) as z:
                 self.elevation = z["elevation"]; self.biome = z["biome"]; self.soil = z["soil"]
                 self.moisture = z["moisture"]; self.water = z["water"]
                 self.veg_sp = z["veg_sp"]; self.veg_growth = z["veg_growth"]
-            with open(PATH_META, encoding="utf-8") as f:
-                meta = json.load(f)
+            # Guard against arrays saved at a different grid size.
+            if self.biome.shape != (H, W):
+                print(f"[world] saved grid {self.biome.shape} != {(H, W)}; regenerating")
+                return False
             self.seed = meta.get("seed", 0); self.clock = meta.get("clock", 0.0)
             self._last_eco = meta.get("last_eco", self.clock)
             self.weather = meta.get("weather", "clear")
@@ -959,7 +978,12 @@ class World:
             self.version = meta.get("version", 0)
             self.rng = np.random.default_rng()
             return True
-        except (FileNotFoundError, OSError, KeyError, ValueError):
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            # Corrupt npz (BadZipFile/EOFError), bad JSON, missing keys, etc. —
+            # don't let a damaged save take the whole World tab down; regenerate.
+            print(f"[world] load failed ({type(e).__name__}: {e}); regenerating")
             return False
 
 
