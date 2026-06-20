@@ -141,6 +141,23 @@ NAMES_M = ("Aren", "Bram", "Cael", "Doran", "Eli", "Finn", "Garreth", "Holt",
 NAMES_F = ("Ada", "Bel", "Cyra", "Dara", "Esme", "Fern", "Greta", "Hana",
            "Isla", "Juno", "Kira", "Lena", "Maeve", "Nara", "Orla", "Petra")
 
+# ─── Crafting & building (Phase 3) ───────────────────────────────────────────
+# Still pure body, no LLM: once survival needs are comfortable, a person gathers
+# raw materials, crafts a crude axe (their first tool — it speeds wood-getting),
+# then raises a shelter at home (a sheltered person rests faster). Wood comes from
+# felling trees, stone from bare rock/mountain. Stone houses / workbench are a
+# later slice. Tools/materials live in the person's inv dict alongside food.
+WOOD_PLANTS = {"oak", "pine", "palm"}       # trees that yield wood when felled
+BUILD = dict(
+    chop_growth_min=0.35, chop_take=0.5,    # a chop needs a grown tree; removes this much growth
+    chop_yield=1, axe_bonus=1,              # wood gained per chop; an axe adds this much
+    mine_yield=1, stone_stock=4,            # stone per mine; how much to stockpile once sheltered
+    axe_wood=2,                             # crude axe recipe
+    shelter_wood=6,                         # a brush/wood shelter
+    rest_sheltered_mult=2.0,                # rest this much faster in your own shelter
+)
+STRUCT_KINDS = ("shelter",)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Small numpy helpers
@@ -198,6 +215,7 @@ class World:
         self._weather_until = 0.0        # game-minute the current weather expires
         self.animals: list[dict] = []
         self.people: list[dict] = []     # Phase 2 — simulated folk (body only, no LLM yet)
+        self.structures: list[dict] = [] # Phase 3 — things people build (shelters, …)
         self.log: list[dict] = []        # recent god actions / notable events
         self.version = 0                 # bumped on any mutation, for render diffing
         self.rng = np.random.default_rng()
@@ -614,10 +632,21 @@ class World:
             "thirst": float(self.rng.random() * 0.2 + 0.1),
             "fatigue": float(self.rng.random() * 0.2),
             "hp": 1.0,
-            "inv": {},                                   # carried goods, e.g. {"food": 3}
+            "inv": {},                                   # carried goods, e.g. {"food":3,"wood":2,"axe":1}
             "home": (int(x), int(y)),                    # anchor: idle wandering drifts back here
+            "home_struct": None,                         # id of their shelter once built
             "action": "wander",                          # current body behaviour (for the renderer)
         })
+
+    def _add_structure(self, kind: str, x: int, y: int, by: str = "?") -> str:
+        sid = "s_" + uuid.uuid4().hex[:8]
+        self.structures.append({
+            "id": sid, "kind": kind, "x": int(x), "y": int(y),
+            "by": by, "t": round(self.clock, 1),
+        })
+        self.version += 1
+        self._note("build", f"{by} built a {kind} at ({x},{y}).")
+        return sid
 
     def _seed_initial_people(self, count: int):
         """Settle a small founding band together on hospitable ground *within reach of
@@ -665,6 +694,13 @@ class World:
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             drinkable |= np.roll(np.roll(watery, dy, 0), dx, 1)
         drinkable &= (self.water == WATER_NONE)
+        # Crafting resources: trees yield wood, bare rock/mountain yields stone.
+        tree = np.zeros((H, W), bool)
+        for sp, info in PLANTS.items():
+            if info["name"] in WOOD_PLANTS:
+                tree |= (self.veg_sp == sp)
+        tree &= (self.veg_growth > BUILD["chop_growth_min"])
+        stone = np.isin(self.biome, [B["rock"], B["mountain"]]) & (self.water == WATER_NONE)
 
         dead = []
         for p in self.people:
@@ -673,7 +709,7 @@ class World:
             p["thirst"] = min(1.0, p["thirst"] + PERSON["thirst_rate"] * dt_game_min)
             p["fatigue"] = min(1.0, p["fatigue"] + PERSON["fatigue_rate"] * dt_game_min)
 
-            action, movedir = self._person_decide(p, edible, drinkable, night)
+            action, movedir = self._person_decide(p, edible, drinkable, tree, stone, night)
             p["action"] = action
             x, y = p["x"], p["y"]
             if action == "eat":
@@ -688,15 +724,39 @@ class World:
             elif action == "drink":
                 p["thirst"] = max(0.0, p["thirst"] - PERSON["drink_rate"] * dt_game_min)
             elif action == "rest":
-                p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * dt_game_min)
+                # A sheltered person resting at home recovers faster.
+                mult = (BUILD["rest_sheltered_mult"]
+                        if (p.get("home_struct") and (x, y) == tuple(p["home"])) else 1.0)
+                p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
                 if edible[y, x] and g > PERSON["gather_min"] and p["inv"].get("food", 0) < PERSON["inv_cap"]:
                     take = min(g - 0.2, 0.3)
                     self.veg_growth[y, x] = g - take
                     p["inv"]["food"] = p["inv"].get("food", 0) + 1
+            elif action == "chop":
+                if tree[y, x]:
+                    self.veg_growth[y, x] = max(0.0, float(self.veg_growth[y, x]) - BUILD["chop_take"])
+                    if self.veg_growth[y, x] <= 0.05:        # felled — the tile clears
+                        self.veg_sp[y, x] = VEG_NONE
+                        self.veg_growth[y, x] = 0.0
+                    gain = BUILD["chop_yield"] + (BUILD["axe_bonus"] if p["inv"].get("axe", 0) else 0)
+                    p["inv"]["wood"] = p["inv"].get("wood", 0) + gain
+            elif action == "mine":
+                if stone[y, x]:
+                    p["inv"]["stone"] = p["inv"].get("stone", 0) + BUILD["mine_yield"]
+            elif action == "craft":
+                if p["inv"].get("axe", 0) < 1 and p["inv"].get("wood", 0) >= BUILD["axe_wood"]:
+                    p["inv"]["wood"] -= BUILD["axe_wood"]
+                    p["inv"]["axe"] = 1
+                    self._note("craft", f"{p['name']} crafted a crude axe.")
+            elif action == "build":
+                if p.get("home_struct") is None and p["inv"].get("wood", 0) >= BUILD["shelter_wood"]:
+                    p["inv"]["wood"] -= BUILD["shelter_wood"]
+                    p["home_struct"] = self._add_structure("shelter", x, y, by=p["name"])
+                    p["home"] = (x, y)
             # Seeking and wandering move the body; acting-in-place does not.
-            if action in ("seek_food", "seek_water", "wander"):
+            if action in ("seek_food", "seek_water", "seek_wood", "seek_stone", "haul", "wander"):
                 self._move_person(p, movedir)
 
             # Health: a maxed need erodes the body; being well-supplied heals it.
@@ -715,9 +775,10 @@ class World:
             ids = {id(p) for p in dead}
             self.people = [p for p in self.people if id(p) not in ids]
 
-    def _person_decide(self, p, edible, drinkable, night):
+    def _person_decide(self, p, edible, drinkable, tree, stone, night):
         """Pick the most pressing body action. Returns (action, movedir|None).
-        Priority: thirst → hunger → rest → opportunistic gathering → wander."""
+        Priority: thirst → hunger → rest → opportunistic forage → (when comfortable)
+        craft & build → wander."""
         x, y, v = p["x"], p["y"], PERSON["vision"]
         if p["thirst"] >= PERSON["t_thirst"]:
             if drinkable[y, x]:
@@ -743,11 +804,54 @@ class World:
         if (edible[y, x] and self.veg_growth[y, x] > PERSON["gather_min"]
                 and p["inv"].get("food", 0) < PERSON["inv_cap"]):
             return "gather", None
+        # Secondary drives — only when survival is comfortable and it's daytime:
+        # build a shelter, craft an axe, lay in some stone.
+        if (p["hunger"] < 0.5 and p["thirst"] < 0.5 and p["fatigue"] < 0.6 and not night):
+            proj = self._person_build_decide(p, tree, stone)
+            if proj:
+                return proj
         # Idle: drift back toward home if we've strayed, else amble.
         hx, hy = p["home"]
         if abs(hx - x) + abs(hy - y) > 6:
             return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         return "wander", None
+
+    def _person_build_decide(self, p, tree, stone):
+        """The crafting/building drive (a comfortable person's 'project'). Returns an
+        action like build/craft/chop/mine or a seek_* move toward a resource, or None."""
+        x, y, v = p["x"], p["y"], PERSON["vision"]
+        inv = p["inv"]
+        hx, hy = p["home"]
+
+        def get_wood_or(action):
+            """Chop wood toward the current project, returning `action` once we have
+            enough; otherwise head for / fell a tree."""
+            if tree[y, x]:
+                return "chop", None
+            d = self._nearest_dir(x, y, tree, v)
+            return ("seek_wood", d) if d else None    # no trees in sight — give up for now
+
+        # First project: a crude axe — cheap, and it makes every later chop yield more.
+        if inv.get("axe", 0) < 1:
+            if inv.get("wood", 0) >= BUILD["axe_wood"]:
+                return "craft", None
+            return get_wood_or("craft")
+        # Second project: a shelter. Gather wood, carry it home, raise it.
+        if p.get("home_struct") is None:
+            if inv.get("wood", 0) >= BUILD["shelter_wood"]:
+                if abs(hx - x) + abs(hy - y) <= 1:
+                    return "build", None
+                return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+            return get_wood_or("build")
+        # Then lay in stone for later (stone houses are the next slice).
+        if inv.get("stone", 0) < BUILD["stone_stock"]:
+            # Lay in stone for later (stone houses are the next slice).
+            if stone[y, x]:
+                return "mine", None
+            d = self._nearest_dir(x, y, stone, v)
+            if d:
+                return "seek_stone", d
+        return None
 
     def _nearest_dir(self, x: int, y: int, mask: np.ndarray, v: int):
         """Step direction toward the nearest True tile within a vision box, or None."""
@@ -872,6 +976,7 @@ class World:
             },
             "animals": self.animals,
             "people": self.people,
+            "structures": self.structures,
         }
 
     def tick_state(self) -> dict:
@@ -882,6 +987,7 @@ class World:
             "time": round(self.time_of_day(), 2), "season": self.season(),
             "weather": self.weather, "census": self.census(),
             "animals": self.animals, "people": self.people,
+            "structures": self.structures,
         }
 
     def census(self) -> dict:
@@ -889,7 +995,8 @@ class World:
         for a in self.animals:
             counts[a["sp"]] = counts.get(a["sp"], 0) + 1
         veg = {PLANTS[sp]["name"]: int((self.veg_sp == sp).sum()) for sp in PLANTS}
-        return {"animals": counts, "vegetation": veg, "people": len(self.people)}
+        return {"animals": counts, "vegetation": veg, "people": len(self.people),
+                "structures": len(self.structures)}
 
     def digest(self) -> str:
         """Compact text snapshot for Aitha's prompt, so she perceives the world she
@@ -903,8 +1010,10 @@ class World:
         if self.people:
             distress = [p["name"] for p in self.people if p["hunger"] > 0.8 or p["thirst"] > 0.8 or p["hp"] < 0.5]
             roster = ", ".join(p["name"] for p in self.people[:8]) + ("…" if len(self.people) > 8 else "")
+            built = len(self.structures)
             ppl = (f"People: {len(self.people)} alive ({roster})"
-                   + (f"; struggling: {', '.join(distress[:6])}" if distress else "; all faring well") + ". ")
+                   + (f"; struggling: {', '.join(distress[:6])}" if distress else "; all faring well")
+                   + (f". They have raised {built} shelter{'s' if built != 1 else ''}. " if built else ". "))
         else:
             ppl = "People: none yet — the land is unpeopled. "
         return (
@@ -939,7 +1048,8 @@ class World:
                 "seed": self.seed, "clock": self.clock, "last_eco": self._last_eco,
                 "weather": self.weather, "weather_intensity": self.weather_intensity,
                 "weather_until": self._weather_until, "animals": self.animals,
-                "people": self.people, "log": self.log, "version": self.version,
+                "people": self.people, "structures": self.structures,
+                "log": self.log, "version": self.version,
             }
             tmp = PATH_META + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -974,6 +1084,7 @@ class World:
             self.weather_intensity = meta.get("weather_intensity", 0.0)
             self._weather_until = meta.get("weather_until", 0.0)
             self.animals = meta.get("animals", []); self.people = meta.get("people", [])
+            self.structures = meta.get("structures", [])
             self.log = meta.get("log", [])
             self.version = meta.get("version", 0)
             self.rng = np.random.default_rng()
@@ -1035,7 +1146,7 @@ if __name__ == "__main__":
     # Watch populations and vegetation across a couple of season turns.
     days = 8
     steps = days * 3600
-    print("\n  day  season   weather  rabbit deer wolf  ppl  vegtiles  ms/step")
+    print("\n  day  season   weather  rabbit deer wolf  ppl  built  vegtiles  ms/step")
     t0 = time.time()
     last_day = -1
     day_t0 = t0
@@ -1050,13 +1161,18 @@ if __name__ == "__main__":
             day_t0 = now
             print(f"  {w.day():>3}  {w.season():<7}  {w.weather:<7}  "
                   f"{an.get('rabbit',0):>6} {an.get('deer',0):>4} {an.get('wolf',0):>4}  "
-                  f"{c['people']:>3}  {sum(c['vegetation'].values()):>8}  {ms:>6.2f}", flush=True)
+                  f"{c['people']:>3}  {c['structures']:>5}  "
+                  f"{sum(c['vegetation'].values()):>8}  {ms:>6.2f}", flush=True)
     sim_s = time.time() - t0
     if w.people:
         sample = w.people[0]
         print(f"  survivor sample — {sample['name']}: hunger {sample['hunger']:.2f} "
               f"thirst {sample['thirst']:.2f} fatigue {sample['fatigue']:.2f} hp {sample['hp']:.2f} "
               f"inv {sample['inv']} doing '{sample['action']}'")
+    axes = sum(1 for p in w.people if p['inv'].get('axe'))
+    sheltered = sum(1 for p in w.people if p.get('home_struct'))
+    print(f"  crafting/building — {len(w.structures)} shelters, {axes} axes crafted, "
+          f"{sheltered}/{len(w.people)} people sheltered")
 
     # Death test: a person stranded on barren rock (no food/water in reach) must die.
     rock = np.argwhere(w.biome == B["rock"])
@@ -1074,6 +1190,25 @@ if __name__ == "__main__":
     print(f"\nsimulated {steps} steps in {sim_s:.2f}s "
           f"({steps/sim_s:.0f} steps/s, {sim_s*1000/steps:.2f} ms/step avg)")
 
+    # Crafting/building unit check — isolate the chain from survival noise: a
+    # comfortable builder standing on home, kept fed/watered, must craft an axe
+    # and raise a shelter.
+    wc = World().generate(seed=7)
+    wc.people = []; wc.structures = []
+    land = np.argwhere((wc.water == WATER_NONE) & (wc.biome == B["grassland"]))
+    by, bx = land[0]
+    wc._add_person(int(bx), int(by), name="Builder")
+    b = wc.people[0]
+    b["inv"]["wood"] = 20                       # hand them materials so they go straight to work
+    wc.clock = 12 * 60                          # high noon (daytime → secondary drives active)
+    for _ in range(300):
+        b["hunger"] = b["thirst"] = 0.1; b["fatigue"] = 0.1   # stay comfortable
+        wc._tick_people(0.4)
+    print(f"  craft test: Builder has axe={b['inv'].get('axe',0)}, "
+          f"shelters={len(wc.structures)}, sheltered={b.get('home_struct') is not None}, "
+          f"action='{b['action']}' "
+          f"-> {'OK' if b['inv'].get('axe') and wc.structures else 'FAILED'}")
+
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")
     w.add_water(40, 40, 4, "lake", by="test")
@@ -1082,7 +1217,7 @@ if __name__ == "__main__":
     w.spawn_person(64, 64, n=3, by="test")
     snap = w.snapshot()
     print(f"\nsnapshot ok: {len(snap['layers'])} layers, {len(snap['animals'])} animals, "
-          f"{len(snap['people'])} people, "
+          f"{len(snap['people'])} people, {len(snap['structures'])} structures, "
           f"~{sum(len(v) for v in snap['layers'].values())//1024} KB packed")
 
     w.save()

@@ -569,8 +569,11 @@ async def company_engine_loop():
 # Pure code (no LLM): terrain ecology + wildlife tick forward, and a light state
 # payload streams to the renderer. The world pauses when the app closes (this loop
 # stops) and resumes from its saved state next launch.
-WORLD_STEP_SECONDS = float(os.getenv("AITHA_WORLD_STEP", "2"))   # real seconds per tick
-WORLD_SAVE_EVERY = int(os.getenv("AITHA_WORLD_SAVE_EVERY", "30"))  # ticks between saves
+# Tick 4×/second-ish: movement happens once per tick, so a brisk cadence makes the
+# world feel alive (entities visibly move, the map updates smoothly). Needs/energy/
+# ecology are dt-scaled, so their balance is identical regardless of this rate.
+WORLD_STEP_SECONDS = float(os.getenv("AITHA_WORLD_STEP", "0.5"))   # real seconds per tick
+WORLD_SAVE_EVERY = int(os.getenv("AITHA_WORLD_SAVE_EVERY", "120"))  # ticks between saves (~1/min)
 
 
 async def world_engine_loop():

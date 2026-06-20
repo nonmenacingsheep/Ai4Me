@@ -3619,7 +3619,7 @@ async function loadWorld() {
 function setWorld(s) {
   WORLD.data = {
     w: s.w, h: s.h, biomes: s.biomes, plants: s.plants || {}, animals: s.animals || [],
-    people: s.people || [],
+    people: s.people || [], structures: s.structures || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -3728,6 +3728,24 @@ function renderWorld() {
     ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1;
     ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
   }
+  // Structures: a small hut (wall + roof), drawn under people so folk stand in front.
+  for (const st of (d.structures || [])) {
+    const sx = (st.x - cam.camX) * z, sy = (st.y - cam.camY) * z;
+    if (sx < -z || sy < -z || sx > cv.width || sy > cv.height) continue;
+    const s = Math.max(4, z * 0.92);
+    const ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(ox - 1, oy - 1, s + 2, s + 2);
+    ctx.fillStyle = '#8a5a33';                              // wattle wall
+    ctx.fillRect(ox, oy + s * 0.42, s, s * 0.58);
+    ctx.fillStyle = '#5c3a20';                              // thatch roof
+    ctx.beginPath();
+    ctx.moveTo(ox - s * 0.12, oy + s * 0.46);
+    ctx.lineTo(ox + s / 2, oy);
+    ctx.lineTo(ox + s * 1.12, oy + s * 0.46);
+    ctx.closePath();
+    ctx.fill();
+  }
   // People: a small two-tone figure (body + head), tinted by health so the eye
   // catches anyone in trouble. Drawn above wildlife.
   for (const p of (d.people || [])) {
@@ -3772,6 +3790,7 @@ function worldOnTick(msg) {
   Object.assign(WORLD.data, {
     day: msg.day, time: msg.time, season: msg.season,
     weather: msg.weather, animals: msg.animals || [], people: msg.people || [],
+    structures: msg.structures || [],
     census: msg.census, version: msg.version,
   });
   if (activeView === 'world') { renderWorld(); updateWorldHud(); }
@@ -3824,12 +3843,18 @@ function worldInspect(x, y) {
   const here = d.animals.filter(a => a.x === x && a.y === y).map(a => a.sp);
   const folk = (d.people || []).filter(p => p.x === x && p.y === y);
   const pct = (v) => Math.round((v || 0) * 100);
+  const invStr = (inv) => {
+    const e = Object.entries(inv || {}).filter(([, n]) => n);
+    return e.length ? ' · carrying ' + e.map(([k, n]) => `${n} ${k}`).join(', ') : '';
+  };
   const folkLine = folk.map(p =>
     `<br><strong>${p.name}</strong> — ${p.action} · hunger ${pct(p.hunger)}% thirst ${pct(p.thirst)}% ` +
-    `rest ${pct(1 - (p.fatigue || 0))}% · health ${pct(p.hp)}%`).join('');
+    `rest ${pct(1 - (p.fatigue || 0))}% · health ${pct(p.hp)}%${invStr(p.inv)}`).join('');
+  const builds = (d.structures || []).filter(st => st.x === x && st.y === y);
+  const buildLine = builds.map(st => `<br>🛖 ${st.kind}${st.by ? ` (built by ${st.by})` : ''}`).join('');
   ro.innerHTML = `<strong>(${x}, ${y})</strong> · ${biome}<br>` +
     `elevation ${Math.round(d.elevation[i] / 255 * 100)}% · flora: ${flora}` +
-    (here.length ? `<br>here: ${here.join(', ')}` : '') + folkLine;
+    (here.length ? `<br>here: ${here.join(', ')}` : '') + buildLine + folkLine;
   ro.classList.add('show');
   clearTimeout(WORLD._roTimer);
   WORLD._roTimer = setTimeout(() => ro.classList.remove('show'), 3500);
