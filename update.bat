@@ -55,6 +55,9 @@ if errorlevel 1 (
 )
 echo.
 
+REM Mark setup complete so start.bat skips its first-run install next time.
+echo done> "backend\.setup-done"
+
 echo [4/4] Launching Aitha...
 start "" "%~dp0run.bat"
 echo.

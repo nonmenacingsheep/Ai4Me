@@ -432,6 +432,28 @@ def _is_cloud(model: str) -> bool:
     return _route(model) is not None
 
 
+def _known_cloud_model(model: str) -> bool:
+    """True if `model` belongs to a cloud provider at all (regardless of whether its
+    key is set). Lets us tell 'cloud model, key missing' apart from 'local model'."""
+    return any(model in p["models"] for p in PROVIDERS.values())
+
+
+async def _ollama_reachable() -> bool:
+    """Quick (3s) check that a local Ollama server is actually up, so a fresh install
+    with no server gets clear guidance instead of a slow, cryptic failure."""
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/tags")
+            return r.status_code < 500
+    except Exception:
+        return False
+
+
+# Fail fast on connect (a missing/cloud server must not hang the UI), but allow long
+# gaps between streamed tokens for slow local models on CPU.
+STREAM_TIMEOUT = httpx.Timeout(connect=5.0, read=90.0, write=10.0, pool=5.0)
+
+
 # Which models can actually SEE images. Cloud: OpenAI's 4o/4.1/o-series (and
 # vision-tagged OpenRouter models). Local: any Ollama model whose name hints it's
 # multimodal. Used to gate image input — text-only models get a graceful note
@@ -587,6 +609,21 @@ class AithaBrain:
             system = system + "\n\n" + extra_context.strip()
 
         messages = self._clean_history(history) + [self._user_message(message, images)]
+
+        # Preflight — give fast, actionable guidance instead of a cryptic error or a
+        # long hang when the brain can't actually be reached (the common fresh-install
+        # case: default cloud model with no API key, or a local model but no Ollama).
+        if _known_cloud_model(self.model) and not _is_cloud(self.model):
+            yield (f"...I can't reach that part of my mind yet — “{self.model}” is a "
+                   "cloud model and no API key is set for it. Open Settings → Behavior and "
+                   "either paste an API key (e.g. DeepSeek), or pick a local Ollama model.")
+            return
+        if not _is_cloud(self.model) and not await _ollama_reachable():
+            yield (f"...my local mind isn't running. “{self.model}” needs Ollama: "
+                   "install it from ollama.com, start it, then run "
+                   f"“ollama pull {self.model}” — or set a cloud API key in "
+                   "Settings → Behavior.")
+            return
 
         # Cloud DeepSeek path — bypasses all the Ollama/tool machinery.
         if _is_cloud(self.model):
@@ -1138,7 +1175,7 @@ class AithaBrain:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
             async with client.stream("POST", f"{base}/chat/completions",
                                      json=payload, headers=headers) as resp:
                 if resp.status_code >= 400:
@@ -1182,7 +1219,7 @@ class AithaBrain:
         if tools:
             payload["tools"] = [SEARCH_TOOL]
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=STREAM_TIMEOUT) as client:
             async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
                 if resp.status_code >= 400:
                     body = (await resp.aread()).decode("utf-8", "ignore")

@@ -11,6 +11,9 @@ out/
 *.log
 npm-debug.log*
 
+# ─── Local run markers ────────────────────────────────────
+backend/.setup-done
+
 # ─── Python ───────────────────────────────────────────────
 __pycache__/
 *.py[cod]
