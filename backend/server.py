@@ -578,7 +578,7 @@ WORLD_SAVE_EVERY = int(os.getenv("AITHA_WORLD_SAVE_EVERY", "120"))  # ticks betw
 
 
 async def world_engine_loop():
-    await asyncio.sleep(25)  # let startup settle
+    await asyncio.sleep(4)  # let startup settle (kept short so the world feels live at once)
     last = time.time()
     n = 0
     while True:

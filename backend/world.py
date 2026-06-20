@@ -45,7 +45,7 @@ H = 2048
 # satisfy. A save stamped with a different (or missing) schema is treated as
 # incompatible and regenerated on load, so a world written by a broken/older
 # build self-heals on the next launch instead of staying frozen forever.
-SCHEMA = 4
+SCHEMA = 5
 CHUNK = 64                      # tiles per chunk → (W//CHUNK)² dormancy bookkeeping cells
 NCHUNK = W // CHUNK
 SEA_LEVEL = 0.36                # elevation below this is ocean
@@ -286,6 +286,16 @@ def _fractal_noise(h: int, w: int, octaves: int, rng: np.random.Generator) -> np
     return out
 
 
+def _smooth(a: np.ndarray, passes: int = 1) -> np.ndarray:
+    """Cheap separable box blur (5-point) — used to keep coastlines coherent instead of
+    a pixelly half-water marsh. Edges wrap (fine for a sea-framed map)."""
+    a = a.astype(np.float32)
+    for _ in range(passes):
+        a = (a + np.roll(a, 1, 0) + np.roll(a, -1, 0)
+             + np.roll(a, 1, 1) + np.roll(a, -1, 1)) / 5.0
+    return a
+
+
 def _band(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     """1.0 inside [lo,hi], falling linearly to 0 within a margin outside it.
     Used as a suitability curve for temperature / moisture comfort bands."""
@@ -329,20 +339,35 @@ class World:
         self.rng = np.random.default_rng(self.seed)
         rng = self.rng
 
-        # More octaves than the old 128² map so a 2048² world has both continental
-        # shapes and fine coastal/hill detail rather than smooth blobs.
-        elev = _fractal_noise(H, W, 9, rng)
-        # Pull the borders down a touch so the map tends to sit in an ocean frame.
+        # Elevation = a low-frequency CONTINENTAL base (big landmasses, gulfs, islands)
+        # plus a little mid-frequency relief, then smoothed so coastlines are coherent.
+        # (The old 9-octave field had fine noise straddling sea level everywhere, which
+        # fragmented the coast into a pixelly half-water marsh — the look we're fixing.)
+        base = _fractal_noise(H, W, 4, rng)
+        relief = _fractal_noise(H, W, 7, np.random.default_rng(self.seed ^ 0x51ED2C9F))
+        elev = _smooth(base * 0.74 + relief * 0.26, 2)
+        # Ocean frame: the map sits in sea, falling toward the borders, but land can still
+        # reach the edge as peninsulas and interior lows become bays/inland seas, so islands
+        # large and small form naturally rather than one blobby continent.
         yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-        edge = np.minimum.reduce([xx, yy, (W - 1 - xx), (H - 1 - yy)]) / (min(W, H) / 2)
-        elev = elev * (0.55 + 0.45 * np.clip(edge, 0, 1))
+        edge = np.minimum.reduce([xx, yy, (W - 1 - xx), (H - 1 - yy)]) / (min(W, H) * 0.5)
+        elev = elev * (0.52 + 0.48 * np.clip(edge, 0, 1))
         elev -= elev.min(); elev /= (elev.max() + 1e-9)
-        self.elevation = elev.astype(np.float32)
+        # A gentle steepen around sea level for a crisp shoreline (no swampy half-drowned
+        # shelf), then a final light smooth. Smoothing — not fine noise — keeps coasts clean.
+        elev = np.clip((elev - SEA_LEVEL) * 1.12 + SEA_LEVEL, 0, 1)
+        self.elevation = _smooth(elev, 1).astype(np.float32)
+        elev = self.elevation
 
-        moist = _fractal_noise(H, W, 7, np.random.default_rng(self.seed ^ 0x9E3779B9))
-        # Latitude wetness: a damp temperate belt, drier toward the hot middle band.
-        lat = np.abs(yy / (H - 1) - 0.5) * 2
-        moist = np.clip(moist * 0.7 + (0.5 - np.abs(lat - 0.45)) * 0.6, 0, 1)
+        moist = _smooth(_fractal_noise(H, W, 6, np.random.default_rng(self.seed ^ 0x9E3779B9)), 1)
+        # Latitudinal wetness like Earth's: a wet tropical belt at the equator (→ hot, wet
+        # rainforest), a dry belt around the 30° horse latitudes (→ deserts), damp temperate
+        # mid-latitudes (→ forests), drying again toward the poles.
+        lat = np.abs(yy / (H - 1) - 0.5) * 2                     # 0 at equator … 1 at poles
+        equator_wet = np.exp(-(lat / 0.30) ** 2) * 0.48
+        midlat_wet = np.exp(-((lat - 0.70) / 0.26) ** 2) * 0.30
+        horse_dry = np.exp(-((lat - 0.36) / 0.13) ** 2) * 0.34   # the ~30° desert belt
+        moist = np.clip(moist * 0.60 + equator_wet + midlat_wet - horse_dry, 0, 1)
         self.moisture = moist.astype(np.float32)
 
         self.water = np.where(elev < SEA_LEVEL, WATER_OCEAN, WATER_NONE).astype(np.uint8)
@@ -447,47 +472,74 @@ class World:
 
     def _carve_lakes_and_rivers(self):
         elev = self.elevation
-        # Lakes: interior local minima that aren't ocean.
+        # Lakes: only TRUE interior basins (a tile no higher than all 4 neighbours), not
+        # every shallow dip — so we get a scattering of real ponds & mountain tarns rather
+        # than a marshy speckle. Each basin is dilated by one ring into a small lake.
         nbr_min = np.full_like(elev, 1.0)
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             nbr_min = np.minimum(nbr_min, np.roll(np.roll(elev, dy, 0), dx, 1))
-        depression = (elev <= nbr_min + 0.002) & (elev >= SEA_LEVEL) & (elev < SEA_LEVEL + 0.18)
-        self.water[depression] = WATER_LAKE
-        # Rivers: from a handful of high, wet springs, follow steepest descent to water.
-        springs = np.argwhere((elev > 0.62) & (self.moisture > 0.5))
+        basin = (elev <= nbr_min) & (elev >= SEA_LEVEL + 0.02) & (elev < 0.80)
+        lake = basin.copy()
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):       # grow ponds a little
+            lake |= np.roll(np.roll(basin, dy, 0), dx, 1)
+        self.water[lake & (self.water == WATER_NONE)] = WATER_LAKE
+        # Rivers: springs rise from high, wettish ground (and overflowing tarns) and run
+        # downhill by steepest descent to the sea — high→low, fed by run-off, sometimes
+        # starting at a mountain lake and occasionally crossing from one coast to another.
+        springs = np.argwhere((elev > 0.55) & (self.moisture > 0.45)
+                              & (self.water == WATER_NONE))
         if len(springs):
-            # ~1 spring per 40k tiles, so river density scales with the map.
-            n = min(len(springs), max(12, (W * H) // 40000))
+            n = min(len(springs), max(16, (W * H) // 60000))
             picks = self.rng.choice(len(springs), size=n, replace=False)
             for idx in picks:
                 self._trace_river(int(springs[idx][0]), int(springs[idx][1]))
 
     def _trace_river(self, y: int, x: int):
+        """Follow steepest descent from a spring to the sea, with a little meander and a
+        momentum bias so channels curve naturally instead of marching in straight diagonals.
+        Tributaries that meet an existing river merge into it (forming dendritic trunks)."""
         elev = self.elevation
-        for _ in range(4 * max(W, H)):     # long enough to reach the sea across a big map
-            if self.water[y, x] in (WATER_OCEAN, WATER_LAKE):
+        rng = self.rng
+        pdy, pdx = 0, 0                                # previous step (momentum)
+        for step in range(4 * max(W, H)):
+            cur = self.water[y, x]
+            if cur in (WATER_OCEAN, WATER_LAKE):
+                return
+            if cur == WATER_RIVER and step > 0:        # met another river → merge & stop
                 return
             self.water[y, x] = WATER_RIVER
-            best, by, bx = elev[y, x], y, x
+            best, by, bx = 1e9, y, x
             for dy in (-1, 0, 1):
                 for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
                     ny, nx = y + dy, x + dx
-                    if 0 <= ny < H and 0 <= nx < W and elev[ny, nx] < best:
-                        best, by, bx = elev[ny, nx], ny, nx
-            if (by, bx) == (y, x):       # stuck in a pit → make it a lake, stop
+                    if not (0 <= ny < H and 0 <= nx < W):
+                        continue
+                    # Score = elevation, minus a momentum bonus for going straight, plus a
+                    # touch of noise — together these meander the channel without backtracking.
+                    score = (elev[ny, nx]
+                             - (0.0009 if (dy, dx) == (pdy, pdx) else 0.0)
+                             + (rng.random() - 0.5) * 0.0011)
+                    if score < best:
+                        best, by, bx = score, ny, nx
+            if (by, bx) == (y, x) or elev[by, bx] > elev[y, x] + 0.02:   # pit → small lake
                 self.water[y, x] = WATER_LAKE
                 return
+            pdy, pdx = by - y, bx - x
             y, x = by, bx
 
     def _dampen_near_water(self):
+        # A narrow, gentle damp fringe by the water — wide/strong dampening was turning
+        # every coast into swamp. Two soft rings, modest boost.
         wet = (self.water != WATER_NONE).astype(np.float32)
         near = wet.copy()
-        for _ in range(3):               # spread the influence a few tiles out
+        for _ in range(2):
             acc = near.copy()
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                acc = np.maximum(acc, np.roll(np.roll(near, dy, 0), dx, 1) * 0.7)
+                acc = np.maximum(acc, np.roll(np.roll(near, dy, 0), dx, 1) * 0.6)
             near = acc
-        self.moisture = np.clip(self.moisture + near * 0.35, 0, 1).astype(np.float32)
+        self.moisture = np.clip(self.moisture + near * 0.18, 0, 1).astype(np.float32)
 
     def _annual_temperature(self, reg=None) -> np.ndarray:
         """Mean annual temperature field in [0,1] from latitude and elevation. With a
@@ -513,8 +565,8 @@ class World:
         temperate = (temp >= 0.30) & (temp < 0.62)
         bm[temperate & (moist >= 0.55)] = B["forest"]
         bm[temperate & (moist < 0.55) & (moist >= 0.30)] = B["grassland"]
-        # Wet lowlands become swamp.
-        bm[(elev < SEA_LEVEL + 0.08) & (moist > 0.7) & (self.water == WATER_NONE)] = B["swamp"]
+        # Swamp only in genuinely wet, very low interior pockets (not the whole coast).
+        bm[(elev < SEA_LEVEL + 0.04) & (moist > 0.82) & (self.water == WATER_NONE)] = B["swamp"]
         # Heights override climate.
         bm[elev >= MOUNTAIN_LEVEL] = B["mountain"]
         bm[(elev >= MOUNTAIN_LEVEL) & (temp < 0.30)] = B["rock"]

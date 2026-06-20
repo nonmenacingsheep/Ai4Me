@@ -3629,8 +3629,8 @@ async function loadWorld() {
       return;
     }
     off.style.display = 'none'; stage.style.display = 'flex';
-    setWorld(j.world);
-    startWorldRefresh();
+    startWorldRefresh();            // (re)arm the slow terrain refresh first…
+    setWorld(j.world);              // …then load + kick off the interpolated anim loop
   } catch (e) { console.warn('[world] load failed', e); }
 }
 
@@ -3647,15 +3647,53 @@ function setWorld(s) {
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
-    detail: null,                           // crisp window streamed when zoomed in
+    // Keep any crisp detail window already streamed (a periodic terrain refresh shares
+    // the same camera, so reusing it avoids a blurry flash); re-stream replaces it below.
+    detail: (WORLD.data && WORLD.data.detail) || null,
     day: s.day, time: s.time, season: s.season, weather: s.weather,
     census: null, version: s.version,
   };
+  _wDetailKey = '';                         // force refreshWorldDetail to re-stream crisp tiles
   buildWorldBase();
   computeWorldCamera();
-  renderWorld();
   refreshWorldDetail();
   updateWorldHud();
+  startWorldAnim();                         // continuous, interpolated rendering loop
+}
+
+// ── Smooth, real-time rendering ──────────────────────────────────────────────
+// World ticks arrive a few times a second; rather than redraw only on each tick
+// (which looks like discrete tile-hops), we run a requestAnimationFrame loop that
+// eases every entity toward its latest reported tile each frame, so motion is fluid
+// at the display's refresh rate even when the server tick rate is modest.
+function worldSmooth(id, tx, ty) {
+  let m = WORLD.smooth;
+  if (!m) m = WORLD.smooth = new Map();
+  let s = m.get(id);
+  if (!s) { s = { x: tx, y: ty }; m.set(id, s); return s; }   // new entity → start in place
+  return s;
+}
+function easeWorldEntities() {
+  const d = WORLD.data; if (!d) return;
+  const k = 0.28;                           // per-frame approach factor (≈ smooth follow)
+  const seen = new Set();
+  for (const e of [...(d.animals || []), ...(d.people || [])]) {
+    const s = worldSmooth(e.id, e.x, e.y); seen.add(e.id);
+    const dx = e.x - s.x, dy = e.y - s.y;
+    s.x += dx * k; s.y += dy * k;
+    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) { s.x = e.x; s.y = e.y; }  // teleport (placed)
+  }
+  if (WORLD.smooth) for (const id of WORLD.smooth.keys()) if (!seen.has(id)) WORLD.smooth.delete(id);
+}
+function worldAnimFrame() {
+  if (activeView !== 'world' || !WORLD.data) { WORLD.animRAF = null; return; }
+  easeWorldEntities();
+  renderWorld();
+  WORLD.animRAF = requestAnimationFrame(worldAnimFrame);
+}
+function startWorldAnim() {
+  if (WORLD.animRAF || activeView !== 'world') return;
+  WORLD.animRAF = requestAnimationFrame(worldAnimFrame);
 }
 
 // Colour one tile pixel (biome + west-light hillshade + veg tint, or shaded water).
@@ -3877,9 +3915,12 @@ function renderWorld() {
     ctx.lineTo(ox + s * 1.12, oy + s * 0.46); ctx.closePath(); ctx.fill();
   }
   // Wildlife as crisp pixel sprites, sized per species (deer/wolf ≈ 2×2 tiles, rabbit 1).
+  const sm = WORLD.smooth;
   for (const a of d.animals) {
     const span = WANIMAL_SPAN[a.sp] || 1;
-    const sx = (a.x - cam.camX) * z, sy = (a.y - cam.camY) * z;
+    const sp0 = sm && sm.get(a.id);
+    const ax = sp0 ? sp0.x : a.x, ay = sp0 ? sp0.y : a.y;
+    const sx = (ax - cam.camX) * z, sy = (ay - cam.camY) * z;
     if (!onScreen(sx, sy, span)) continue;
     const c = WANIMAL_RGB[a.sp] || [220, 220, 220];
     const s = Math.max(2.5, z * span * 0.82);
@@ -3892,7 +3933,9 @@ function renderWorld() {
   // People: a two-tone figure (body + head) ≈ 2 tiles tall, tinted by health.
   for (const p of (d.people || [])) {
     const span = WPERSON_SPAN;
-    const sx = (p.x - cam.camX) * z, sy = (p.y - cam.camY) * z;
+    const sp0 = sm && sm.get(p.id);
+    const px2 = sp0 ? sp0.x : p.x, py2 = sp0 ? sp0.y : p.y;
+    const sx = (px2 - cam.camX) * z, sy = (py2 - cam.camY) * z;
     if (!onScreen(sx, sy, span)) continue;
     const hp = p.hp == null ? 1 : p.hp;
     const body = hp > 0.5 ? '#f2c14e' : '#e0683c';          // gold when well, rust when failing
@@ -3945,7 +3988,7 @@ function worldOnTick(msg) {
     roofs: msg.roofs || WORLD.data.roofs || [],
     census: msg.census, version: msg.version,
   });
-  if (activeView === 'world') { renderWorld(); updateWorldHud(); }
+  if (activeView === 'world') { updateWorldHud(); startWorldAnim(); }
 }
 
 // Terrain/flora was reshaped (a god acted) — pull a fresh snapshot, debounced.
@@ -3968,7 +4011,10 @@ function startWorldRefresh() {
   // seasonal recolouring) show up even without an explicit god-action.
   WORLD.refreshTimer = setInterval(() => { if (activeView === 'world') worldOnChanged(); }, 20000);
 }
-function stopWorld() { if (WORLD.refreshTimer) { clearInterval(WORLD.refreshTimer); WORLD.refreshTimer = null; } }
+function stopWorld() {
+  if (WORLD.refreshTimer) { clearInterval(WORLD.refreshTimer); WORLD.refreshTimer = null; }
+  if (WORLD.animRAF) { cancelAnimationFrame(WORLD.animRAF); WORLD.animRAF = null; }
+}
 
 // Translate a pointer event to a tile coordinate via the camera.
 function worldTileAt(ev) {
