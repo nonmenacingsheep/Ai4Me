@@ -3603,6 +3603,7 @@ async function loadWorld() {
 function setWorld(s) {
   WORLD.data = {
     w: s.w, h: s.h, biomes: s.biomes, plants: s.plants || {}, animals: s.animals || [],
+    people: s.people || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -3664,7 +3665,11 @@ function computeWorldCamera() {
   const cv = document.getElementById('world-canvas');
   if (!wrap || !cv) return;
   const cw = wrap.clientWidth, ch = wrap.clientHeight;
-  if (cw <= 0 || ch <= 0) return;
+  if (cw <= 0 || ch <= 0) {
+    // Layout not settled yet (tab just became visible) — try again next frame.
+    requestAnimationFrame(() => { computeWorldCamera(); renderWorld(); });
+    return;
+  }
   cv.width = cw; cv.height = ch;
   if (!WORLD.cam || WORLD.cam._w !== d.w || WORLD.cam._h !== d.h) {
     const z = Math.max(cw / d.w, ch / d.h);           // cover
@@ -3707,6 +3712,24 @@ function renderWorld() {
     ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1;
     ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
   }
+  // People: a small two-tone figure (body + head), tinted by health so the eye
+  // catches anyone in trouble. Drawn above wildlife.
+  for (const p of (d.people || [])) {
+    const sx = (p.x - cam.camX) * z, sy = (p.y - cam.camY) * z;
+    if (sx < -z || sy < -z || sx > cv.width || sy > cv.height) continue;
+    const hp = p.hp == null ? 1 : p.hp;
+    const body = hp > 0.5 ? '#f2c14e' : '#e0683c';        // gold when well, rust when failing
+    const bw = Math.max(2, z * 0.34), bh = Math.max(3, z * 0.62);
+    const bx = sx + (z - bw) / 2, by = sy + (z - bh) / 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';                    // outline for contrast on any biome
+    ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
+    ctx.fillStyle = body;
+    ctx.fillRect(bx, by + bh * 0.32, bw, bh * 0.68);       // torso
+    const hr = Math.max(1.2, bw * 0.6);
+    ctx.beginPath();
+    ctx.arc(bx + bw / 2, by + hr, hr, 0, 6.283);           // head
+    ctx.fill();
+  }
 }
 
 function updateWorldHud() {
@@ -3720,8 +3743,10 @@ function updateWorldHud() {
   const cen = d.census;
   if (cen && cen.animals) {
     const a = cen.animals;
-    document.getElementById('whud-census').innerHTML =
-      Object.entries(a).map(([k, v]) => `${k} <span>${v}</span>`).join('') || '';
+    let html = Object.entries(a).map(([k, v]) => `${k} <span>${v}</span>`).join('');
+    const ppl = cen.people != null ? cen.people : (d.people || []).length;
+    html += `people <span>${ppl}</span>`;
+    document.getElementById('whud-census').innerHTML = html;
   }
 }
 
@@ -3730,7 +3755,8 @@ function worldOnTick(msg) {
   if (!WORLD.data) return;
   Object.assign(WORLD.data, {
     day: msg.day, time: msg.time, season: msg.season,
-    weather: msg.weather, animals: msg.animals || [], census: msg.census, version: msg.version,
+    weather: msg.weather, animals: msg.animals || [], people: msg.people || [],
+    census: msg.census, version: msg.version,
   });
   if (activeView === 'world') { renderWorld(); updateWorldHud(); }
 }
@@ -3780,9 +3806,14 @@ function worldInspect(x, y) {
   const sp = d.vegSp[i];
   const flora = sp ? `${d.plants[sp]} (${Math.round(d.vegGrowth[i] / 255 * 100)}%)` : '—';
   const here = d.animals.filter(a => a.x === x && a.y === y).map(a => a.sp);
+  const folk = (d.people || []).filter(p => p.x === x && p.y === y);
+  const pct = (v) => Math.round((v || 0) * 100);
+  const folkLine = folk.map(p =>
+    `<br><strong>${p.name}</strong> — ${p.action} · hunger ${pct(p.hunger)}% thirst ${pct(p.thirst)}% ` +
+    `rest ${pct(1 - (p.fatigue || 0))}% · health ${pct(p.hp)}%`).join('');
   ro.innerHTML = `<strong>(${x}, ${y})</strong> · ${biome}<br>` +
     `elevation ${Math.round(d.elevation[i] / 255 * 100)}% · flora: ${flora}` +
-    (here.length ? `<br>here: ${here.join(', ')}` : '');
+    (here.length ? `<br>here: ${here.join(', ')}` : '') + folkLine;
   ro.classList.add('show');
   clearTimeout(WORLD._roTimer);
   WORLD._roTimer = setTimeout(() => ro.classList.remove('show'), 3500);
@@ -3799,6 +3830,7 @@ async function worldPaint(x, y) {
     case 'biome': body.tool = 'biome'; body.name = WORLD.arg; break;
     case 'plant': body.tool = 'plant'; body.species = WORLD.arg; break;
     case 'spawn': body.tool = 'spawn'; body.species = WORLD.arg; body.n = 1; break;
+    case 'person': body.tool = 'person'; body.n = +(WORLD.arg || 1); break;
     default: return;
   }
   try {
@@ -3916,7 +3948,7 @@ function bindWorld() {
       clampCamera(); renderWorld();
       return;
     }
-    if (WORLD.dragging && WORLD.tool !== 'spawn') {
+    if (WORLD.dragging && WORLD.tool !== 'spawn' && WORLD.tool !== 'person') {
       const now = Date.now();
       if (now - WORLD.lastPaint > 90) { WORLD.lastPaint = now; worldPaint(x, y); }
     }

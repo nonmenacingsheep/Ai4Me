@@ -3045,7 +3045,9 @@ body.passthrough .pt-hint {
 /* ═══════════════════════════════════════════════════════════════════
    WORLD — the living god-sim
    ═══════════════════════════════════════════════════════════════════ */
-.view-world { position: relative; flex-direction: column; align-items: stretch; overflow: hidden; }
+/* Inherits position:absolute; inset:0 from .view — do NOT override to relative
+   (that drops the sizing and collapses the stage/canvas to zero height). */
+.view-world { flex-direction: column; align-items: stretch; height: 100%; overflow: hidden; }
 .view-world.active { display: flex; }
 
 .world-off { flex: 1; display: flex; align-items: center; justify-content: center; padding: 40px; }

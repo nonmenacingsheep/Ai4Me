@@ -99,18 +99,41 @@ ANIMALS = {
     # Prey are r-strategists: mature fast, breed often, find mates from afar.
     "rabbit": dict(diet="graze", speed=1, vision=4, maturity=3, max_age=50,
                    drain=0.0013, graze=0.06, eat_gain=4.0, repro_at=7.0,
-                   repro_cost=3.0, repro_cd=2.0, icon="🐇"),
+                   repro_cost=3.0, repro_cd=2.0, pop_cap=150, icon="🐇"),
     "deer":   dict(diet="graze", speed=1, vision=6, maturity=6, max_age=120,
                    drain=0.0015, graze=0.06, eat_gain=4.5, repro_at=10.0,
-                   repro_cost=5.0, repro_cd=4.0, icon="🦌"),
+                   repro_cost=5.0, repro_cd=4.0, pop_cap=90, icon="🦌"),
     # Predators are few, slow-breeding, and digest for over a game-day between kills.
     "wolf":   dict(diet="hunt",  speed=2, vision=8, maturity=14, max_age=100,
                    drain=0.0024, eat_gain=16.0, repro_at=24.0, repro_cost=12.0,
                    repro_cd=16.0, feed_cd=1800.0, kill_chance=0.6,
-                   prey={"rabbit", "deer"}, icon="🐺"),
+                   prey={"rabbit", "deer"}, pop_cap=40, icon="🐺"),
 }
 ENERGY_CAP_MULT = 1.6           # max reserve = repro_at × this
 MATE_RADIUS = 6                 # a mate within this range is close enough to breed
+
+# ─── People ────────────────────────────────────────────────────────────────
+# Phase 2 — the "body". People are driven by the same cheap, rule-based loop as
+# wildlife (needs decay → perception → greedy pathfinding → forage/drink/rest →
+# death) with NO LLM. The "mind" (goals, memory, speech via DeepSeek) and the
+# <whisper> nudge arrive in a later step; social/reproduction is Phase 4. Needs
+# run 0.0 (sated) .. 1.0 (dire). Rates are per game-MINUTE so behaviour is the
+# same regardless of how often the server ticks; ages/lifespans are in game-DAYS
+# (1 game-year == DAYS_PER_YEAR == 60 game-days).
+PERSON = dict(
+    vision=8, speed=1, max_age=70 * DAYS_PER_YEAR,
+    hunger_rate=0.00045, thirst_rate=0.00093, fatigue_rate=0.00069,
+    t_hunger=0.50, t_thirst=0.45, t_rest=0.70,        # need thresholds to act on
+    eat_bite=0.05, food_value=2.5,                     # graze speed / hunger restored per unit
+    drink_rate=0.05, rest_rate=0.04,                   # thirst/fatigue relieved per min
+    inv_cap=8, gather_min=0.30,                         # carry capacity / tile richness to gather
+    starve_dmg=0.0008, heal=0.0006,                    # hp lost when a need maxes / regained when sated
+)
+EDIBLE_PLANTS = {"grass", "oak", "reeds", "palm", "shrub"}   # plants people can forage
+NAMES_M = ("Aren", "Bram", "Cael", "Doran", "Eli", "Finn", "Garreth", "Holt",
+           "Ivo", "Joss", "Korin", "Lugh", "Mato", "Niall", "Osric", "Pell")
+NAMES_F = ("Ada", "Bel", "Cyra", "Dara", "Esme", "Fern", "Greta", "Hana",
+           "Isla", "Juno", "Kira", "Lena", "Maeve", "Nara", "Orla", "Petra")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -168,6 +191,7 @@ class World:
         self.weather_intensity = 0.0     # 0..1
         self._weather_until = 0.0        # game-minute the current weather expires
         self.animals: list[dict] = []
+        self.people: list[dict] = []     # Phase 2 — simulated folk (body only, no LLM yet)
         self.log: list[dict] = []        # recent god actions / notable events
         self.version = 0                 # bumped on any mutation, for render diffing
         self.rng = np.random.default_rng()
@@ -212,6 +236,7 @@ class World:
         self.veg_growth = np.zeros((H, W), np.float32)
         self._seed_initial_vegetation()
         self._seed_initial_wildlife(count=130)
+        self._seed_initial_people(count=6)
 
         self.clock = 8 * 60.0            # start at 08:00 on day 0
         self._last_eco = self.clock
@@ -367,6 +392,7 @@ class World:
         self.clock += dt_game_min
         self._update_weather()
         self._tick_wildlife(dt_game_min)
+        self._tick_people(dt_game_min)
         if self.clock - self._last_eco >= 60.0:                    # one game-hour elapsed
             steps = int((self.clock - self._last_eco) // 60.0)
             for _ in range(min(steps, 6)):                         # cap catch-up bursts
@@ -486,7 +512,8 @@ class World:
             # which is the only non-trivial cost, almost never runs), then look nearby.
             if (a["energy"] >= spec["repro_at"] and a["age"] >= spec["maturity"]
                     and self.clock >= a.get("repro_cd", 0)
-                    and per_sp.get(a["sp"], 0) < 250 and self._has_mate(a, index)):
+                    and per_sp.get(a["sp"], 0) < spec.get("pop_cap", 200)
+                    and self._has_mate(a, index)):
                 a["energy"] -= spec["repro_cost"]
                 a["repro_cd"] = self.clock + spec["repro_cd"] * 24 * 60
                 per_sp[a["sp"]] = per_sp.get(a["sp"], 0) + 1
@@ -555,6 +582,189 @@ class World:
                         return True
         return False
 
+    # ── people: seeding & helpers ──────────────────────────────────────────────
+    def _nearest_land(self, x: int, y: int) -> tuple[int, int]:
+        """Closest walkable (non-water) tile to (x,y), spiralling outward."""
+        if self._in(x, y) and self.water[y, x] == WATER_NONE:
+            return x, y
+        for r in range(1, 16):
+            for dy in range(-r, r + 1):
+                for dx in range(-r, r + 1):
+                    nx, ny = x + dx, y + dy
+                    if self._in(nx, ny) and self.water[ny, nx] == WATER_NONE:
+                        return nx, ny
+        return x, y
+
+    def _add_person(self, x: int, y: int, name: str | None = None, age: float | None = None):
+        sex = int(self.rng.integers(0, 2))               # 0 = he, 1 = she (for names + later kinship)
+        if name is None:
+            pool = NAMES_M if sex == 0 else NAMES_F
+            name = str(pool[int(self.rng.integers(len(pool)))])
+        self.people.append({
+            "id": "p_" + uuid.uuid4().hex[:8], "name": name, "sex": sex,
+            "x": int(x), "y": int(y),
+            "age": float(age if age is not None else self.rng.integers(1200, 2700)),  # ~20–45 yrs
+            "hunger": float(self.rng.random() * 0.2 + 0.1),
+            "thirst": float(self.rng.random() * 0.2 + 0.1),
+            "fatigue": float(self.rng.random() * 0.2),
+            "hp": 1.0,
+            "inv": {},                                   # carried goods, e.g. {"food": 3}
+            "home": (int(x), int(y)),                    # anchor: idle wandering drifts back here
+            "action": "wander",                          # current body behaviour (for the renderer)
+        })
+
+    def _seed_initial_people(self, count: int):
+        """Settle a small founding band together on hospitable ground *within reach of
+        water* — people drink, and thirst is the fastest need, so a dry start is a
+        death sentence."""
+        habitable = np.isin(self.biome, [B["grassland"], B["forest"], B["savanna"], B["beach"]])
+        # Tiles a short walk (~5) from a drink: dilate the land-beside-water mask.
+        watery = self.water != WATER_NONE
+        near_water = watery.copy()
+        for _ in range(5):
+            acc = near_water.copy()
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                acc |= np.roll(np.roll(near_water, dy, 0), dx, 1)
+            near_water = acc
+        land = self.water == WATER_NONE
+        good = np.argwhere(land & habitable & near_water)
+        if not len(good):
+            good = np.argwhere(land & near_water)        # any watered land
+        if not len(good):
+            good = np.argwhere(land)                      # last resort: anywhere dry
+        if not len(good):
+            return
+        cy, cx = good[self.rng.integers(len(good))]
+        for _ in range(count):
+            jx = int(np.clip(cx + self.rng.integers(-4, 5), 0, W - 1))
+            jy = int(np.clip(cy + self.rng.integers(-4, 5), 0, H - 1))
+            px, py = self._nearest_land(jx, jy)
+            self._add_person(px, py)
+
+    # ── people: the body loop (cheap, rule-based, no LLM) ───────────────────────
+    def _tick_people(self, dt_game_min: float):
+        if not self.people:
+            return
+        dt_day = dt_game_min / (24 * 60)
+        hod = self.time_of_day()
+        night = hod < 6 or hod >= 21
+        # Perception fields, computed once per tick and shared by everyone.
+        edible = np.zeros((H, W), bool)
+        for sp, info in PLANTS.items():
+            if info["name"] in EDIBLE_PLANTS:
+                edible |= (self.veg_sp == sp)
+        edible &= (self.veg_growth > 0.12)
+        watery = self.water != WATER_NONE
+        drinkable = np.zeros((H, W), bool)               # land tiles bordering water (drink spots)
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            drinkable |= np.roll(np.roll(watery, dy, 0), dx, 1)
+        drinkable &= (self.water == WATER_NONE)
+
+        dead = []
+        for p in self.people:
+            p["age"] += dt_day
+            p["hunger"] = min(1.0, p["hunger"] + PERSON["hunger_rate"] * dt_game_min)
+            p["thirst"] = min(1.0, p["thirst"] + PERSON["thirst_rate"] * dt_game_min)
+            p["fatigue"] = min(1.0, p["fatigue"] + PERSON["fatigue_rate"] * dt_game_min)
+
+            action, movedir = self._person_decide(p, edible, drinkable, night)
+            p["action"] = action
+            x, y = p["x"], p["y"]
+            if action == "eat":
+                g = float(self.veg_growth[y, x])
+                if edible[y, x] and g > 0.12:                    # graze the tile
+                    bite = min(g, PERSON["eat_bite"] * dt_game_min)
+                    self.veg_growth[y, x] = g - bite
+                    p["hunger"] = max(0.0, p["hunger"] - bite * PERSON["food_value"])
+                elif p["inv"].get("food", 0) > 0:                # eat from the pack
+                    p["inv"]["food"] -= 1
+                    p["hunger"] = max(0.0, p["hunger"] - 0.35)
+            elif action == "drink":
+                p["thirst"] = max(0.0, p["thirst"] - PERSON["drink_rate"] * dt_game_min)
+            elif action == "rest":
+                p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * dt_game_min)
+            elif action == "gather":
+                g = float(self.veg_growth[y, x])
+                if edible[y, x] and g > PERSON["gather_min"] and p["inv"].get("food", 0) < PERSON["inv_cap"]:
+                    take = min(g - 0.2, 0.3)
+                    self.veg_growth[y, x] = g - take
+                    p["inv"]["food"] = p["inv"].get("food", 0) + 1
+            # Seeking and wandering move the body; acting-in-place does not.
+            if action in ("seek_food", "seek_water", "wander"):
+                self._move_person(p, movedir)
+
+            # Health: a maxed need erodes the body; being well-supplied heals it.
+            if p["hunger"] >= 1.0 or p["thirst"] >= 1.0:
+                p["hp"] -= PERSON["starve_dmg"] * dt_game_min
+            elif p["hunger"] < 0.5 and p["thirst"] < 0.5:
+                p["hp"] = min(1.0, p["hp"] + PERSON["heal"] * dt_game_min)
+
+            if p["hp"] <= 0 or p["age"] > PERSON["max_age"]:
+                dead.append(p)
+
+        for p in dead:
+            cause = "old age" if p["age"] > PERSON["max_age"] else "hunger and thirst"
+            self._note("death", f"{p['name']} died of {cause}.")
+        if dead:
+            ids = {id(p) for p in dead}
+            self.people = [p for p in self.people if id(p) not in ids]
+
+    def _person_decide(self, p, edible, drinkable, night):
+        """Pick the most pressing body action. Returns (action, movedir|None).
+        Priority: thirst → hunger → rest → opportunistic gathering → wander."""
+        x, y, v = p["x"], p["y"], PERSON["vision"]
+        if p["thirst"] >= PERSON["t_thirst"]:
+            if drinkable[y, x]:
+                return "drink", None
+            d = self._nearest_dir(x, y, drinkable, v)
+            if d:
+                return "seek_water", d
+        if p["hunger"] >= PERSON["t_hunger"]:
+            if (edible[y, x] and self.veg_growth[y, x] > 0.12) or p["inv"].get("food", 0) > 0:
+                return "eat", None
+            d = self._nearest_dir(x, y, edible, v)
+            # Food in sight → head for it; none in sight → range outward to find new
+            # grazing (NOT back home — the local patch is what's exhausted).
+            return "seek_food", d
+        if p["fatigue"] >= PERSON["t_rest"] or (night and p["fatigue"] > 0.35):
+            return "rest", None
+        # Opportunistic top-ups: sip or nibble while standing on a resource so needs
+        # never build to a crisis when supplies are close at hand.
+        if drinkable[y, x] and p["thirst"] > 0.25:
+            return "drink", None
+        if edible[y, x] and self.veg_growth[y, x] > 0.12 and p["hunger"] > 0.30:
+            return "eat", None
+        if (edible[y, x] and self.veg_growth[y, x] > PERSON["gather_min"]
+                and p["inv"].get("food", 0) < PERSON["inv_cap"]):
+            return "gather", None
+        # Idle: drift back toward home if we've strayed, else amble.
+        hx, hy = p["home"]
+        if abs(hx - x) + abs(hy - y) > 6:
+            return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+        return "wander", None
+
+    def _nearest_dir(self, x: int, y: int, mask: np.ndarray, v: int):
+        """Step direction toward the nearest True tile within a vision box, or None."""
+        y0, y1 = max(0, y - v), min(H, y + v + 1)
+        x0, x1 = max(0, x - v), min(W, x + v + 1)
+        sub = mask[y0:y1, x0:x1]
+        if not sub.any():
+            return None
+        ys, xs = np.nonzero(sub)
+        gx, gy = xs + x0, ys + y0
+        k = int(np.argmin(np.abs(gx - x) + np.abs(gy - y)))
+        return (int(np.sign(gx[k] - x)), int(np.sign(gy[k] - y)))
+
+    def _move_person(self, p, direction):
+        """One step (people can't walk onto water). None → a random amble."""
+        if direction and (direction[0] or direction[1]):
+            sx, sy = int(np.sign(direction[0])), int(np.sign(direction[1]))
+        else:
+            sx, sy = int(self.rng.integers(-1, 2)), int(self.rng.integers(-1, 2))
+        nx, ny = p["x"] + sx, p["y"] + sy
+        if self._in(nx, ny) and self.water[ny, nx] == WATER_NONE:
+            p["x"], p["y"] = nx, ny
+
     # ── god actions (UI brush + Aitha directives both call these) ──────────────
     def _in(self, x, y) -> bool:
         return 0 <= x < W and 0 <= y < H
@@ -614,6 +824,19 @@ class World:
         self.version += 1
         self._note("spawn", f"{by} spawned {n}× {species} at ({x},{y}).")
 
+    def spawn_person(self, x: int, y: int, n: int = 1, name: str | None = None, by: str = "him"):
+        """Bring n people into the world near (x,y), snapped to walkable land."""
+        if not self._in(x, y):
+            return
+        for _ in range(max(1, n)):
+            jx = int(np.clip(x + self.rng.integers(-3, 4), 0, W - 1))
+            jy = int(np.clip(y + self.rng.integers(-3, 4), 0, H - 1))
+            px, py = self._nearest_land(jx, jy)
+            self._add_person(px, py, name=(name if n == 1 else None))
+        self.version += 1
+        who = name if (name and n == 1) else f"{n} {'soul' if n == 1 else 'souls'}"
+        self._note("person", f"{by} drew {who} into the world at ({x},{y}).")
+
     def _note(self, kind: str, text: str):
         self.log.append({"t": round(self.clock, 1), "kind": kind, "text": text})
         if len(self.log) > 60:
@@ -642,6 +865,7 @@ class World:
                 "veg_growth": self._b64u8((self.veg_growth * 255).astype(np.uint8)),
             },
             "animals": self.animals,
+            "people": self.people,
         }
 
     def tick_state(self) -> dict:
@@ -650,7 +874,8 @@ class World:
         return {
             "version": self.version, "clock": round(self.clock, 1), "day": self.day(),
             "time": round(self.time_of_day(), 2), "season": self.season(),
-            "weather": self.weather, "census": self.census(), "animals": self.animals,
+            "weather": self.weather, "census": self.census(),
+            "animals": self.animals, "people": self.people,
         }
 
     def census(self) -> dict:
@@ -658,7 +883,7 @@ class World:
         for a in self.animals:
             counts[a["sp"]] = counts.get(a["sp"], 0) + 1
         veg = {PLANTS[sp]["name"]: int((self.veg_sp == sp).sum()) for sp in PLANTS}
-        return {"animals": counts, "vegetation": veg}
+        return {"animals": counts, "vegetation": veg, "people": len(self.people)}
 
     def digest(self) -> str:
         """Compact text snapshot for Aitha's prompt, so she perceives the world she
@@ -669,10 +894,18 @@ class World:
         land = int((self.water == WATER_NONE).sum())
         water = W * H - land
         recent = "; ".join(e["text"] for e in self.log[-4:]) or "nothing lately"
+        if self.people:
+            distress = [p["name"] for p in self.people if p["hunger"] > 0.8 or p["thirst"] > 0.8 or p["hp"] < 0.5]
+            roster = ", ".join(p["name"] for p in self.people[:8]) + ("…" if len(self.people) > 8 else "")
+            ppl = (f"People: {len(self.people)} alive ({roster})"
+                   + (f"; struggling: {', '.join(distress[:6])}" if distress else "; all faring well") + ". ")
+        else:
+            ppl = "People: none yet — the land is unpeopled. "
         return (
             f"THE WORLD — a {W}×{H} land you and he preside over as gods. "
             f"Day {self.day()}, {self.time_of_day():.0f}:00, {self.season()}, weather {self.weather}. "
             f"Terrain: {land} land tiles, {water} water. Wildlife: {animals}. Flora: {plants}. "
+            f"{ppl}"
             f"Recent godly acts: {recent}.\n"
             "You may shape it with hidden directives (stripped from what he sees) — each "
             f"holds space-separated values; coordinates are 0..{W - 1}:\n"
@@ -681,7 +914,8 @@ class World:
             "  <water>x y r kind</water>  lay water (kind = river|lake|ocean)\n"
             "  <spawn>x y species n</spawn>  add n wildlife (species = rabbit|deer|wolf)\n"
             "  <plant>x y species r</plant>  seed flora in radius r (grass|oak|pine|reeds|palm|cactus|shrub)\n"
-            "  <whisper>x y a thought to slip into a nearby soul</whisper>  (no effect yet — people come later)\n"
+            "  <person>x y n</person>  bring n people into being near (x,y); they forage, drink, rest and can die\n"
+            "  <whisper>x y a thought to slip into a nearby soul</whisper>  (heard but not yet acted on — their minds awaken in a later step)\n"
             "Act only when you mean to; the world is alive and persists between visits."
         )
 
@@ -698,7 +932,7 @@ class World:
                 "seed": self.seed, "clock": self.clock, "last_eco": self._last_eco,
                 "weather": self.weather, "weather_intensity": self.weather_intensity,
                 "weather_until": self._weather_until, "animals": self.animals,
-                "log": self.log, "version": self.version,
+                "people": self.people, "log": self.log, "version": self.version,
             }
             tmp = PATH_META + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -720,7 +954,8 @@ class World:
             self.weather = meta.get("weather", "clear")
             self.weather_intensity = meta.get("weather_intensity", 0.0)
             self._weather_until = meta.get("weather_until", 0.0)
-            self.animals = meta.get("animals", []); self.log = meta.get("log", [])
+            self.animals = meta.get("animals", []); self.people = meta.get("people", [])
+            self.log = meta.get("log", [])
             self.version = meta.get("version", 0)
             self.rng = np.random.default_rng()
             return True
@@ -770,12 +1005,13 @@ if __name__ == "__main__":
     print(f"  water tiles: {water_tiles}  ({water_tiles*100//(W*H)}%)")
     print(f"  biomes: {dist}")
     print(f"  start census: {w.census()}")
+    print(f"  founding band: {[p['name'] for p in w.people]}")
 
     # Simulate ~20 game-days (1 step = 1 real sec = 24 game-sec → 3600 steps/game-day).
     # Watch populations and vegetation across a couple of season turns.
     days = 8
     steps = days * 3600
-    print("\n  day  season   weather  rabbit deer wolf  vegtiles  ms/step")
+    print("\n  day  season   weather  rabbit deer wolf  ppl  vegtiles  ms/step")
     t0 = time.time()
     last_day = -1
     day_t0 = t0
@@ -790,8 +1026,27 @@ if __name__ == "__main__":
             day_t0 = now
             print(f"  {w.day():>3}  {w.season():<7}  {w.weather:<7}  "
                   f"{an.get('rabbit',0):>6} {an.get('deer',0):>4} {an.get('wolf',0):>4}  "
-                  f"{sum(c['vegetation'].values()):>8}  {ms:>6.2f}", flush=True)
+                  f"{c['people']:>3}  {sum(c['vegetation'].values()):>8}  {ms:>6.2f}", flush=True)
     sim_s = time.time() - t0
+    if w.people:
+        sample = w.people[0]
+        print(f"  survivor sample — {sample['name']}: hunger {sample['hunger']:.2f} "
+              f"thirst {sample['thirst']:.2f} fatigue {sample['fatigue']:.2f} hp {sample['hp']:.2f} "
+              f"inv {sample['inv']} doing '{sample['action']}'")
+
+    # Death test: a person stranded on barren rock (no food/water in reach) must die.
+    rock = np.argwhere(w.biome == B["rock"])
+    if len(rock):
+        ry, rx = rock[0]
+        w._add_person(int(rx), int(ry), name="Stranded")
+        before = len(w.people)
+        for _ in range(3 * 3600):                  # up to 3 game-days
+            w.step(dt_real_sec=1.0)
+            if not any(p["name"] == "Stranded" for p in w.people):
+                break
+        gone = not any(p["name"] == "Stranded" for p in w.people)
+        print(f"  death test: stranded person {'died as expected' if gone else 'SURVIVED (unexpected)'} "
+              f"(pop {before}->{len(w.people)})")
     print(f"\nsimulated {steps} steps in {sim_s:.2f}s "
           f"({steps/sim_s:.0f} steps/s, {sim_s*1000/steps:.2f} ms/step avg)")
 
@@ -800,8 +1055,10 @@ if __name__ == "__main__":
     w.add_water(40, 40, 4, "lake", by="test")
     w.spawn_animal(64, 64, "deer", n=5, by="test")
     w.plant(64, 64, "oak", radius=3, by="test")
+    w.spawn_person(64, 64, n=3, by="test")
     snap = w.snapshot()
     print(f"\nsnapshot ok: {len(snap['layers'])} layers, {len(snap['animals'])} animals, "
+          f"{len(snap['people'])} people, "
           f"~{sum(len(v) for v in snap['layers'].values())//1024} KB packed")
 
     w.save()

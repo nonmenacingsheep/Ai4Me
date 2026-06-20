@@ -1766,6 +1766,10 @@ def _apply_world_action(spec: dict, by: str) -> str:
         if tool == "plant":
             w.plant(x, y, str(spec.get("species", "")).strip().lower(), r, by=by)
             return f"{by} planted {spec.get('species')} at ({x},{y})"
+        if tool == "person":
+            n = int(_wnum(spec.get("n", 1)))
+            w.spawn_person(x, y, n, by=by)
+            return f"{by} brought {n} {'person' if n == 1 else 'people'} into the world at ({x},{y})"
     except Exception as e:
         print(f"[world] action {tool!r} failed: {e}")
     return ""
@@ -1778,6 +1782,7 @@ _WORLD_ARGS = {
     "water":  ("x", "y", "r", "kind"),
     "spawn":  ("x", "y", "species", "n"),
     "plant":  ("x", "y", "species", "r"),
+    "person": ("x", "y", "n"),
 }
 
 
@@ -2089,6 +2094,7 @@ _HIDDEN_SPECS = [
     ("water", "<water>", "</water>", False),           # World: lay river/lake/ocean
     ("spawn", "<spawn>", "</spawn>", False),           # World: add wildlife
     ("plant", "<plant>", "</plant>", False),           # World: seed flora
+    ("person", "<person>", "</person>", False),        # World: bring people into being
     ("whisper", "<whisper>", "</whisper>", False),     # World: nudge a soul (no-op until people)
 ]
 
@@ -2285,7 +2291,7 @@ class _HiddenBlockFilter:
 
     def world_requests(self) -> list[tuple[str, str]]:
         """God-actions she took on the World this turn, as (tool, args-text) pairs."""
-        tools = ("sculpt", "biome", "water", "spawn", "plant")
+        tools = ("sculpt", "biome", "water", "spawn", "plant", "person")
         return [(n, t.strip()) for n, t in self.captured if n in tools and t.strip()]
 
     def decision_blocks(self) -> str:
