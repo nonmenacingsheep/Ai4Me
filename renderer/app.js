@@ -3583,6 +3583,24 @@ const WPLANT_TINT = {
   cactus: [80, 140, 90], reeds: [95, 155, 80], palm: [50, 125, 70],
 };
 const WANIMAL_RGB = { rabbit: [232, 230, 224], deer: [201, 160, 106], wolf: [86, 92, 104] };
+// Rendered footprint in TILES per entity (bigger beasts read as ~2×2 = 4 tiles, a
+// rabbit as 1). People share the large size. New large creatures should be added at 2.
+const WANIMAL_SPAN = { rabbit: 1, deer: 2, wolf: 2 };
+const WPERSON_SPAN = 2;
+// Trees drawn as ~2×2-tile canopy sprites (per the requested sizing) when zoomed in,
+// sampled from the crisp detail window's veg layer. Darker than the terrain tint so
+// they read as foliage above the ground.
+const WTREE_RGB = { oak: [34, 82, 38], pine: [26, 66, 46], palm: [40, 112, 64] };
+const WTREE_SPAN = 2;
+// Placed-block colours, keyed by block code (1 floor, 2 wall, 3 door, 4 window, 5 fence).
+const WBLOCK_RGB = {
+  1: [171, 132, 86], 2: [120, 82, 45], 3: [196, 158, 92], 4: [150, 196, 214],
+  5: [150, 120, 78], 6: [78, 138, 64],   // 6 = leaf panel (green)
+};
+const WORE_RGB = {
+  copper_ore: [200, 118, 64], tin_ore: [206, 210, 214], iron_ore: [90, 92, 100],
+  gold_ore: [226, 196, 78], coal: [40, 40, 46],
+};
 
 const WORLD = {
   data: null, base: null, baseCtx: null,
@@ -3624,6 +3642,8 @@ function setWorld(s) {
     ovw: s.ovw || s.w, ovh: s.ovh || s.h, ovStep: s.ov_step || 1,
     biomes: s.biomes, plants: s.plants || {}, animals: s.animals || [],
     people: s.people || [], structures: s.structures || [],
+    blocks: s.blocks || [], roofs: s.roofs || [], sites: s.sites || [],
+    ore: s.ore || [], blockNames: s.block_names || {},
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -3699,7 +3719,9 @@ function buildDetailCanvas(v) {
     }
   }
   cx.putImageData(img, 0, 0);
-  return { canvas: cvs, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, vw, vh };
+  // Keep the veg layer + step so renderWorld can draw crisp tree-canopy sprites on top.
+  return { canvas: cvs, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, vw, vh,
+           step: v.step || 1, vegSp: vs, vegGrowth: vg };
 }
 
 // When zoomed in enough that the overview looks blocky, stream a crisp window of the
@@ -3780,53 +3802,117 @@ function renderWorld() {
     ctx.drawImage(dt.canvas, 0, 0, dt.vw, dt.vh,
       (dt.x0 - cam.camX) * z, (dt.y0 - cam.camY) * z, (dt.x1 - dt.x0) * z, (dt.y1 - dt.y0) * z);
   }
-  // Wildlife as crisp pixel sprites (squares scaled with zoom), culled to view.
-  for (const a of d.animals) {
-    const sx = (a.x - cam.camX) * z, sy = (a.y - cam.camY) * z;
-    if (sx < -z || sy < -z || sx > cv.width || sy > cv.height) continue;
-    const c = WANIMAL_RGB[a.sp] || [220, 220, 220];
-    const s = Math.max(2.5, z * (a.sp === 'wolf' ? 0.9 : 0.62));
+  const onScreen = (sx, sy, span) => !(sx < -span * z || sy < -span * z || sx > cv.width || sy > cv.height);
+  // Trees as ~2×2 canopy sprites, drawn from the detail window's veg layer when fully
+  // zoomed in (each detail cell = 1 tile). Above terrain, below entities/buildings.
+  if (d.detail && d.detail.step === 1 && z >= 6) {
+    const dt = d.detail, vs = dt.vegSp, vg = dt.vegGrowth;
+    for (let cy = 0; cy < dt.vh; cy++) {
+      for (let cx2 = 0; cx2 < dt.vw; cx2++) {
+        const sp = vs[cy * dt.vw + cx2];
+        const name = sp ? d.plants[sp] : null;
+        const col = name && WTREE_RGB[name];
+        if (!col) continue;
+        const sx = (dt.x0 + cx2 - cam.camX) * z, sy = (dt.y0 + cy - cam.camY) * z;
+        if (!onScreen(sx, sy, WTREE_SPAN)) continue;
+        const grow = 0.62 + 0.38 * (vg[cy * dt.vw + cx2] / 255);
+        const rad = WTREE_SPAN * z * 0.5 * grow;
+        const ccx = sx + z / 2, ccy = sy + z / 2;
+        ctx.fillStyle = 'rgba(40,28,16,0.9)';                 // short trunk
+        ctx.fillRect(ccx - z * 0.08, ccy, z * 0.16, rad * 0.8);
+        ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`; // canopy
+        ctx.beginPath();
+        if (name === 'pine') {                                // conifer: a talled triangle
+          ctx.moveTo(ccx, ccy - rad); ctx.lineTo(ccx + rad * 0.8, ccy + rad * 0.6);
+          ctx.lineTo(ccx - rad * 0.8, ccy + rad * 0.6); ctx.closePath();
+        } else {
+          ctx.arc(ccx, ccy, rad, 0, 6.283);
+        }
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+    }
+  }
+  // Ore deposits: a small gem on the rock once you've zoomed in enough to mine-scout.
+  if (z >= 3) {
+    for (const o of (d.ore || [])) {
+      const sx = (o.x - cam.camX) * z, sy = (o.y - cam.camY) * z;
+      if (!onScreen(sx, sy, 1)) continue;
+      const c = WORE_RGB[o.kind] || [200, 200, 200];
+      const s = Math.max(2, z * 0.5), ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;
+      ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+      ctx.fillRect(ox, oy, s, s);
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 1;
+      ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
+    }
+  }
+  // Placed building tiles: floors first (so walls/doors sit on top), then the shell.
+  const drawBlock = (bx, by, code) => {
+    const sx = (bx - cam.camX) * z, sy = (by - cam.camY) * z;
+    if (!onScreen(sx, sy, 1)) return;
+    const c = WBLOCK_RGB[code] || [150, 150, 150];
+    ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+    ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
+    if (code === 2 || code === 4) {                          // wall / window: dark mortar lines
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 1;
+      ctx.strokeRect(sx + 0.5, sy + 0.5, z - 1, z - 1);
+    }
+    if (code === 3) {                                        // door: a lighter slab + handle gap
+      ctx.fillStyle = 'rgba(60,40,20,0.85)';
+      ctx.fillRect(sx + z * 0.2, sy + z * 0.15, z * 0.6, z * 0.7);
+    }
+  };
+  for (const b of (d.blocks || [])) if (b[2] === 1) drawBlock(b[0], b[1], b[2]);
+  for (const b of (d.blocks || [])) if (b[2] !== 1) drawBlock(b[0], b[1], b[2]);
+  // Legacy point-shelters (pre tile-building saves): a small hut under people.
+  for (const st of (d.structures || [])) {
+    const sx = (st.x - cam.camX) * z, sy = (st.y - cam.camY) * z;
+    if (!onScreen(sx, sy, 1)) continue;
+    const s = Math.max(4, z * 0.92);
     const ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;
+    ctx.fillStyle = '#8a5a33'; ctx.fillRect(ox, oy + s * 0.42, s, s * 0.58);
+    ctx.fillStyle = '#5c3a20';
+    ctx.beginPath();
+    ctx.moveTo(ox - s * 0.12, oy + s * 0.46); ctx.lineTo(ox + s / 2, oy);
+    ctx.lineTo(ox + s * 1.12, oy + s * 0.46); ctx.closePath(); ctx.fill();
+  }
+  // Wildlife as crisp pixel sprites, sized per species (deer/wolf ≈ 2×2 tiles, rabbit 1).
+  for (const a of d.animals) {
+    const span = WANIMAL_SPAN[a.sp] || 1;
+    const sx = (a.x - cam.camX) * z, sy = (a.y - cam.camY) * z;
+    if (!onScreen(sx, sy, span)) continue;
+    const c = WANIMAL_RGB[a.sp] || [220, 220, 220];
+    const s = Math.max(2.5, z * span * 0.82);
+    const ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;     // centred on the entity's tile
     ctx.fillStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
     ctx.fillRect(ox, oy, s, s);
     ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1;
     ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
   }
-  // Structures: a small hut (wall + roof), drawn under people so folk stand in front.
-  for (const st of (d.structures || [])) {
-    const sx = (st.x - cam.camX) * z, sy = (st.y - cam.camY) * z;
-    if (sx < -z || sy < -z || sx > cv.width || sy > cv.height) continue;
-    const s = Math.max(4, z * 0.92);
-    const ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(ox - 1, oy - 1, s + 2, s + 2);
-    ctx.fillStyle = '#8a5a33';                              // wattle wall
-    ctx.fillRect(ox, oy + s * 0.42, s, s * 0.58);
-    ctx.fillStyle = '#5c3a20';                              // thatch roof
-    ctx.beginPath();
-    ctx.moveTo(ox - s * 0.12, oy + s * 0.46);
-    ctx.lineTo(ox + s / 2, oy);
-    ctx.lineTo(ox + s * 1.12, oy + s * 0.46);
-    ctx.closePath();
-    ctx.fill();
-  }
-  // People: a small two-tone figure (body + head), tinted by health so the eye
-  // catches anyone in trouble. Drawn above wildlife.
+  // People: a two-tone figure (body + head) ≈ 2 tiles tall, tinted by health.
   for (const p of (d.people || [])) {
+    const span = WPERSON_SPAN;
     const sx = (p.x - cam.camX) * z, sy = (p.y - cam.camY) * z;
-    if (sx < -z || sy < -z || sx > cv.width || sy > cv.height) continue;
+    if (!onScreen(sx, sy, span)) continue;
     const hp = p.hp == null ? 1 : p.hp;
-    const body = hp > 0.5 ? '#f2c14e' : '#e0683c';        // gold when well, rust when failing
-    const bw = Math.max(2, z * 0.34), bh = Math.max(3, z * 0.62);
+    const body = hp > 0.5 ? '#f2c14e' : '#e0683c';          // gold when well, rust when failing
+    const bw = Math.max(2, z * span * 0.34), bh = Math.max(3, z * span * 0.62);
     const bx = sx + (z - bw) / 2, by = sy + (z - bh) / 2;
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';                    // outline for contrast on any biome
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
     ctx.fillRect(bx - 1, by - 1, bw + 2, bh + 2);
     ctx.fillStyle = body;
-    ctx.fillRect(bx, by + bh * 0.32, bw, bh * 0.68);       // torso
+    ctx.fillRect(bx, by + bh * 0.32, bw, bh * 0.68);        // torso
     const hr = Math.max(1.2, bw * 0.6);
     ctx.beginPath();
-    ctx.arc(bx + bw / 2, by + hr, hr, 0, 6.283);           // head
-    ctx.fill();
+    ctx.arc(bx + bw / 2, by + hr, hr, 0, 6.283); ctx.fill(); // head
+  }
+  // Thatch roofs last, translucent, so a covered building reads as "indoors" but the
+  // folk sheltering under it still show through faintly.
+  for (const r of (d.roofs || [])) {
+    const sx = (r[0] - cam.camX) * z, sy = (r[1] - cam.camY) * z;
+    if (!onScreen(sx, sy, 1)) continue;
+    ctx.fillStyle = 'rgba(126,94,52,0.5)';
+    ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
   }
 }
 
@@ -3855,6 +3941,8 @@ function worldOnTick(msg) {
     day: msg.day, time: msg.time, season: msg.season,
     weather: msg.weather, animals: msg.animals || [], people: msg.people || [],
     structures: msg.structures || [],
+    blocks: msg.blocks || WORLD.data.blocks || [],
+    roofs: msg.roofs || WORLD.data.roofs || [],
     census: msg.census, version: msg.version,
   });
   if (activeView === 'world') { renderWorld(); updateWorldHud(); }
@@ -3918,7 +4006,15 @@ function worldInspect(x, y) {
     `<br><strong>${p.name}</strong> — ${p.action} · hunger ${pct(p.hunger)}% thirst ${pct(p.thirst)}% ` +
     `rest ${pct(1 - (p.fatigue || 0))}% · health ${pct(p.hp)}%${invStr(p.inv)}`).join('');
   const builds = (d.structures || []).filter(st => st.x === x && st.y === y);
-  const buildLine = builds.map(st => `<br>🛖 ${st.kind}${st.by ? ` (built by ${st.by})` : ''}`).join('');
+  let buildLine = builds.map(st => `<br>🛖 ${st.kind}${st.by ? ` (built by ${st.by})` : ''}`).join('');
+  // Placed tile (wall/door/floor/…), roof, ore deposit, and any construction site here.
+  const blk = (d.blocks || []).find(b => b[0] === x && b[1] === y);
+  if (blk) buildLine += `<br>🧱 ${d.blockNames[blk[2]] || 'block'}` +
+    ((d.roofs || []).some(r => r[0] === x && r[1] === y) ? ' (roofed)' : '');
+  const ore = (d.ore || []).find(o => o.x === x && o.y === y);
+  if (ore) buildLine += `<br>⛏️ ${ore.kind.replace('_', ' ')} deposit`;
+  const site = (d.sites || []).find(s => !s.done && x >= s.ox && y >= s.oy && x < s.ox + 6 && y < s.oy + 6);
+  if (site) buildLine += `<br>🏗️ ${site.name} under construction — ${site.built}/${site.total} tiles (by ${site.by})`;
   ro.innerHTML = `<strong>(${x}, ${y})</strong> · ${biome}<br>` +
     `elevation ${Math.round(d.elevation[i] / 255 * 100)}% · flora: ${flora}` +
     (here.length ? `<br>here: ${here.join(', ')}` : '') + buildLine + folkLine;
@@ -3978,6 +4074,55 @@ function populateWorldTools() {
   WORLD._toolsBuilt = true;
 }
 
+// ── Crafting browser: the 128-recipe registry from GET /api/world/recipes ──────
+async function loadCraftingRecipes() {
+  if (WORLD._catalog || WORLD._catalogLoading) { renderCraftingList(); return; }
+  WORLD._catalogLoading = true;
+  const list = document.getElementById('wcraft-list');
+  if (list) list.innerHTML = '<div class="wcraft-empty">Loading recipes…</div>';
+  try {
+    const j = await (await fetch('/api/world/recipes')).json();
+    WORLD._catalog = j.enabled ? j.catalog : null;
+  } catch (_) { WORLD._catalog = null; }
+  WORLD._catalogLoading = false;
+  renderCraftingList();
+}
+
+function renderCraftingList(filter = '') {
+  const list = document.getElementById('wcraft-list');
+  const cat = WORLD._catalog;
+  if (!list) return;
+  if (!cat) { list.innerHTML = '<div class="wcraft-empty">Recipes unavailable.</div>'; return; }
+  const items = cat.items || {};
+  const nameOf = (id) => (items[id] && items[id].name) || id.replace(/_/g, ' ');
+  const iconOf = (id) => (items[id] && items[id].icon) || '▪';
+  // Group by station (handheld first), each sorted by tier then name.
+  const order = ['', 'workbench', 'campfire', 'kiln', 'furnace', 'forge', 'loom', 'tannery', 'anvil', 'well'];
+  const label = { '': 'By hand', workbench: 'Workbench', campfire: 'Campfire', kiln: 'Kiln',
+    furnace: 'Furnace', forge: 'Forge', loom: 'Loom', tannery: 'Tannery', anvil: 'Anvil', well: 'Well' };
+  const groups = {};
+  for (const r of cat.recipes) {
+    if (filter && !(nameOf(r.out).toLowerCase().includes(filter) || r.out.includes(filter))) continue;
+    (groups[r.station || ''] = groups[r.station || ''] || []).push(r);
+  }
+  let html = '';
+  for (const st of order) {
+    const rs = groups[st]; if (!rs || !rs.length) continue;
+    rs.sort((a, b) => a.tier - b.tier || nameOf(a.out).localeCompare(nameOf(b.out)));
+    html += `<div class="wcraft-grp">${label[st] || st} <span>${rs.length}</span></div>`;
+    for (const r of rs) {
+      const ins = Object.entries(r.inp).map(([k, n]) => `${n}× ${nameOf(k)}`).join(', ');
+      const tool = r.tool ? ` · needs ${r.tool}` : '';
+      const qty = r.qty > 1 ? ` ×${r.qty}` : '';
+      html += `<div class="wcraft-row"><span class="wcraft-ic">${iconOf(r.out)}</span>` +
+        `<span class="wcraft-main"><b>${nameOf(r.out)}${qty}</b>` +
+        `<span class="wcraft-sub">${ins}${tool}</span></span>` +
+        `<span class="wcraft-tier">T${r.tier}</span></div>`;
+    }
+  }
+  list.innerHTML = html || '<div class="wcraft-empty">No recipes match.</div>';
+}
+
 function bindWorld() {
   // The sidebar toggle lives outside the world view — bind it independently so it
   // works even before the World tab is ever opened.
@@ -4004,8 +4149,14 @@ function bindWorld() {
 
   // Accordion menu headers.
   panel?.querySelectorAll('.wmenu-head').forEach(head => {
-    head.addEventListener('click', () => head.parentElement.classList.toggle('open'));
+    head.addEventListener('click', () => {
+      const sec = head.parentElement;
+      const open = sec.classList.toggle('open');
+      if (open && sec.dataset.menu === 'crafting') loadCraftingRecipes();   // lazy-load on first open
+    });
   });
+  const csearch = document.getElementById('wcraft-search');
+  csearch?.addEventListener('input', () => renderCraftingList(csearch.value.trim().toLowerCase()));
 
   // Tool selection (delegated — covers both static and generated buttons).
   panel?.addEventListener('click', (ev) => {

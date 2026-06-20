@@ -3173,6 +3173,27 @@ body.passthrough .pt-hint {
 .wopt { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-dim); padding: 4px 2px; }
 .wopt input[type=range] { flex: 1; accent-color: #6fcf97; }
 
+/* Crafting recipe browser */
+.wcraft-search { width: 100%; box-sizing: border-box; margin-bottom: 6px; padding: 5px 8px;
+  font-size: 11.5px; color: var(--text); background: rgba(12,18,16,0.85);
+  border: 1px solid rgba(120,200,160,0.22); border-radius: 6px; outline: none; }
+.wcraft-search:focus { border-color: rgba(120,200,160,0.5); }
+.wcraft-list { max-height: 46vh; overflow-y: auto; margin-top: 4px; }
+.wcraft-empty { font-size: 11px; color: var(--text-dim); padding: 8px 2px; }
+.wcraft-grp { font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+  color: #8fd3ad; margin: 8px 0 3px; display: flex; justify-content: space-between; }
+.wcraft-grp span { color: var(--text-dim); }
+.wcraft-row { display: flex; align-items: center; gap: 7px; padding: 4px 4px;
+  border-radius: 5px; }
+.wcraft-row:hover { background: rgba(120,200,160,0.08); }
+.wcraft-ic { font-size: 14px; width: 18px; text-align: center; flex: none; }
+.wcraft-main { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.wcraft-main b { font-size: 11.5px; color: var(--text); font-weight: 600; }
+.wcraft-sub { font-size: 10px; color: var(--text-dim); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.wcraft-tier { font-size: 9.5px; color: #8fd3ad; background: rgba(120,200,160,0.12);
+  border-radius: 4px; padding: 1px 5px; flex: none; }
+
 /* Sidebar collapse */
 .sidebar-toggle {
   position: fixed; top: 14px; left: calc(var(--sidebar-w) - 13px); z-index: 50;

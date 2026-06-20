@@ -29,6 +29,7 @@ import projects as projects_store
 import company as company_store
 import room as room_store
 import world as world_store
+import crafting as crafting_store
 import files as files_store
 import events as events_store
 import spotify as spotify_store
@@ -572,7 +573,7 @@ async def company_engine_loop():
 # Tick 4×/second-ish: movement happens once per tick, so a brisk cadence makes the
 # world feel alive (entities visibly move, the map updates smoothly). Needs/energy/
 # ecology are dt-scaled, so their balance is identical regardless of this rate.
-WORLD_STEP_SECONDS = float(os.getenv("AITHA_WORLD_STEP", "0.5"))   # real seconds per tick
+WORLD_STEP_SECONDS = float(os.getenv("AITHA_WORLD_STEP", "0.167"))   # real seconds per tick (~6/s)
 WORLD_SAVE_EVERY = int(os.getenv("AITHA_WORLD_SAVE_EVERY", "120"))  # ticks between saves (~1/min)
 
 
@@ -940,6 +941,16 @@ async def api_world_view(x0: int = 0, y0: int = 0, x1: int = 0, y1: int = 0, ste
         return {"enabled": False}
     w = await asyncio.to_thread(world_store.get_world)
     return {"enabled": True, "view": await asyncio.to_thread(w.view, x0, y0, x1, y1, step)}
+
+
+@app.get("/api/world/recipes")
+async def api_world_recipes():
+    """The crafting registry: every item, raw material, station and the 128 recipes.
+    Static content (no world state), but gated behind the World capability so it only
+    surfaces when the feature is on. Used by the god-tools UI and the future mind."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"enabled": False}
+    return {"enabled": True, "catalog": crafting_store.catalog()}
 
 
 @app.post("/api/world/action")

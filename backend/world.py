@@ -29,6 +29,8 @@ import uuid
 
 import numpy as np
 
+import crafting   # item/recipe registry (content for gods, UI & the future mind)
+
 # ─── Dimensions & clock ───────────────────────────────────────────────────
 # A large world (2048×2048 ≈ 4.2M tiles) that still runs smoothly because we never
 # touch the whole grid on a tick. The cheap per-tick work (movement) is bounded by
@@ -43,7 +45,7 @@ H = 2048
 # satisfy. A save stamped with a different (or missing) schema is treated as
 # incompatible and regenerated on load, so a world written by a broken/older
 # build self-heals on the next launch instead of staying frozen forever.
-SCHEMA = 3
+SCHEMA = 4
 CHUNK = 64                      # tiles per chunk → (W//CHUNK)² dormancy bookkeeping cells
 NCHUNK = W // CHUNK
 SEA_LEVEL = 0.36                # elevation below this is ocean
@@ -142,7 +144,11 @@ MATE_RADIUS = 6                 # a mate within this range is close enough to br
 # (1 game-year == DAYS_PER_YEAR == 60 game-days).
 PERSON = dict(
     vision=8, speed=1, max_age=70 * DAYS_PER_YEAR,
-    hunger_rate=0.00045, thirst_rate=0.00093, fatigue_rate=0.00069,
+    # Survival spans are calibrated in game-DAYS (1 day = 1440 game-min): a healthy
+    # person lasts ~3 days without water and ~3 weeks without food. A need rises to
+    # 1.0 over that span (thirst ~2.3 days, hunger ~21 days), after which starve_dmg
+    # erodes hp over a further ~0.9 day → sated→dead ≈ 3 days (thirst) / ~22 (hunger).
+    hunger_rate=0.000033, thirst_rate=0.0003, fatigue_rate=0.00069,
     t_hunger=0.50, t_thirst=0.45, t_rest=0.70,        # need thresholds to act on
     eat_bite=0.05, food_value=2.5,                     # graze speed / hunger restored per unit
     drink_rate=0.05, rest_rate=0.04,                   # thirst/fatigue relieved per min
@@ -166,13 +172,84 @@ WOOD_PLANTS = {"oak", "pine", "palm"}       # trees that yield wood when felled
 WOOD_IDS = [sp for sp, info in PLANTS.items() if info["name"] in WOOD_PLANTS]
 BUILD = dict(
     chop_growth_min=0.35, chop_take=0.5,    # a chop needs a grown tree; removes this much growth
-    chop_yield=1, axe_bonus=1,              # wood gained per chop; an axe adds this much
+    chop_yield=2, axe_bonus=2,              # wood gained per chop; an axe adds this much (→4 w/ axe)
     mine_yield=1, stone_stock=4,            # stone per mine; how much to stockpile once sheltered
     axe_wood=2,                             # crude axe recipe
     shelter_wood=6,                         # a brush/wood shelter
     rest_sheltered_mult=2.0,                # rest this much faster in your own shelter
 )
 STRUCT_KINDS = ("shelter",)
+
+# ─── Tile building (Phase 3.5) — top-down "blocks" ───────────────────────────
+# People raise REAL buildings the Minecraft way: a building is a footprint of
+# individual placed tiles — walls, a door, a floor, and a thatch roof — laid one
+# block per build-action from a BLUEPRINT. Blueprints are the "design"; built-ins
+# live here, but the format is plain data so the future LLM "mind" can author new
+# ones (a chicken coop, a smithy) and drop them into this same library — the
+# Voyager "skill library" idea applied to architecture. The rule-body just walks
+# whatever blueprint it's given. Blocks live in a sparse layer (self.blocks);
+# roofs in self.roofs; an in-progress building is a "site" with per-tile tasks.
+BLOCK_EMPTY, BLOCK_FLOOR, BLOCK_WALL, BLOCK_DOOR, BLOCK_WINDOW, BLOCK_FENCE, BLOCK_LEAF = 0, 1, 2, 3, 4, 5, 6
+BLOCK_NAMES = {BLOCK_FLOOR: "floor", BLOCK_WALL: "wall", BLOCK_DOOR: "door",
+               BLOCK_WINDOW: "window", BLOCK_FENCE: "fence", BLOCK_LEAF: "leaves"}
+# Blueprint glyphs → block codes (rows read top-down, like a tiny map). "C" is a
+# special core: no block is placed, but the tile is roofed and becomes the home —
+# used for the open-fronted leaf lean-to whose centre you walk into.
+BLOCK_CHARS = {".": BLOCK_EMPTY, "F": BLOCK_FLOOR, "W": BLOCK_WALL,
+               "D": BLOCK_DOOR, "O": BLOCK_WINDOW, "#": BLOCK_FENCE, "L": BLOCK_LEAF}
+GLYPH_CORE = "C"
+# Material a single block costs (item, qty). Wood/fiber/leaf based so a band can
+# build straight from what it forages, no workshop required.
+BLOCK_COST = {BLOCK_FLOOR: ("wood", 1), BLOCK_WALL: ("wood", 2), BLOCK_DOOR: ("wood", 2),
+              BLOCK_WINDOW: ("wood", 1), BLOCK_FENCE: ("wood", 1), BLOCK_LEAF: ("leaves", 1)}
+ROOF_COST = ("fiber", 2)                 # default thatch over each sheltered tile
+SOLID_BLOCKS = {BLOCK_WALL, BLOCK_LEAF}  # tiles people can't walk through (doors/cores are open)
+
+# Built-in blueprints. layout = rows of glyphs; roof=True thatches every interior
+# (floor/door) tile once the shell is up. "insulation" (0..1) is how well it holds
+# heat/cold — the leaf lean-to is a quick, draughty starter (poor insulation, so a
+# tiny rest bonus), a timber hut/cabin is snug. The format is plain data, so the
+# future LLM "mind" can author new ones (a chicken coop, a smithy) and drop them in.
+BLUEPRINTS = {
+    # A leaf lean-to: three leaf panels in a triangle (apex + two sides), open at the
+    # base to walk into, with a leaf roof over the core. Cheap, fast, barely insulating.
+    "leaf_shelter": dict(name="Leaf Shelter", roof=False, insulation=0.12,
+                         roof_cost=("leaves", 1), layout=[
+        ".L.",
+        "LCL",
+    ]),
+    "hut": dict(name="Hut", roof=True, insulation=1.0, layout=[
+        "WDW",
+        "WFW",
+        "WWW",
+    ]),
+    "cabin": dict(name="Cabin", roof=True, insulation=1.0, layout=[
+        "WWDWW",
+        "WFFFW",
+        "WFFFW",
+        "WFFFW",
+        "WWWWW",
+    ]),
+}
+
+# ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
+# The raws the crafting registry (crafting.py) consumes are drawn from the living
+# map, each gated by the right tool (see crafting.RAW): fiber from grasses, clay
+# from waterside lowland, sand from beach/desert, flint from bare rock, and metal
+# ORES from scattered deposits in hill/mountain rock. Wood (logs) already comes
+# from felling trees. Ore deposits are a small sparse node list so a 4M-tile map
+# costs nothing; the band must explore the highlands to find them.
+FIBER_PLANTS = {"grass", "shrub", "reeds"}
+FIBER_IDS = [sp for sp, info in PLANTS.items() if info["name"] in FIBER_PLANTS]
+# Leaves come off trees & shrubs in armfuls — gathered fast, several per pull, and a
+# person can lug a big bundle. They build the quick leaf shelter (but insulate poorly).
+LEAF_PLANTS = {"oak", "pine", "palm", "shrub"}
+LEAF_IDS = [sp for sp, info in PLANTS.items() if info["name"] in LEAF_PLANTS]
+LEAF_GATHER = 3                          # leaves gained per pull (vs. 1 for fiber)
+LEAF_CAP = 24                            # a person can carry a big bundle of leaves
+ORE_KINDS = ("copper_ore", "tin_ore", "iron_ore", "gold_ore", "coal")
+ORE_WEIGHTS = (0.30, 0.18, 0.30, 0.07, 0.15)
+ORE_NODES_PER = 1_000_000               # ~1 deposit per this many tiles
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -232,6 +309,11 @@ class World:
         self.animals: list[dict] = []
         self.people: list[dict] = []     # Phase 2 — simulated folk (body only, no LLM yet)
         self.structures: list[dict] = [] # Phase 3 — things people build (shelters, …)
+        self.blocks: dict[tuple[int, int], int] = {}   # sparse placed tiles (x,y)->block code
+        self.roofs: set[tuple[int, int]] = set()       # tiles thatched over (rendered above)
+        self.sites: list[dict] = []      # buildings under construction (blueprint + per-tile tasks)
+        self.ore_nodes: list[dict] = []  # scattered metal/coal deposits to mine
+        self._ore_index: dict[tuple[int, int], dict] = {}  # (x,y)->node, rebuilt on load/seed
         self.log: list[dict] = []        # recent god actions / notable events
         self.version = 0                 # bumped on any mutation, for render diffing
         self.rng = np.random.default_rng()
@@ -284,6 +366,7 @@ class World:
         self._origin = self._choose_origin()
         self._seed_grove(self._origin)          # a copse so the band has wood within reach
         self._seed_initial_wildlife(count=340, center=self._origin, radius=600)
+        self._seed_ore_nodes()
         self._seed_initial_people(count=7, center=self._origin)
 
         self.clock = 8 * 60.0            # start at 08:00 on day 0
@@ -309,6 +392,28 @@ class World:
         self.veg_sp[sl][place] = sp
         gr = self.veg_growth[sl]
         gr[place] = np.maximum(gr[place], 0.6)         # mature → choppable right away
+
+    def _seed_ore_nodes(self):
+        """Scatter mineable metal/coal deposits across hill & mountain rock. A small
+        sparse list (≈ W*H / ORE_NODES_PER nodes) so the vast map costs nothing; the
+        band has to explore the highlands to strike copper or iron."""
+        self.ore_nodes = []
+        rock = np.argwhere(np.isin(self.biome, [B["mountain"], B["rock"]])
+                           & (self.water == WATER_NONE))
+        if not len(rock):
+            self._rebuild_ore_index()
+            return
+        n = max(8, (W * H) // ORE_NODES_PER)
+        picks = self.rng.choice(len(rock), size=min(n, len(rock)), replace=False)
+        for idx in picks:
+            ry, rx = rock[idx]
+            kind = str(self.rng.choice(ORE_KINDS, p=ORE_WEIGHTS))
+            self.ore_nodes.append({"x": int(rx), "y": int(ry), "kind": kind,
+                                   "amount": int(self.rng.integers(8, 25))})
+        self._rebuild_ore_index()
+
+    def _rebuild_ore_index(self):
+        self._ore_index = {(n["x"], n["y"]): n for n in self.ore_nodes}
 
     def _choose_origin(self):
         """Pick a hospitable founding spot near both water AND woodland, so the band can
@@ -808,16 +913,17 @@ class World:
             # Perception is a SMALL window around this person (vision-sized), so people
             # cost stays the same whether the map is 128² or 2048². lx,ly = the person's
             # position inside the window; masks are indexed in window coords.
-            edible, drinkable, tree, stone, lx, ly, wx0, wy0 = self._perceive(x, y)
+            edible, drinkable, tree, stone, fiber, leaf, lx, ly, wx0, wy0 = self._perceive(x, y)
             # Remember where resources are, so a future need can be navigated to rather
             # than stumbled upon. (A body-level memory; the LLM "mind" can keep richer
             # ones later.) Only overwrite when something is actually in sight.
             known = p["known"]
-            for key, mask in (("water", drinkable), ("food", edible), ("wood", tree), ("stone", stone)):
+            for key, mask in (("water", drinkable), ("food", edible), ("wood", tree),
+                              ("stone", stone), ("fiber", fiber), ("leaves", leaf)):
                 loc = self._nearest_loc(mask, lx, ly, wx0, wy0)
                 if loc:
                     known[key] = loc
-            action, movedir = self._person_decide(p, edible, drinkable, tree, stone, night, lx, ly)
+            action, movedir = self._person_decide(p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly)
             p["action"] = action
             if action == "eat":
                 g = float(self.veg_growth[y, x])
@@ -831,9 +937,12 @@ class World:
             elif action == "drink":
                 p["thirst"] = max(0.0, p["thirst"] - PERSON["drink_rate"] * dt_game_min)
             elif action == "rest":
-                # A sheltered person resting at home recovers faster.
-                mult = (BUILD["rest_sheltered_mult"]
-                        if (p.get("home_struct") and (x, y) == tuple(p["home"])) else 1.0)
+                # A sheltered person resting at home recovers faster — but only as well as
+                # their home insulates (a leaf lean-to barely helps; a timber hut is snug).
+                mult = 1.0
+                if p.get("home_struct") and (x, y) == tuple(p["home"]):
+                    insul = p.get("insul", 1.0)
+                    mult = 1.0 + (BUILD["rest_sheltered_mult"] - 1.0) * insul
                 p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
@@ -852,18 +961,28 @@ class World:
             elif action == "mine":
                 if stone[ly, lx]:
                     p["inv"]["stone"] = p["inv"].get("stone", 0) + BUILD["mine_yield"]
+            elif action == "gather_fiber":
+                g = float(self.veg_growth[y, x])
+                if fiber[ly, lx] and g > 0.20 and p["inv"].get("fiber", 0) < PERSON["inv_cap"]:
+                    self.veg_growth[y, x] = max(0.0, g - 0.25)
+                    p["inv"]["fiber"] = p["inv"].get("fiber", 0) + 1
+            elif action == "gather_leaves":
+                g = float(self.veg_growth[y, x])
+                if leaf[ly, lx] and g > 0.25 and p["inv"].get("leaves", 0) < LEAF_CAP:
+                    self.veg_growth[y, x] = max(0.0, g - 0.12)   # stripping leaves barely dents the plant
+                    p["inv"]["leaves"] = p["inv"].get("leaves", 0) + LEAF_GATHER
             elif action == "craft":
                 if p["inv"].get("axe", 0) < 1 and p["inv"].get("wood", 0) >= BUILD["axe_wood"]:
                     p["inv"]["wood"] -= BUILD["axe_wood"]
                     p["inv"]["axe"] = 1
                     self._note("craft", f"{p['name']} crafted a crude axe.")
-            elif action == "build":
-                if p.get("home_struct") is None and p["inv"].get("wood", 0) >= BUILD["shelter_wood"]:
-                    p["inv"]["wood"] -= BUILD["shelter_wood"]
-                    p["home_struct"] = self._add_structure("shelter", x, y, by=p["name"])
-                    p["home"] = (x, y)
+            elif action == "found_site":
+                self._found_site(p)
+            elif action == "build_block":
+                self._build_next_block(p)
             # Seeking and wandering move the body; acting-in-place does not.
-            if action in ("seek_food", "seek_water", "seek_wood", "seek_stone", "haul", "wander"):
+            if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
+                          "seek_fiber", "seek_leaves", "haul", "wander"):
                 self._move_person(p, movedir)
 
             # Health: a maxed need erodes the body; being well-supplied heals it.
@@ -894,13 +1013,15 @@ class World:
         edible = np.isin(vsp, EDIBLE_IDS) & (vgr > 0.12)
         tree = np.isin(vsp, WOOD_IDS) & (vgr > BUILD["chop_growth_min"])
         stone = np.isin(bio, [B["rock"], B["mountain"]]) & (wat == WATER_NONE)
+        fiber = np.isin(vsp, FIBER_IDS) & (vgr > 0.20)            # grasses to pull for thatch/rope
+        leaf = np.isin(vsp, LEAF_IDS) & (vgr > 0.25)             # foliage to strip for a leaf shelter
         watery = wat != WATER_NONE
         drinkable = np.zeros_like(watery)               # land tiles bordering water
         if watery.shape[0] > 2 and watery.shape[1] > 2:
             drinkable[1:-1, 1:-1] = (
                 (watery[:-2, 1:-1] | watery[2:, 1:-1] | watery[1:-1, :-2] | watery[1:-1, 2:])
                 & (wat[1:-1, 1:-1] == WATER_NONE))
-        return edible, drinkable, tree, stone, x - wx0, y - wy0, wx0, wy0
+        return edible, drinkable, tree, stone, fiber, leaf, x - wx0, y - wy0, wx0, wy0
 
     def _nearest_local(self, mask, lx, ly):
         """Step direction toward the nearest True tile in a window mask (centre lx,ly)."""
@@ -948,7 +1069,7 @@ class World:
                 return act_seek, (int(np.sign(kx - x)), int(np.sign(ky - y)))
         return act_seek, self._explore_dir(p)
 
-    def _person_decide(self, p, edible, drinkable, tree, stone, night, lx, ly):
+    def _person_decide(self, p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly):
         """Pick the most pressing body action. Returns (action, movedir|None). Masks are
         window-local; lx,ly is the person's position inside them.
         Priority: thirst → hunger → rest → opportunistic forage → craft/build → wander."""
@@ -975,8 +1096,9 @@ class World:
             return "gather", None
         # Then, when comfortable and daylit, work on the project (axe → shelter → stone)
         # rather than hoarding food beyond the reserve.
-        if (p["hunger"] < 0.5 and p["thirst"] < 0.5 and p["fatigue"] < 0.6 and not night):
-            proj = self._person_build_decide(p, tree, stone, lx, ly)
+        if (p["hunger"] < 0.5 and p["thirst"] < 0.5 and p["fatigue"] < 0.6 and not night
+                and self.clock >= p.get("build_cd", 0)):
+            proj = self._person_build_decide(p, tree, stone, fiber, leaf, lx, ly)
             if proj:
                 return proj
         # Otherwise lay in a little food while standing on a rich patch.
@@ -989,45 +1111,226 @@ class World:
             return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         return "wander", None
 
-    def _person_build_decide(self, p, tree, stone, lx, ly):
-        """The crafting/building drive (a comfortable person's 'project'). Returns an
-        action like build/craft/chop/mine or a seek_* move toward a resource, or None."""
+    def _person_build_decide(self, p, tree, stone, fiber, leaf, lx, ly):
+        """The crafting/building drive (a comfortable person's 'project'). Returns a body
+        action (craft / chop / gather_* / found_site / build_block / haul / a seek_* move
+        toward a resource), or None. People raise a real tile-by-tile building from a
+        blueprint: found the footprint, then forage the materials and lay one tile per turn.
+        The first home is a quick leaf lean-to — the cheapest shelter there is."""
         x, y = p["x"], p["y"]
         inv = p["inv"]
         hx, hy = p["home"]
 
-        def get_wood():
-            # Chop here, else go to wood in sight / remembered / search for a stand of trees.
-            return self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly,
-                              "wood", "chop", "seek_wood")
+        getters = {
+            "wood":   lambda: self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly,
+                                         "wood", "chop", "seek_wood"),
+            "fiber":  lambda: self._seek(p, x, y, bool(fiber[ly, lx]), fiber, lx, ly,
+                                         "fiber", "gather_fiber", "seek_fiber"),
+            "leaves": lambda: self._seek(p, x, y, bool(leaf[ly, lx]), leaf, lx, ly,
+                                         "leaves", "gather_leaves", "seek_leaves"),
+        }
 
         # First project: a crude axe — cheap, and it makes every later chop yield more.
         if inv.get("axe", 0) < 1:
             if inv.get("wood", 0) >= BUILD["axe_wood"]:
                 return "craft", None
-            return get_wood()
-        # Second project: a shelter. Gather wood, carry it home, raise it.
+            return getters["wood"]()
+
+        # Main project: build a home, tile by tile, from a blueprint (a leaf shelter first).
         if p.get("home_struct") is None:
-            if inv.get("wood", 0) >= BUILD["shelter_wood"]:
+            site = self._person_site(p)
+            if site is None:                                   # no footprint yet — lay one at home
                 if abs(hx - x) + abs(hy - y) <= 1:
-                    return "build", None
+                    return "found_site", None
                 return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
-            return get_wood()
-        # Then lay in stone for later (stone houses are the next slice).
+            task = self._site_next_task(site)
+            if task is None:                                   # all tiles placed → finish it
+                self._finish_site(p, site)
+                return None
+            item, qty = task["cost"]
+            if inv.get(item, 0) >= qty:                        # have the material — go lay it
+                if max(abs(task["x"] - x), abs(task["y"] - y)) <= 2:
+                    return "build_block", None
+                return "haul", (int(np.sign(task["x"] - x)), int(np.sign(task["y"] - y)))
+            return getters.get(item, getters["wood"])()
+
+        # Home raised — lay in stone for the next slice (stone houses, workshops).
         if inv.get("stone", 0) < BUILD["stone_stock"]:
             return self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly,
                               "stone", "mine", "seek_stone")
         return None
 
+    # ── tile building: blueprint → site → block placement ───────────────────────
+    def _person_site(self, p):
+        """The person's active (unfinished) construction site, or None."""
+        sid = p.get("site")
+        if not sid:
+            return None
+        for s in self.sites:
+            if s["id"] == sid and not s["done"]:
+                return s
+        return None
+
+    @staticmethod
+    def _site_next_task(site):
+        """The next tile to place (blocks before roofs, in layout order), or None."""
+        for t in site["tasks"]:
+            if not t["done"]:
+                return t
+        return None
+
+    def _blueprint_tasks(self, name, ox, oy):
+        """Turn a blueprint at origin (ox,oy) into placement tasks + the home core tile, or
+        (None, None) if the footprint doesn't fit (off-map or over water). Each task carries
+        its own material cost so blueprints can mix wood, thatch and leaves. Blocks are laid
+        first, then roof tiles. A 'C' core lays no block but is roofed and becomes home."""
+        bp = BLUEPRINTS.get(name)
+        if not bp:
+            return None, None
+        layout = bp["layout"]
+        roof_cost = bp.get("roof_cost", ROOF_COST)
+        blocks, roof, core = [], [], None
+        for dy, row in enumerate(layout):
+            for dx, ch in enumerate(row):
+                tx, ty = ox + dx, oy + dy
+                if ch == GLYPH_CORE:
+                    if not self._in(tx, ty) or self.water[ty, tx] != WATER_NONE:
+                        return None, None
+                    roof.append({"x": tx, "y": ty, "code": int(BLOCK_FLOOR), "layer": "roof",
+                                 "cost": list(roof_cost), "done": False})
+                    core = (tx, ty)
+                    continue
+                code = BLOCK_CHARS.get(ch, BLOCK_EMPTY)
+                if code == BLOCK_EMPTY:
+                    continue
+                if not self._in(tx, ty) or self.water[ty, tx] != WATER_NONE:
+                    return None, None
+                blocks.append({"x": tx, "y": ty, "code": int(code), "layer": "block",
+                               "cost": list(BLOCK_COST[code]), "done": False})
+                if bp.get("roof") and code in (BLOCK_FLOOR, BLOCK_DOOR):
+                    roof.append({"x": tx, "y": ty, "code": int(code), "layer": "roof",
+                                 "cost": list(roof_cost), "done": False})
+        return blocks + roof, core
+
+    def _found_site(self, p, name: str = "leaf_shelter"):
+        """Reserve a building footprint near the person's home. Tries the chosen blueprint
+        (falling back to the always-cheap leaf shelter) over a few offsets so a tree/edge
+        doesn't block it forever; on failure sets a cooldown before retrying."""
+        bx, by = p["home"]
+        cands = [name] + (["leaf_shelter"] if name != "leaf_shelter" else [])
+        for cand in cands:
+            bp = BLUEPRINTS[cand]
+            bw, bh = len(bp["layout"][0]), len(bp["layout"])
+            for off in ((0, 0), (1, 0), (0, 1), (-1, 0), (0, -1), (2, 1), (-2, -1)):
+                ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
+                tasks, core = self._blueprint_tasks(cand, ox, oy)
+                if not tasks:
+                    continue
+                site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
+                        "ox": int(ox), "oy": int(oy), "by": p["name"],
+                        "insul": float(bp.get("insulation", 1.0)),
+                        "tasks": tasks, "done": False, "t": round(self.clock, 1)}
+                self.sites.append(site)
+                p["site"] = site["id"]
+                home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
+                p["home"] = (int(home[0]), int(home[1]))
+                self.version += 1
+                self._note("build", f"{p['name']} marked out a {bp['name'].lower()}.")
+                return
+        p["build_cd"] = self.clock + 720.0      # nowhere to build here — try again later
+
+    def _build_next_block(self, p):
+        """Lay the next blueprint tile if the person is in range and carries the material."""
+        site = self._person_site(p)
+        if not site:
+            return
+        task = self._site_next_task(site)
+        if task is None:
+            self._finish_site(p, site)
+            return
+        if max(abs(task["x"] - p["x"]), abs(task["y"] - p["y"])) > 2:
+            return
+        item, qty = task["cost"]
+        if p["inv"].get(item, 0) < qty:
+            return
+        p["inv"][item] -= qty
+        if p["inv"][item] <= 0:
+            p["inv"].pop(item, None)
+        if task["layer"] == "roof":
+            self.roofs.add((task["x"], task["y"]))
+        else:
+            self.blocks[(task["x"], task["y"])] = task["code"]
+        task["done"] = True
+        self.version += 1
+        if self._site_next_task(site) is None:
+            self._finish_site(p, site)
+
+    def _finish_site(self, p, site):
+        site["done"] = True
+        p["home_struct"] = site["id"]
+        p["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
+        self.version += 1
+        self._note("build", f"{p['name']} finished building a {site['name'].lower()}.")
+
     def _move_person(self, p, direction):
-        """One step (people can't walk onto water). None → a random amble."""
+        """One step (people can't walk onto water or through a solid wall). None → amble."""
         if direction and (direction[0] or direction[1]):
             sx, sy = int(np.sign(direction[0])), int(np.sign(direction[1]))
         else:
             sx, sy = int(self.rng.integers(-1, 2)), int(self.rng.integers(-1, 2))
         nx, ny = p["x"] + sx, p["y"] + sy
-        if self._in(nx, ny) and self.water[ny, nx] == WATER_NONE:
+        if (self._in(nx, ny) and self.water[ny, nx] == WATER_NONE
+                and self.blocks.get((nx, ny)) not in SOLID_BLOCKS):
             p["x"], p["y"] = nx, ny
+
+    # ── live-sim material sourcing (clay/sand/flint/ore beyond wood & fiber) ────
+    def _adjacent_water(self, x, y) -> bool:
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            if self._in(x + dx, y + dy) and self.water[y + dy, x + dx] != WATER_NONE:
+                return True
+        return False
+
+    def material_at(self, x, y):
+        """The sourceable raw on a tile beyond wood/fiber, as (kind, tool_capability) —
+        an ore deposit, clay by the water, beach/desert sand, or flint on bare rock —
+        else (None, None). Feeds crafting.py's smelting/pottery/glass chains."""
+        if not self._in(x, y):
+            return None, None
+        node = self._ore_index.get((x, y))
+        if node and node["amount"] > 0:
+            return node["kind"], "pickaxe"
+        if self.water[y, x] != WATER_NONE:
+            return None, None
+        bio = BIOMES[self.biome[y, x]]
+        if bio in ("grassland", "savanna", "swamp", "beach") and self._adjacent_water(x, y):
+            return "clay", "shovel"
+        if bio in ("beach", "desert"):
+            return "sand", "shovel"
+        if bio in ("rock", "mountain"):
+            return "flint", None
+        return None, None
+
+    def harvest(self, p, by: str = "body"):
+        """Gather whatever raw sits under a person into their pack, if they hold the tool
+        it needs (clay/sand need a shovel, ore a pickaxe; flint is bare-handed). Returns
+        the kind gathered or None. The rule-body sources wood/fiber inline for building;
+        this is the hook the future tech-ladder mind (and gods) use for everything else."""
+        x, y = p["x"], p["y"]
+        kind, tool = self.material_at(x, y)
+        if not kind:
+            return None
+        if tool and tool not in crafting.tool_caps(p.get("inv", {})):
+            return None
+        node = self._ore_index.get((x, y))
+        if node:
+            node["amount"] -= 1
+            if node["amount"] <= 0:
+                self.ore_nodes = [n for n in self.ore_nodes if n is not node]
+                self._rebuild_ore_index()
+        inv = p.setdefault("inv", {})
+        inv[kind] = inv.get(kind, 0) + 1
+        self.version += 1
+        return kind
 
     # ── god actions (UI brush + Aitha directives both call these) ──────────────
     def _in(self, x, y) -> bool:
@@ -1124,6 +1427,22 @@ class World:
             "veg_growth": self._b64u8((self.veg_growth[ys, xs] * 255).astype(np.uint8)),
         }
 
+    def _blocks_payload(self):
+        """Placed tiles as a flat [[x,y,code], …] list (sparse — only built tiles)."""
+        return [[x, y, c] for (x, y), c in self.blocks.items()]
+
+    def _roofs_payload(self):
+        return [[x, y] for (x, y) in self.roofs]
+
+    def _sites_payload(self):
+        """Construction sites with build progress (for inspect / the god-tools UI)."""
+        out = []
+        for s in self.sites:
+            done = sum(1 for t in s["tasks"] if t["done"])
+            out.append({"id": s["id"], "name": s["name"], "ox": s["ox"], "oy": s["oy"],
+                        "by": s["by"], "done": s["done"], "built": done, "total": len(s["tasks"])})
+        return out
+
     def snapshot(self) -> dict:
         """Whole-world overview for the initial render: tile layers DOWNSAMPLED to
         ≤ OVERVIEW_MAX per side (so a 4M-tile map ships as ~64KB, not 20MB). Entities
@@ -1138,10 +1457,15 @@ class World:
             "season": self.season(), "weather": self.weather,
             "biomes": BIOMES, "sea_level": int(SEA_LEVEL * 255),
             "plants": {sp: PLANTS[sp]["name"] for sp in PLANTS},
+            "block_names": BLOCK_NAMES,
             "layers": self._pack_layers(0, H, 0, W, step),
             "animals": self.animals,
             "people": self.people,
             "structures": self.structures,
+            "blocks": self._blocks_payload(),
+            "roofs": self._roofs_payload(),
+            "sites": self._sites_payload(),
+            "ore": [{"x": n["x"], "y": n["y"], "kind": n["kind"]} for n in self.ore_nodes],
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -1167,6 +1491,8 @@ class World:
             "weather": self.weather, "census": self.census(),
             "animals": self.animals, "people": self.people,
             "structures": self.structures,
+            "blocks": self._blocks_payload(),
+            "roofs": self._roofs_payload(),
         }
 
     def census(self) -> dict:
@@ -1174,8 +1500,10 @@ class World:
         for a in self.animals:
             counts[a["sp"]] = counts.get(a["sp"], 0) + 1
         veg = {PLANTS[sp]["name"]: int((self.veg_sp == sp).sum()) for sp in PLANTS}
+        buildings = sum(1 for s in self.sites if s["done"])
         return {"animals": counts, "vegetation": veg, "people": len(self.people),
-                "structures": len(self.structures)}
+                "structures": len(self.structures), "buildings": buildings,
+                "blocks": len(self.blocks)}
 
     def digest(self) -> str:
         """Compact text snapshot for Aitha's prompt, so she perceives the world she
@@ -1189,10 +1517,11 @@ class World:
         if self.people:
             distress = [p["name"] for p in self.people if p["hunger"] > 0.8 or p["thirst"] > 0.8 or p["hp"] < 0.5]
             roster = ", ".join(p["name"] for p in self.people[:8]) + ("…" if len(self.people) > 8 else "")
-            built = len(self.structures)
+            built = c["buildings"]
             ppl = (f"People: {len(self.people)} alive ({roster})"
                    + (f"; struggling: {', '.join(distress[:6])}" if distress else "; all faring well")
-                   + (f". They have raised {built} shelter{'s' if built != 1 else ''}. " if built else ". "))
+                   + (f". They have raised {built} building{'s' if built != 1 else ''}"
+                      f" ({len(self.blocks)} tiles laid). " if built or self.blocks else ". "))
         else:
             ppl = "People: none yet — the land is unpeopled. "
         return (
@@ -1200,6 +1529,12 @@ class World:
             f"Day {self.day()}, {self.time_of_day():.0f}:00, {self.season()}, weather {self.weather}. "
             f"Terrain: {land} land tiles, {water} water. Wildlife: {animals}. Flora: {plants}. "
             f"{ppl}"
+            f"Craft: people can work {len(crafting.RECIPES)} recipes across a tech ladder "
+            f"(wood/stone tools → workbench → cooking → pottery → smelting → metalwork → "
+            f"buildings). They raise real tile-by-tile buildings (walls/door/floor/thatch roof) "
+            f"from blueprints; today they autonomously chase only the first rungs (axe → a leaf "
+            f"lean-to, with sturdier huts/cabins in the blueprint library for later). "
+            f"Ore/clay/sand/flint are mineable across the map (tool-gated) for the higher recipes. "
             f"Recent godly acts: {recent}.\n"
             "You may shape it with hidden directives (stripped from what he sees) — each "
             f"holds space-separated values; coordinates are 0..{W - 1}:\n"
@@ -1229,6 +1564,9 @@ class World:
                 "weather": self.weather, "weather_intensity": self.weather_intensity,
                 "weather_until": self._weather_until, "animals": self.animals,
                 "people": self.people, "structures": self.structures,
+                "blocks": {f"{x},{y}": int(c) for (x, y), c in self.blocks.items()},
+                "roofs": [[x, y] for (x, y) in self.roofs],
+                "sites": self.sites, "ore_nodes": self.ore_nodes,
                 "log": self.log, "version": self.version,
             }
             tmp = PATH_META + ".tmp"
@@ -1269,6 +1607,14 @@ class World:
             self._weather_until = meta.get("weather_until", 0.0)
             self.animals = meta.get("animals", []); self.people = meta.get("people", [])
             self.structures = meta.get("structures", [])
+            self.blocks = {}
+            for k, c in (meta.get("blocks") or {}).items():
+                sx, sy = k.split(",")
+                self.blocks[(int(sx), int(sy))] = int(c)
+            self.roofs = {(int(x), int(y)) for x, y in (meta.get("roofs") or [])}
+            self.sites = meta.get("sites", [])
+            self.ore_nodes = meta.get("ore_nodes", [])
+            self._rebuild_ore_index()
             self.log = meta.get("log", [])
             self.version = meta.get("version", 0)
             self.rng = np.random.default_rng()
@@ -1330,7 +1676,7 @@ if __name__ == "__main__":
     # Watch populations and vegetation across a couple of season turns.
     days = 8
     steps = days * 3600
-    print("\n  day  season   weather  rabbit deer wolf  ppl  built  vegtiles  ms/step")
+    print("\n  day  season   weather  rabbit deer wolf  ppl bldg tiles  vegtiles  ms/step")
     t0 = time.time()
     last_day = -1
     day_t0 = t0
@@ -1345,7 +1691,7 @@ if __name__ == "__main__":
             day_t0 = now
             print(f"  {w.day():>3}  {w.season():<7}  {w.weather:<7}  "
                   f"{an.get('rabbit',0):>6} {an.get('deer',0):>4} {an.get('wolf',0):>4}  "
-                  f"{c['people']:>3}  {c['structures']:>5}  "
+                  f"{c['people']:>3} {c['buildings']:>4} {c['blocks']:>5}  "
                   f"{sum(c['vegetation'].values()):>8}  {ms:>6.2f}", flush=True)
     sim_s = time.time() - t0
     if w.people:
@@ -1355,8 +1701,10 @@ if __name__ == "__main__":
               f"inv {sample['inv']} doing '{sample['action']}'")
     axes = sum(1 for p in w.people if p['inv'].get('axe'))
     sheltered = sum(1 for p in w.people if p.get('home_struct'))
-    print(f"  crafting/building — {len(w.structures)} shelters, {axes} axes crafted, "
-          f"{sheltered}/{len(w.people)} people sheltered")
+    finished = sum(1 for s in w.sites if s['done'])
+    print(f"  tile-building — {finished} buildings finished, {len(w.sites)} sites, "
+          f"{len(w.blocks)} blocks + {len(w.roofs)} roof tiles laid, {axes} axes, "
+          f"{sheltered}/{len(w.people)} people housed")
 
     # Death mechanic: a body whose needs stay maxed (no relief reachable) must decline
     # and die. People now SEARCH for resources rather than dying in place, so we verify
@@ -1374,24 +1722,69 @@ if __name__ == "__main__":
     print(f"\nsimulated {steps} steps in {sim_s:.2f}s "
           f"({steps/sim_s:.0f} steps/s, {sim_s*1000/steps:.2f} ms/step avg)")
 
-    # Crafting/building unit check — isolate the chain from survival noise: a
-    # comfortable builder standing on home, kept fed/watered, must craft an axe
-    # and raise a shelter.
+    # Tile-building unit check — isolate the chain from survival noise: a comfortable
+    # builder, kept fed/watered and handed raw logs + thatch, must craft an axe, mark
+    # out a building, and lay it block by block until it's finished and housed.
     wc = World().generate(seed=7)
-    wc.people = []; wc.structures = []
+    wc.people = []
     land = np.argwhere((wc.water == WATER_NONE) & (wc.biome == B["grassland"]))
-    by, bx = land[0]
+    by, bx = land[len(land) // 2]
     wc._add_person(int(bx), int(by), name="Builder")
     b = wc.people[0]
-    b["inv"]["wood"] = 20                       # hand them materials so they go straight to work
-    wc.clock = 12 * 60                          # high noon (daytime → secondary drives active)
-    for _ in range(300):
+    b["inv"].update({"wood": 80, "fiber": 40, "leaves": 30})   # logs, thatch & leaves to work
+    wc.clock = 12 * 60                              # high noon (daytime → secondary drives active)
+    for _ in range(1500):
         b["hunger"] = b["thirst"] = 0.1; b["fatigue"] = 0.1   # stay comfortable
+        if b.get("home_struct"):
+            break
         wc._tick_people(0.4)
-    print(f"  craft test: Builder has axe={b['inv'].get('axe',0)}, "
-          f"shelters={len(wc.structures)}, sheltered={b.get('home_struct') is not None}, "
-          f"action='{b['action']}' "
-          f"-> {'OK' if b['inv'].get('axe') and wc.structures else 'FAILED'}")
+    site = wc.sites[0] if wc.sites else None
+    built_ok = bool(b["inv"].get("axe") and b.get("home_struct") and wc.blocks and wc.roofs)
+    print(f"  build test (autonomous): Builder axe={b['inv'].get('axe',0)}, "
+          f"first home = {site['name'] if site else 'none'}, blocks={len(wc.blocks)}, "
+          f"roofs={len(wc.roofs)}, insul={b.get('insul')}, housed={b.get('home_struct') is not None} "
+          f"-> {'OK' if built_ok else 'FAILED'}")
+
+    # And the blueprint library scales up: force a cabin and confirm it can be raised too.
+    wc2 = World().generate(seed=7); wc2.people = []
+    cy2, cx2 = np.argwhere((wc2.water == WATER_NONE) & (wc2.biome == B["grassland"]))[len(
+        np.argwhere((wc2.water == WATER_NONE) & (wc2.biome == B["grassland"]))) // 2]
+    wc2._add_person(int(cx2), int(cy2), name="Mason")
+    m = wc2.people[0]; m["inv"]["axe"] = 1
+    m["inv"].update({"wood": 120, "fiber": 60})
+    wc2.clock = 12 * 60
+    wc2._found_site(m, "cabin")
+    for _ in range(2500):
+        if m.get("home_struct"):
+            break
+        wc2._build_next_block(m)
+        if wc2._person_site(m) is None:
+            break
+        t = wc2._site_next_task(wc2._person_site(m))
+        if t and max(abs(t["x"] - m["x"]), abs(t["y"] - m["y"])) > 2:   # step toward the next tile
+            m["x"] += int(np.sign(t["x"] - m["x"])); m["y"] += int(np.sign(t["y"] - m["y"]))
+    cabin = next((s for s in wc2.sites if s["bp"] == "cabin"), None)
+    cabin_ok = bool(cabin and cabin["done"] and m.get("home_struct"))
+    print(f"  cabin test (forced blueprint): {sum(t['done'] for t in cabin['tasks']) if cabin else 0}/"
+          f"{len(cabin['tasks']) if cabin else 0} tiles, insul={m.get('insul')} "
+          f"-> {'OK' if cabin_ok else 'FAILED'}")
+
+    # Live-sim sourcing — mine a real ore deposit (pickaxe-gated), dig clay/sand/flint,
+    # then smelt the ore into an ingot via the crafting registry (the full chain).
+    ws = World().generate(seed=11)
+    src_lines = []
+    if ws.ore_nodes:
+        node = ws.ore_nodes[0]
+        miner = {"x": node["x"], "y": node["y"], "inv": {"crude_pickaxe": 1}}
+        got = ws.harvest(miner)
+        src_lines.append(f"mined {got or 'nothing'} (held pickaxe)")
+        nopick = {"x": ws.ore_nodes[-1]["x"], "y": ws.ore_nodes[-1]["y"], "inv": {}}
+        src_lines.append(f"no-tool mine blocked={ws.harvest(nopick) is None}")
+    # Smelt copper ore → ingot at a furnace using crafting.py.
+    smelt_inv = {"copper_ore": 2, "charcoal": 1}
+    smelt_ok = crafting.do_craft(smelt_inv, "copper_ingot", stations={"furnace"})
+    src_lines.append(f"smelt copper_ingot={smelt_ok} ({smelt_inv})")
+    print("  sourcing test: " + " | ".join(src_lines))
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")
