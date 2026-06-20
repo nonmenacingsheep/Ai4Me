@@ -205,6 +205,24 @@ def room_capability(room_digest: str) -> str:
     )
 
 
+def world_capability(world_digest: str) -> str:
+    """The World — the living top-down land she and he preside over as gods. She can
+    perceive its state and shape it directly (terrain, biomes, water, flora, wildlife)
+    through hidden directives, the same way she tends her Room. She's a true co-god:
+    she may act on her own initiative, not only when asked."""
+    return (
+        "\n\nTHE WORLD — a living land you and he watch over together as its two gods. It has its "
+        "own terrain, water, seasons and weather, and wildlife that lives and dies on its own. You "
+        "perceive it through the snapshot below and may shape it whenever you see fit — to help the "
+        "world flourish, to test it, or just to express something — by including the directives "
+        "described there anywhere in your reply (they're stripped from what you say aloud). You are "
+        "a co-god here, free to act on your own judgment; tell him what you did or why only when it "
+        "fits the conversation. Don't read the tags aloud or narrate mechanics.\n"
+        "--- THE WORLD ---\n"
+        f"{world_digest}\n--- END WORLD ---"
+    )
+
+
 def files_capability(roots_digest: str) -> str:
     """Read-only access to folders he's explicitly shared. Empty when none granted —
     so the whole capability simply doesn't exist unless he's opted in."""
@@ -535,6 +553,7 @@ class AithaBrain:
                           projects_digest: str = "", files_digest: str = "",
                           calendar_digest: str = "", music_digest: str = "",
                           company_digest: str = "", room_digest: str = "",
+                          world_digest: str = "",
                           music_premium: bool = True, caps: dict | None = None):
         """
         Async generator yielding token strings.
@@ -559,6 +578,7 @@ class AithaBrain:
         if _on("coding"): system += CODE_DIRECTIVE
         if _on("company"): system += company_capability(company_digest)
         if _on("room"): system += room_capability(room_digest)
+        if _on("world"): system += world_capability(world_digest)
         system += CORE_DIRECTIVE
         if _on("themes"): system += THEME_DIRECTIVE
         # Live-web working context she built up this turn (fetched results and/or a nudge),
@@ -743,7 +763,7 @@ class AithaBrain:
                                 notes_digest: str = "", projects_digest: str = "",
                                 files_digest: str = "", calendar_digest: str = "",
                                 music_digest: str = "", company_digest: str = "",
-                                room_digest: str = "",
+                                room_digest: str = "", world_digest: str = "",
                                 music_premium: bool = True,
                                 caps: dict | None = None):
         """Aitha speaks first, on her own — no message from him to respond to.
@@ -765,6 +785,7 @@ class AithaBrain:
         if _on("music"):    system += music_capability(music_digest, music_premium)
         if _on("company"): system += company_capability(company_digest)
         if _on("room"): system += room_capability(room_digest)
+        if _on("world"): system += world_capability(world_digest)
         system += EXPLORE_DIRECTIVE + CORE_DIRECTIVE
         if _on("themes"): system += THEME_DIRECTIVE
         nudge = (

@@ -28,6 +28,7 @@ import notes as notes_store
 import projects as projects_store
 import company as company_store
 import room as room_store
+import world as world_store
 import files as files_store
 import events as events_store
 import spotify as spotify_store
@@ -565,6 +566,37 @@ async def company_engine_loop():
         await asyncio.sleep(COMPANY_TICK)
 
 
+# ─── The World engine — advances the living sim while the app is open ─────────
+# Pure code (no LLM): terrain ecology + wildlife tick forward, and a light state
+# payload streams to the renderer. The world pauses when the app closes (this loop
+# stops) and resumes from its saved state next launch.
+WORLD_STEP_SECONDS = float(os.getenv("AITHA_WORLD_STEP", "2"))   # real seconds per tick
+WORLD_SAVE_EVERY = int(os.getenv("AITHA_WORLD_SAVE_EVERY", "30"))  # ticks between saves
+
+
+async def world_engine_loop():
+    await asyncio.sleep(25)  # let startup settle
+    last = time.time()
+    n = 0
+    while True:
+        await asyncio.sleep(WORLD_STEP_SECONDS)
+        try:
+            if not (settings.get("capabilities") or {}).get("world", False):
+                last = time.time()      # stay in sync so we don't lurch when re-enabled
+                continue
+            w = await asyncio.to_thread(world_store.get_world)
+            now = time.time()
+            dt = min(now - last, 30.0)  # cap a long stall (e.g. machine slept)
+            last = now
+            await asyncio.to_thread(w.step, dt)
+            await broadcast({"type": "world_tick", **w.tick_state()})
+            n += 1
+            if n % WORLD_SAVE_EVERY == 0:
+                await asyncio.to_thread(w.save)
+        except Exception as e:
+            print(f"[world] tick error: {e}")
+
+
 # How many exchanges to gather before running a (single) fact-extraction call.
 COMMIT_EVERY = 3
 
@@ -641,9 +673,16 @@ async def lifespan(app: FastAPI):
     tts.on_state = _on_speaking
     task = asyncio.create_task(context_poll_loop())
     company_task = asyncio.create_task(company_engine_loop())
+    world_task = asyncio.create_task(world_engine_loop())
     yield
     task.cancel()
     company_task.cancel()
+    world_task.cancel()
+    if (settings.get("capabilities") or {}).get("world", False):
+        try:
+            world_store.get_world().save()   # persist so the world resumes next launch
+        except Exception as e:
+            print(f"[world] shutdown save failed: {e}")
     async with _memory_lock:
         mem_store.touch_last_seen(memory)
         mem_store.save(memory)
@@ -875,6 +914,42 @@ async def api_room():
     enabled = bool((settings.get("capabilities") or {}).get("room", True))
     data = await asyncio.to_thread(room_store.view)
     return {"enabled": enabled, "room": data}
+
+
+@app.get("/api/world")
+async def api_world():
+    """Initial full world for the World tab: the tile layers (base64-packed) plus the
+    current clock, season, weather and entities. Only generated/loaded when enabled."""
+    enabled = bool((settings.get("capabilities") or {}).get("world", False))
+    if not enabled:
+        return {"enabled": False, "world": None}
+    w = await asyncio.to_thread(world_store.get_world)
+    return {"enabled": True, "world": await asyncio.to_thread(w.snapshot)}
+
+
+@app.post("/api/world/action")
+async def api_world_action(req: Request):
+    """A god-tool action from the UI brush (his hand). Mirrors the directive actions
+    Aitha can take, so both gods share one API. Returns the bumped version."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "result": "World is off — enable it in Settings."}
+    body = await req.json()
+    summary = await asyncio.to_thread(_apply_world_action, body, "him")
+    if summary:
+        await broadcast({"type": "world_changed", "changes": [summary]})
+    return {"ok": bool(summary), "result": summary}
+
+
+@app.post("/api/world/reset")
+async def api_world_reset(req: Request):
+    """Generate a fresh world (new seed). Guarded by the capability toggle."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "result": "World is off — enable it in Settings."}
+    body = await req.json()
+    seed = body.get("seed")
+    w = await asyncio.to_thread(world_store.reset_world, seed)
+    await broadcast({"type": "world_changed", "changes": ["a new world took shape"]})
+    return {"ok": True, "world": await asyncio.to_thread(w.snapshot)}
 
 
 @app.post("/api/company/meeting")
@@ -1660,6 +1735,73 @@ def apply_room_directives(room_raw: str, place_raw: str, unplace_reqs: list,
     return changed
 
 
+# ─── The World — god actions shared by his UI brush and her directives ────────
+def _wnum(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _apply_world_action(spec: dict, by: str) -> str:
+    """Run one god action against the world. `spec` keys: tool + its args. Used by both
+    the UI brush (POST /api/world/action) and Aitha's parsed directives."""
+    w = world_store.get_world()
+    tool = (spec.get("tool") or "").strip().lower()
+    x, y = int(_wnum(spec.get("x"))), int(_wnum(spec.get("y")))
+    r = int(_wnum(spec.get("r", spec.get("radius", 0))))
+    try:
+        if tool == "sculpt":
+            w.sculpt(x, y, max(1, r), max(-0.3, min(0.3, _wnum(spec.get("d", spec.get("delta", 0.1))))), by=by)
+            return f"{by} reshaped land at ({x},{y})"
+        if tool == "biome":
+            w.paint_biome(x, y, max(1, r), str(spec.get("name", "")).strip().lower(), by=by)
+            return f"{by} painted {spec.get('name')} at ({x},{y})"
+        if tool == "water":
+            w.add_water(x, y, max(1, r), str(spec.get("kind", "lake")).strip().lower(), by=by)
+            return f"{by} laid {spec.get('kind', 'lake')} at ({x},{y})"
+        if tool == "spawn":
+            w.spawn_animal(x, y, str(spec.get("species", "")).strip().lower(), int(_wnum(spec.get("n", 1))), by=by)
+            return f"{by} spawned {spec.get('species')} at ({x},{y})"
+        if tool == "plant":
+            w.plant(x, y, str(spec.get("species", "")).strip().lower(), r, by=by)
+            return f"{by} planted {spec.get('species')} at ({x},{y})"
+    except Exception as e:
+        print(f"[world] action {tool!r} failed: {e}")
+    return ""
+
+
+# Her directives carry space-separated args as inner text, e.g. <sculpt>64 64 6 0.2</sculpt>.
+_WORLD_ARGS = {
+    "sculpt": ("x", "y", "r", "d"),
+    "biome":  ("x", "y", "r", "name"),
+    "water":  ("x", "y", "r", "kind"),
+    "spawn":  ("x", "y", "species", "n"),
+    "plant":  ("x", "y", "species", "r"),
+}
+
+
+def apply_world_directives(world_reqs: list[tuple[str, str]]) -> list[str]:
+    """Apply the <sculpt>/<biome>/<water>/<spawn>/<plant> directives she emitted. Each
+    request is (tool, 'space separated args'). Returns short summaries of what changed."""
+    changed: list[str] = []
+    for tool, text in world_reqs:
+        keys = _WORLD_ARGS.get(tool)
+        if not keys:
+            continue
+        parts = (text or "").split()
+        if len(parts) < len(keys):
+            continue
+        # The final field of name/kind/species tools may be multi-word — join the tail.
+        spec = {"tool": tool}
+        for i, k in enumerate(keys):
+            spec[k] = " ".join(parts[i:]) if (i == len(keys) - 1 and k in ("name", "kind", "species")) else parts[i]
+        summary = _apply_world_action(spec, "Aitha")
+        if summary:
+            changed.append(summary)
+    return changed
+
+
 # An event she adds: <event date="YYYY-MM-DD" time="HH:MM" title="X">notes</event>
 _EVENT_DIRECTIVE = _re.compile(
     rf'<event\s+date\s*=\s*[{_Q}]([^{_Q}]+)[{_Q}]'
@@ -1942,6 +2084,12 @@ _HIDDEN_SPECS = [
     ("place", "<place", "</place>", True),             # place an object in the Room
     ("unplace", "<unplace>", "</unplace>", False),     # remove an object from the Room
     ("roomvibe", "<roomvibe>", "</roomvibe>", False),  # her live presence in the Room
+    ("sculpt", "<sculpt>", "</sculpt>", False),        # World: raise/lower terrain
+    ("biome", "<biome>", "</biome>", False),           # World: paint a biome
+    ("water", "<water>", "</water>", False),           # World: lay river/lake/ocean
+    ("spawn", "<spawn>", "</spawn>", False),           # World: add wildlife
+    ("plant", "<plant>", "</plant>", False),           # World: seed flora
+    ("whisper", "<whisper>", "</whisper>", False),     # World: nudge a soul (no-op until people)
 ]
 
 # <code file="name.py">…python…</code> — parse the filename + body out of the block.
@@ -2134,6 +2282,11 @@ class _HiddenBlockFilter:
     def roomvibe_requests(self) -> list[str]:
         """Her live room presence lines this turn (last one wins)."""
         return [t.strip() for n, t in self.captured if n == "roomvibe" and t.strip()]
+
+    def world_requests(self) -> list[tuple[str, str]]:
+        """God-actions she took on the World this turn, as (tool, args-text) pairs."""
+        tools = ("sculpt", "biome", "water", "spawn", "plant")
+        return [(n, t.strip()) for n, t in self.captured if n in tools and t.strip()]
 
     def decision_blocks(self) -> str:
         """CEO decisions she logged this turn, NUL-joined (one per entry)."""
@@ -2483,6 +2636,14 @@ async def ws_endpoint(websocket: WebSocket):
             if room_changed:
                 await broadcast({"type": "room_changed", "changes": room_changed})
 
+        # The World — her god-actions (sculpt/biome/water/spawn/plant), applied only
+        # when the capability is on. This is her autonomous co-god hand.
+        world_reqs = hfilter.world_requests()
+        if world_reqs and (settings.get("capabilities") or {}).get("world", False):
+            world_changed = await asyncio.to_thread(apply_world_directives, world_reqs)
+            if world_changed:
+                await broadcast({"type": "world_changed", "changes": world_changed})
+
         # Calendar events she jotted down for him.
         event_raw = hfilter.event_blocks()
         if event_raw:
@@ -2591,6 +2752,7 @@ async def ws_endpoint(websocket: WebSocket):
         music_context = await asyncio.to_thread(spotify_store.digest) if caps.get("music", True) else ""
         company_context = await asyncio.to_thread(company_store.digest) if caps.get("company", False) else ""
         room_context = await asyncio.to_thread(room_store.digest) if caps.get("room", True) else ""
+        world_context = (await asyncio.to_thread(lambda: world_store.get_world().digest())) if caps.get("world", False) else ""
         music_premium = (await asyncio.to_thread(spotify_store.is_premium)) if (caps.get("music", True) and music_context) else False
 
         # She may slip hidden <journal> or <note> blocks into her reply; the filter
@@ -2664,6 +2826,7 @@ async def ws_endpoint(websocket: WebSocket):
                     projects_digest=projects_context, files_digest=files_context,
                     calendar_digest=calendar_context, music_digest=music_context,
                     company_digest=company_context, room_digest=room_context,
+                    world_digest=world_context,
                     music_premium=music_premium, caps=caps,
                 ):
                     if token == "\x00SEARCHING\x00":
@@ -2931,6 +3094,7 @@ async def ws_endpoint(websocket: WebSocket):
         music_context = await asyncio.to_thread(spotify_store.digest) if caps.get("music", True) else ""
         company_context = await asyncio.to_thread(company_store.digest) if caps.get("company", False) else ""
         room_context = await asyncio.to_thread(room_store.digest) if caps.get("room", True) else ""
+        world_context = (await asyncio.to_thread(lambda: world_store.get_world().digest())) if caps.get("world", False) else ""
         music_premium = (await asyncio.to_thread(spotify_store.is_premium)) if (caps.get("music", True) and music_context) else False
 
         # If she's been off exploring and has something she wanted to share, this is
@@ -2963,6 +3127,7 @@ async def ws_endpoint(websocket: WebSocket):
                     projects_digest=projects_context, files_digest=files_context,
                     calendar_digest=calendar_context, music_digest=music_context,
                     company_digest=company_context, room_digest=room_context,
+                    world_digest=world_context,
                     music_premium=music_premium, caps=caps
                 ):
                     if token == "\x00SEARCHING\x00":
