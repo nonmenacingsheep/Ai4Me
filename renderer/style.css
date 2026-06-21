@@ -3096,6 +3096,8 @@ body.passthrough .pt-hint {
 }
 .whud-speed button:hover { color: #d6f3e2; }
 .whud-speed button.active { background: var(--accent, #6fcf97); color: #08140f; }
+.whud-net { font-size: 11px; color: #f2c14e; background: rgba(242,193,78,0.12);
+  border: 1px solid rgba(242,193,78,0.3); border-radius: 999px; padding: 2px 9px; }
 .whud-census { display: flex; gap: 12px; margin-left: 4px; color: var(--text-dim); font-size: 12px; }
 .whud-census span { color: #cfeedd; }
 .whud-coords {

@@ -3701,7 +3701,18 @@ function worldAnimFrame() {
   if (activeView !== 'world' || !WORLD.data) { WORLD.animRAF = null; return; }
   easeWorldEntities();
   renderWorld();
+  updateWorldNet();
   WORLD.animRAF = requestAnimationFrame(worldAnimFrame);
+}
+
+// Surfaces a warning in the HUD only when live world_tick updates are lagging — so it's
+// immediately visible (no DevTools) whether the freeze is the server not sending or the
+// renderer not receiving. Hidden when updates are flowing normally.
+function updateWorldNet() {
+  const el = document.getElementById('whud-net'); if (!el) return;
+  const age = WORLD._lastTickWall ? (performance.now() - WORLD._lastTickWall) / 1000 : 0;
+  if (age > 2) { el.textContent = `⚠ last update ${age.toFixed(0)}s ago`; el.style.display = ''; }
+  else { el.style.display = 'none'; }
 }
 function startWorldAnim() {
   if (WORLD.animRAF || activeView !== 'world') return;
@@ -4083,6 +4094,7 @@ function worldOnTick(msg) {
     roofs: msg.roofs || WORLD.data.roofs || [],
     census: msg.census, version: msg.version,
   });
+  WORLD._lastTickWall = performance.now();   // for the delivery-lag indicator
   if (activeView === 'world') { updateWorldHud(); startWorldAnim(); }
   if (WORLD._personId != null) refreshPersonPanel(false);   // keep the open inspector live
 }

@@ -246,26 +246,35 @@ async def context_poll_loop():
         await asyncio.sleep(15)
 
 
+_inflight_sends: set = set()    # clients with a send still draining (used to coalesce frames)
+
+
+async def _send_one(ws, msg: dict):
+    """Send one message to one client, letting the write finish naturally (never cancelled —
+    cancelling a half-written websocket frame wedges the connection). Drop only on a real
+    error (an actual disconnect). Clears the in-flight flag so the client can get the next."""
+    try:
+        await ws.send_json(msg)
+    except Exception:
+        if ws in clients:
+            clients.remove(ws)
+    finally:
+        _inflight_sends.discard(ws)
+
+
 async def broadcast(msg: dict):
-    """Fan a message out to every websocket client CONCURRENTLY and with a per-client
-    timeout. Sequential awaits used to let one slow/stuck client (a backgrounded tab, a
-    leftover preview, a renderer that had fallen behind) block the whole send — which threw
-    backpressure onto the high-frequency world tick and froze the sim's clock for seconds at
-    a time. Now a laggard is bounded and dropped instead of stalling everyone."""
+    """Fan a message out to every client WITHOUT blocking the caller and WITHOUT dropping a
+    merely-slow client. Each send runs as its own task; if a client is still draining the
+    previous message we skip it this round (the next frame supersedes it — latest-wins). This
+    keeps the world tick loop from ever stalling on a backgrounded/slow renderer, while a
+    laggard simply receives fewer frames instead of being cut off."""
     if not clients:
         return
-
-    async def _send(ws):
-        try:
-            await asyncio.wait_for(ws.send_json(msg), timeout=3.0)
-            return None
-        except Exception:
-            return ws                       # timed out or errored → drop it (it can reconnect)
-
-    results = await asyncio.gather(*[_send(ws) for ws in list(clients)])
-    for ws in results:
-        if ws is not None and ws in clients:
-            clients.remove(ws)
+    for ws in list(clients):
+        if ws in _inflight_sends:
+            continue                        # still sending the previous message → coalesce
+        _inflight_sends.add(ws)
+        asyncio.create_task(_send_one(ws, msg))
 
 
 # ─── Autonomous company engine ──────────────────────────────────────────
@@ -618,18 +627,18 @@ async def world_engine_loop():
             last = now
             await asyncio.to_thread(w.step, dt)
             t_step = time.time()
+            # broadcast() is non-blocking (per-client tasks, coalesced) so this never stalls
+            # the loop on a slow/backgrounded renderer — the clock advances regardless.
             await broadcast({"type": "world_tick", **w.tick_state()})
             t_send = time.time()
-            # If a whole cycle runs long the clock visibly freezes then jumps. Break the gap
-            # down so the cause is unambiguous: `step`/`broadcast` = work in THIS loop; the
-            # leftover `starved` time is the event loop being held elsewhere (a local model
-            # pinning the CPU, a heavy save, another coroutine) — i.e. "waiting for the AI."
+            # If a whole cycle still runs long, the sim itself is the cause now (send can't
+            # block us anymore). `starved` = the event loop held elsewhere; `step` = the sim.
             cycle = t_send - prev_top
             if cycle > 1.5:
-                work = (t_step - now) + (t_send - t_step)
+                work = t_send - now
                 starved = max(0.0, cycle - work - WORLD_STEP_SECONDS / speed)
                 print(f"[world] slow cycle {cycle:.1f}s — step {t_step - now:.1f}s, "
-                      f"broadcast {t_send - t_step:.1f}s, starved {starved:.1f}s, clients {len(clients)}")
+                      f"starved {starved:.1f}s, clients {len(clients)}")
             prev_top = t_send
             n += 1
             if n % WORLD_SAVE_EVERY == 0:
