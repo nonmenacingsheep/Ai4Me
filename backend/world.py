@@ -30,7 +30,8 @@ import uuid
 
 import numpy as np
 
-import crafting   # item/recipe registry (content for gods, UI & the future mind)
+import crafting   # item/recipe registry (content for gods, UI & the mind)
+import mind        # the people's inner life: memory, relationships, trade, goals, speech
 
 # ─── Dimensions & clock ───────────────────────────────────────────────────
 # A large world (2048×2048 ≈ 4.2M tiles) that still runs smoothly because we never
@@ -1061,6 +1062,7 @@ class World:
             "heading": None,                             # persistent roaming direction while searching
             "action": "wander",                          # current body behaviour (for the renderer)
         })
+        mind.ensure_mind(self.people[-1])                # attach memory / relationships / goal
 
     def _add_structure(self, kind: str, x: int, y: int, by: str = "?") -> str:
         sid = "s_" + uuid.uuid4().hex[:8]
@@ -1092,6 +1094,7 @@ class World:
 
         dead = []
         for p in self.people:
+            mind.ensure_mind(p)                          # idempotent; covers any path that skipped it
             p["age"] += dt_day
             p["hunger"] = min(1.0, p["hunger"] + PERSON["hunger_rate"] * dt_game_min)
             p["thirst"] = min(1.0, p["thirst"] + PERSON["thirst_rate"] * dt_game_min)
@@ -1164,13 +1167,14 @@ class World:
                     p["inv"]["wood"] -= BUILD["axe_wood"]
                     p["inv"]["axe"] = 1
                     self._note("craft", f"{p['name']} crafted a crude axe.")
+                    mind.remember(p, "shaped my first axe from wood", 0.7, "craft", self.clock)
             elif action == "found_site":
                 self._found_site(p)
             elif action == "build_block":
                 self._build_next_block(p)
             # Seeking and wandering move the body; acting-in-place does not.
             if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
-                          "seek_fiber", "seek_leaves", "haul", "wander"):
+                          "seek_fiber", "seek_leaves", "haul", "wander", "socialize"):
                 self._move_person(p, movedir)
 
             # Health: a maxed need erodes the body; being well-supplied heals it.
@@ -1182,12 +1186,34 @@ class World:
             if p["hp"] <= 0 or p["age"] > PERSON["max_age"]:
                 dead.append(p)
 
+        # Social pass: people in sight of one another notice, gossip, and trade. Cheap —
+        # the population is tiny — and it's where reputation and the barter economy emerge.
+        self._tick_minds_social()
+
         for p in dead:
             cause = "old age" if p["age"] > PERSON["max_age"] else "hunger and thirst"
             self._note("death", f"{p['name']} died of {cause}.")
+            # Those who knew the dead carry it: a heavy, durable memory.
+            for q in self.people:
+                if q is p:
+                    continue
+                if p["id"] in q.get("rel", {}) or mind._manhattan(p, q) <= PERSON["vision"]:
+                    mind.remember(q, f"{p['name']} died of {cause}", 0.95, "death", self.clock)
         if dead:
             ids = {id(p) for p in dead}
             self.people = [p for p in self.people if id(p) not in ids]
+
+    def _tick_minds_social(self):
+        """Run encounters between every nearby pair of people (each pair once). Notable
+        outcomes — trades, gossip — go to the world log so a god can watch culture form."""
+        ppl = self.people
+        for i in range(len(ppl)):
+            for j in range(i + 1, len(ppl)):
+                a, b = ppl[i], ppl[j]
+                if mind._manhattan(a, b) > mind.SOCIAL_RADIUS:
+                    continue
+                for ev in mind.encounter(a, b, self.clock, self.rng):
+                    self._note("social", ev)
 
     def _perceive(self, x, y):
         """Build this person's small perception windows (edible/drinkable/tree/stone)
@@ -1227,6 +1253,21 @@ class World:
         ys, xs = np.nonzero(mask)
         k = int(np.argmin(np.abs(xs - lx) + np.abs(ys - ly)))
         return [int(xs[k] + wx0), int(ys[k] + wy0)]
+
+    def _seek_person(self, p):
+        """Step direction toward the nearest other living person (for a social/trade goal),
+        or None if alone or already beside someone. Stops adjacent so the social pass can
+        run an encounter rather than walking onto them."""
+        best, bd = None, 1e9
+        for q in self.people:
+            if q is p:
+                continue
+            d = abs(q["x"] - p["x"]) + abs(q["y"] - p["y"])
+            if d < bd:
+                best, bd = q, d
+        if best is None or bd <= 1:
+            return None
+        return (int(np.sign(best["x"] - p["x"])), int(np.sign(best["y"] - p["y"])))
 
     def _explore_dir(self, p):
         """A persistent roaming heading (re-rolled now and then) so a searching person
@@ -1286,6 +1327,15 @@ class World:
         # rather than hoarding food beyond the reserve.
         if (p["hunger"] < 0.5 and p["thirst"] < 0.5 and p["fatigue"] < 0.6 and not night
                 and self.clock >= p.get("build_cd", 0)):
+            # Honor the mind's high-level goal — but only once shelter is secured, so a
+            # social whim never overrides the body's need for a roof (hierarchical goals).
+            goal = (p.get("goal") or "survive").split(":")[0]
+            if p.get("home_struct") is not None and goal in ("socialize", "trade"):
+                move = self._seek_person(p)
+                if move is not None:
+                    return ("socialize", move)
+            elif p.get("home_struct") is not None and goal == "explore":
+                return "wander", self._explore_dir(p)
             proj = self._person_build_decide(p, tree, stone, fiber, leaf, lx, ly)
             if proj:
                 return proj
@@ -1459,6 +1509,8 @@ class World:
         p["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
         self.version += 1
         self._note("build", f"{p['name']} finished building a {site['name'].lower()}.")
+        mind.remember(p, f"raised my own {site['name'].lower()} — a home at last", 0.85,
+                      "build", self.clock)
 
     def _move_person(self, p, direction):
         """One step (people can't walk onto water or through a solid wall). None → amble."""
@@ -1592,6 +1644,20 @@ class World:
         who = name if (name and n == 1) else f"{n} {'soul' if n == 1 else 'souls'}"
         self._note("person", f"{by} drew {who} into the world at ({x},{y}).")
 
+    def whisper(self, x: int, y: int, text: str, by: str = "him"):
+        """A god slips a thought into the nearest soul. It lands as a vivid memory the
+        mind will weigh when it next decides and reflects — divine inspiration, not a
+        command (the body still obeys its needs first)."""
+        text = (text or "").strip()
+        if not text or not self.people:
+            return
+        target = min(self.people, key=lambda p: abs(p["x"] - x) + abs(p["y"] - y))
+        mind.ensure_mind(target)
+        mind.remember(target, f"a thought came to me, as if from nowhere: {text}", 0.9,
+                      "whisper", self.clock)
+        self.version += 1
+        self._note("whisper", f"{by} whispered to {target['name']}.")
+
     def _note(self, kind: str, text: str):
         self.log.append({"t": round(self.clock, 1), "kind": kind, "text": text})
         if len(self.log) > 60:
@@ -1710,6 +1776,9 @@ class World:
                    + (f"; struggling: {', '.join(distress[:6])}" if distress else "; all faring well")
                    + (f". They have raised {built} building{'s' if built != 1 else ''}"
                       f" ({len(self.blocks)} tiles laid). " if built or self.blocks else ". "))
+            inner = mind.digest(self.people, self.clock)
+            if inner:
+                ppl += "Their minds: " + inner + " "
         else:
             ppl = "People: none yet — the land is unpeopled. "
         return (
@@ -1732,7 +1801,7 @@ class World:
             "  <spawn>x y species n</spawn>  add n wildlife (species = rabbit|deer|wolf)\n"
             "  <plant>x y species r</plant>  seed flora in radius r (grass|oak|pine|reeds|palm|cactus|shrub)\n"
             "  <person>x y n</person>  bring n people into being near (x,y); they forage, drink, rest and can die\n"
-            "  <whisper>x y a thought to slip into a nearby soul</whisper>  (heard but not yet acted on — their minds awaken in a later step)\n"
+            "  <whisper>x y a thought to slip into a nearby soul</whisper>  (lands as a vivid memory they weigh when next they decide — inspiration, not a command)\n"
             "Act only when you mean to; the world is alive and persists between visits."
         )
 
@@ -1794,6 +1863,8 @@ class World:
             self.weather_intensity = meta.get("weather_intensity", 0.0)
             self._weather_until = meta.get("weather_until", 0.0)
             self.animals = meta.get("animals", []); self.people = meta.get("people", [])
+            for _p in self.people:                       # heal legacy saves that predate the mind
+                mind.ensure_mind(_p)
             self.structures = meta.get("structures", [])
             self.blocks = {}
             for k, c in (meta.get("blocks") or {}).items():
@@ -1973,6 +2044,30 @@ if __name__ == "__main__":
     smelt_ok = crafting.do_craft(smelt_inv, "copper_ingot", stations={"furnace"})
     src_lines.append(f"smelt copper_ingot={smelt_ok} ({smelt_inv})")
     print("  sourcing test: " + " | ".join(src_lines))
+
+    # Minds: two comfortable people with complementary surpluses, set side by side, should
+    # meet, build a relationship, and trade through the body loop — and a god's whisper
+    # should land as a memory. (All rule-based; no model needed.)
+    wm = World().generate(seed=5); wm.people = []
+    gy, gx = np.argwhere((wm.water == WATER_NONE) & (wm.biome == B["grassland"]))[0]
+    wm._add_person(int(gx), int(gy), name="Bram")
+    wm._add_person(int(gx) + 1, int(gy), name="Cael")
+    bram, cael = wm.people
+    bram["home_struct"] = cael["home_struct"] = "s_test"        # comfortable enough to deal
+    bram["inv"] = {"food": 8, "wood": 0}; cael["inv"] = {"food": 0, "wood": 8}
+    wm.clock = 12 * 60
+    for _ in range(40):
+        bram["hunger"] = bram["thirst"] = bram["fatigue"] = 0.1
+        cael["hunger"] = cael["thirst"] = cael["fatigue"] = 0.1
+        wm._tick_minds_social()
+        wm.clock += 30
+    traded = bram["inv"].get("wood", 0) >= 1 and cael["inv"].get("food", 0) >= 1
+    knows = cael["id"] in bram.get("rel", {})
+    wm.whisper(int(gx), int(gy), "the high ground holds good stone", by="test")
+    whispered = any(m["kind"] == "whisper" for m in bram.get("memory", []) + cael.get("memory", []))
+    minds_ok = traded and knows and whispered
+    print(f"  minds test: traded={traded} knows={knows} whisper_landed={whispered} "
+          f"trust={bram['rel'][cael['id']]['trust']:.2f} -> {'OK' if minds_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")

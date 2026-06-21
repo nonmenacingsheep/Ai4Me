@@ -29,6 +29,7 @@ import projects as projects_store
 import company as company_store
 import room as room_store
 import world as world_store
+import mind as mind_store
 import crafting as crafting_store
 import files as files_store
 import events as events_store
@@ -600,6 +601,89 @@ async def world_engine_loop():
             print(f"[world] tick error: {e}")
 
 
+# ─── The minds — LLM enrichment for the world's people ───────────────────────
+# The body (world.py) gives every person memory, relationships, trade and a rule-based
+# goal with NO model, so the civilization grows fine offline. This loop adds the inner
+# voice on top: once in a while it picks one comfortable person and lets the model set a
+# naturalistic goal and maybe speak a line, and periodically reflect old memories into
+# beliefs. It is fully async, time-boxed, and degrades to the rule-based goal on any
+# failure or when no model is reachable — the world loop never waits on it.
+MIND_TICK = float(os.getenv("AITHA_MIND_TICK", "15"))      # real seconds between thinks
+MIND_THINK_BUDGET = float(os.getenv("AITHA_MIND_BUDGET", "30"))  # max seconds per LLM think
+REFLECT_EVERY = 6                                          # thinks between a reflection
+_mind_rr = 0                                               # round-robin cursor over people
+
+
+def _pick_thinker(people: list[dict]):
+    """The comfortable person who has gone longest without a thought (round-robin-ish), so
+    attention spreads evenly and no one monologues. None if nobody is settled enough."""
+    settled = [p for p in people if mind_store._comfortable(p)]
+    if not settled:
+        return None
+    settled.sort(key=lambda p: p.get("think_cd", 0.0))
+    return settled[0]
+
+
+async def _mind_think_one():
+    """Run (at most) one LLM think — and maybe a reflection — for a single person, then
+    write the result back onto the live world. Pure best-effort: the heuristic goal is set
+    first so something sensible always holds even if the model is slow or absent."""
+    w = await asyncio.to_thread(world_store.get_world)
+    if not w.people:
+        return
+    p = _pick_thinker(w.people)
+    if p is None:
+        return
+    pid = p["id"]
+    clock = w.clock
+    ctx = {
+        "season": w.season(), "weather": w.weather, "clock": clock,
+        "time_str": f"{int(w.time_of_day()):02d}:00",
+        "nearby": ", ".join(q["name"] for q in w.people
+                            if q is not p and abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= 12) or "no one",
+    }
+    # Baseline: the rule-based mind always yields a valid goal (this is the offline path).
+    g, intent = mind_store.heuristic_goal(p, ctx)
+    mind_store.set_goal(p, g, intent)
+    p["think_cd"] = clock + 1.0                            # mark attended even if the LLM fails
+
+    # Enrichment: let the model refine the goal and perhaps speak. Time-boxed; any failure
+    # (no key, model cold, timeout, bad JSON) just leaves the heuristic goal in place.
+    try:
+        do_reflect = p.get("think_n", 0) and p["think_n"] % REFLECT_EVERY == 0
+        if do_reflect:
+            sysm, usr = mind_store.reflect_messages(p, clock)
+            raw = await asyncio.wait_for(brain._complete(sysm, usr, max_tokens=160), MIND_THINK_BUDGET)
+            mind_store.apply_reflections(_live(w, pid) or p, brain._parse_json_object(raw), clock)
+        sysm, usr = mind_store.think_messages(p, ctx)
+        raw = await asyncio.wait_for(brain._complete(sysm, usr, max_tokens=140), MIND_THINK_BUDGET)
+        data = brain._parse_json_object(raw)
+        target = _live(w, pid)
+        if target is not None and data:
+            mind_store.apply_think(target, data, clock)
+    except Exception as e:
+        print(f"[mind] think fell back to heuristic ({type(e).__name__}: {e})")
+
+
+def _live(w, pid: str):
+    """Re-find a person by id on the live world (they may have moved/died mid-await)."""
+    for q in w.people:
+        if q["id"] == pid:
+            return q
+    return None
+
+
+async def mind_engine_loop():
+    await asyncio.sleep(40)   # let startup + model warm-up settle (after the world is live)
+    while True:
+        try:
+            if (settings.get("capabilities") or {}).get("world", False):
+                await _mind_think_one()
+        except Exception as e:
+            print(f"[mind] loop error: {e}")
+        await asyncio.sleep(MIND_TICK)
+
+
 # How many exchanges to gather before running a (single) fact-extraction call.
 COMMIT_EVERY = 3
 
@@ -680,10 +764,12 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(context_poll_loop())
     company_task = asyncio.create_task(company_engine_loop())
     world_task = asyncio.create_task(world_engine_loop())
+    mind_task = asyncio.create_task(mind_engine_loop())
     yield
     task.cancel()
     company_task.cancel()
     world_task.cancel()
+    mind_task.cancel()
     if (settings.get("capabilities") or {}).get("world", False):
         try:
             world_store.get_world().save()   # persist so the world resumes next launch
@@ -1796,6 +1882,9 @@ def _apply_world_action(spec: dict, by: str) -> str:
             n = int(_wnum(spec.get("n", 1)))
             w.spawn_person(x, y, n, by=by)
             return f"{by} brought {n} {'person' if n == 1 else 'people'} into the world at ({x},{y})"
+        if tool == "whisper":
+            w.whisper(x, y, str(spec.get("text", "")).strip(), by=by)
+            return f"{by} whispered a thought into a soul near ({x},{y})"
     except Exception as e:
         print(f"[world] action {tool!r} failed: {e}")
     return ""
@@ -1809,6 +1898,7 @@ _WORLD_ARGS = {
     "spawn":  ("x", "y", "species", "n"),
     "plant":  ("x", "y", "species", "r"),
     "person": ("x", "y", "n"),
+    "whisper": ("x", "y", "text"),
 }
 
 
@@ -1826,7 +1916,7 @@ def apply_world_directives(world_reqs: list[tuple[str, str]]) -> list[str]:
         # The final field of name/kind/species tools may be multi-word — join the tail.
         spec = {"tool": tool}
         for i, k in enumerate(keys):
-            spec[k] = " ".join(parts[i:]) if (i == len(keys) - 1 and k in ("name", "kind", "species")) else parts[i]
+            spec[k] = " ".join(parts[i:]) if (i == len(keys) - 1 and k in ("name", "kind", "species", "text")) else parts[i]
         summary = _apply_world_action(spec, "Aitha")
         if summary:
             changed.append(summary)

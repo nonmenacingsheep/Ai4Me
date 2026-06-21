@@ -3949,6 +3949,22 @@ function renderWorld() {
     const hr = Math.max(1.2, bw * 0.6);
     ctx.beginPath();
     ctx.arc(bx + bw / 2, by + hr, hr, 0, 6.283); ctx.fill(); // head
+    // A spoken line floats above the head for a short while after they say it (only when
+    // zoomed in enough to read it). say_t is in game-minutes; ~25 of those ≈ a minute live.
+    if (p.say && z >= 6 && d.clock != null && (d.clock - (p.say_t || 0)) < 25) {
+      const txt = p.say.length > 42 ? p.say.slice(0, 41) + '…' : p.say;
+      ctx.font = `${Math.max(9, Math.min(13, z * 0.5))}px system-ui, sans-serif`;
+      const tw = ctx.measureText(txt).width, padx = 5;
+      const bxc = sx + z / 2, byb = by - 7;
+      ctx.fillStyle = 'rgba(20,22,28,0.86)';
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(bxc - tw / 2 - padx, byb - 15, tw + padx * 2, 16, 4);
+      else ctx.rect(bxc - tw / 2 - padx, byb - 15, tw + padx * 2, 16);
+      ctx.fill();
+      ctx.fillStyle = '#eef1f6'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(txt, bxc, byb - 7);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
   }
   // Thatch roofs last, translucent, so a covered building reads as "indoors" but the
   // folk sheltering under it still show through faintly.
@@ -4049,9 +4065,17 @@ function worldInspect(x, y) {
     const e = Object.entries(inv || {}).filter(([, n]) => n);
     return e.length ? ' · carrying ' + e.map(([k, n]) => `${n} ${k}`).join(', ') : '';
   };
+  const knows = (p) => {
+    const r = Object.values(p.rel || {});
+    if (!r.length) return '';
+    const friend = r.reduce((a, b) => (b.trust > (a ? a.trust : 0) ? b : a), null);
+    return friend ? ` · knows ${r.length} (closest ${friend.name}, ${Math.round(friend.trust * 100)}% trust)` : '';
+  };
   const folkLine = folk.map(p =>
     `<br><strong>${p.name}</strong> — ${p.action} · hunger ${pct(p.hunger)}% thirst ${pct(p.thirst)}% ` +
-    `rest ${pct(1 - (p.fatigue || 0))}% · health ${pct(p.hp)}%${invStr(p.inv)}`).join('');
+    `rest ${pct(1 - (p.fatigue || 0))}% · health ${pct(p.hp)}%${invStr(p.inv)}` +
+    (p.intent ? `<br><em>aims to ${escapeHtml(p.intent)}</em>` : '') +
+    (p.say ? `<br>💬 “${escapeHtml(p.say)}”` : '') + knows(p)).join('');
   const builds = (d.structures || []).filter(st => st.x === x && st.y === y);
   let buildLine = builds.map(st => `<br>🛖 ${st.kind}${st.by ? ` (built by ${st.by})` : ''}`).join('');
   // Placed tile (wall/door/floor/…), roof, ore deposit, and any construction site here.
