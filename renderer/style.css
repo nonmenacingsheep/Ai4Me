@@ -3088,7 +3088,8 @@ body.passthrough .pt-hint {
   background: rgba(120, 200, 160, 0.12); color: #aee3c4; border: 1px solid rgba(120,200,160,0.2);
 }
 .whud-speed { display: flex; gap: 2px; padding: 2px; border-radius: 999px;
-  background: rgba(120,200,160,0.10); border: 1px solid rgba(120,200,160,0.2); }
+  background: rgba(120,200,160,0.10); border: 1px solid rgba(120,200,160,0.2);
+  pointer-events: auto; }   /* the HUD is click-through; re-enable it for the buttons */
 .whud-speed button {
   border: none; background: none; cursor: pointer; color: #8fbfa6;
   font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
