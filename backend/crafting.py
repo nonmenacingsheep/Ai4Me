@@ -304,6 +304,42 @@ for _id, _ic in ICONS.items():
         ITEMS[_id]["icon"] = _ic
 
 
+# ── Craft durations — how long a recipe takes, in GAME-MINUTES ────────────────
+# The world runs on a scaled clock (≈8 game-seconds per real second, a game-day ≈ 3
+# real hours); these are in-world minutes, so crafting obeys the same time as hunger,
+# sleep and the day/night cycle. Simple hand-work is quick; a worked tool is an hour or
+# two; smelting/forging is most of a day; textiles and clothing run into DAYS — a tunic
+# is genuinely days of spinning, weaving and stitching, as it ought to be.
+#
+# Survival kit is kept deliberately short so a founding band can still kit out within a
+# day and live — the balance canary (run the 8-day world.py sim) watches this.
+_CRAFT_BASE_MIN = {0: 25, 1: 120, 2: 360, 3: 720, 4: 1440, 5: 2880}
+_CRAFT_OVERRIDE = {
+    # quick hand-work
+    "stick": 8, "flint_shard": 6, "plank": 12, "rope": 18, "torch": 12,
+    "digging_stick": 10, "arrow": 20, "thread": 30, "paper": 40,
+    "crude_axe": 12, "crude_pickaxe": 18, "crude_hammer": 20, "crude_knife": 16,
+    "crude_spear": 18, "basket": 40, "bow": 55,
+    # survival kit a band must discover — short on purpose (keeps survival winnable; the
+    # whole bootstrap chain must stay quick or the founding band starves at the balance edge)
+    "leaf_flask": 12, "forage_sack": 15, "sleeping_mat": 18, "campfire": 70,
+    "workbench": 90,
+    # textiles, leather & clothing — measured in DAYS of patient work
+    "linen": 720, "cloth": 1200, "leather": 960, "tunic": 2880, "cloak": 3600,
+    "boots": 2160, "backpack": 1800, "waterskin": 720, "sail": 4320, "bed": 1500,
+    "book": 1080,
+}
+
+
+def craft_minutes(rid: str) -> float:
+    """In-world minutes to craft one batch of a recipe. Used by the body to make
+    crafting take time (a worker holds station with a ⚙ until it's done)."""
+    if rid in _CRAFT_OVERRIDE:
+        return float(_CRAFT_OVERRIDE[rid])
+    r = RECIPES.get(rid)
+    return float(_CRAFT_BASE_MIN.get(r["tier"] if r else 0, 120))
+
+
 # ════════════════════════════════════════════════════════════════════════════
 #  Engine — operates on a plain inventory dict {item_id: count}.
 #    stations: an iterable of station kinds currently in reach.

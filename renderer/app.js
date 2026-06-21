@@ -553,6 +553,9 @@ function handleMessage(data) {
     case 'world_changed':
       worldOnChanged();   // terrain/flora/wildlife was reshaped — refresh the map
       break;
+    case 'world_speed':
+      setActiveSpeed(msg.speed);   // fast-forward multiplier changed (maybe by the other god)
+      break;
     case 'room_changed':
       if (activeView === 'room') loadRoom();   // she reshaped her space — refresh it live
       break;
@@ -3593,6 +3596,13 @@ const WPERSON_SPAN = 2;
 // they read as foliage above the ground.
 const WTREE_RGB = { oak: [34, 82, 38], pine: [26, 66, 46], palm: [40, 112, 64] };
 const WTREE_SPAN = 2;
+// Forageable, non-tree flora — the grasses, reeds, shrubs and cacti people actually pull
+// leaves, fibre and food from. Drawn as small clumps (≈1 tile) so these resources have a
+// VISIBLE place on the map rather than reading as bare ground a person mysteriously feeds at.
+const WBUSH_RGB = {
+  grass: [96, 156, 66], shrub: [80, 122, 54], reeds: [108, 150, 74],
+  cactus: [74, 126, 86],
+};
 // Placed-block colours, keyed by block code (1 floor, 2 wall, 3 door, 4 window, 5 fence).
 const WBLOCK_RGB = {
   1: [171, 132, 86], 2: [120, 82, 45], 3: [196, 158, 92], 4: [150, 196, 214],
@@ -3659,6 +3669,7 @@ function setWorld(s) {
   computeWorldCamera();
   refreshWorldDetail();
   updateWorldHud();
+  setActiveSpeed(s.speed || 1);             // reflect the saved fast-forward multiplier
   startWorldAnim();                         // continuous, interpolated rendering loop
 }
 
@@ -3759,13 +3770,14 @@ function buildDetailCanvas(v) {
   }
   cx.putImageData(img, 0, 0);
   // Keep the veg layer + step so renderWorld can draw crisp tree-canopy sprites on top.
+  // _id changes each time a fresh window is streamed, invalidating the foliage cache.
   return { canvas: cvs, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, vw, vh,
-           step: v.step || 1, vegSp: vs, vegGrowth: vg };
+           step: v.step || 1, vegSp: vs, vegGrowth: vg, _id: ++_wDetailId };
 }
 
 // When zoomed in enough that the overview looks blocky, stream a crisp window of the
 // visible area at an appropriate level-of-detail (debounced; skipped when overview suffices).
-let _wDetailTimer = null, _wDetailKey = '';
+let _wDetailTimer = null, _wDetailKey = '', _wDetailId = 0;
 function refreshWorldDetail() {
   const d = WORLD.data, cv = document.getElementById('world-canvas');
   if (!d || !cv || !WORLD.cam) return;
@@ -3824,6 +3836,67 @@ function clampCamera() {
   cam.camY = Math.max(0, Math.min(d.h - viewH, cam.camY));
 }
 
+// Render every tree-canopy + forage-clump sprite in the current detail window onto an
+// offscreen canvas (screen-space), so renderWorld can blit it instead of recomputing the
+// whole field every frame. Rebuilt only when the view changes (see the caller's key).
+function buildFoliageLayer(cv, cam, z) {
+  const d = WORLD.data, dt = d.detail; if (!dt) return;
+  let fc = WORLD.foliage;
+  if (!fc) fc = WORLD.foliage = document.createElement('canvas');
+  if (fc.width !== cv.width || fc.height !== cv.height) { fc.width = cv.width; fc.height = cv.height; }
+  const ctx = fc.getContext('2d');
+  ctx.clearRect(0, 0, fc.width, fc.height);
+  const vs = dt.vegSp, vg = dt.vegGrowth;
+  const onScreen = (sx, sy, span) => !(sx < -span * z || sy < -span * z || sx > cv.width || sy > cv.height);
+  for (let cy = 0; cy < dt.vh; cy++) {
+    for (let cx2 = 0; cx2 < dt.vw; cx2++) {
+      const sp = vs[cy * dt.vw + cx2];
+      const name = sp ? d.plants[sp] : null;
+      if (!name) continue;
+      const treeCol = WTREE_RGB[name];
+      const bushCol = !treeCol ? WBUSH_RGB[name] : null;
+      if (!treeCol && !bushCol) continue;
+      const gnorm = vg[cy * dt.vw + cx2] / 255;
+      const sx = (dt.x0 + cx2 - cam.camX) * z, sy = (dt.y0 + cy - cam.camY) * z;
+      if (!onScreen(sx, sy, WTREE_SPAN)) continue;
+      const ccx = sx + z / 2, ccy = sy + z / 2;
+      if (treeCol) {
+        const grow = 0.62 + 0.38 * gnorm;
+        const rad = WTREE_SPAN * z * 0.5 * grow;
+        ctx.fillStyle = 'rgba(40,28,16,0.9)';               // short trunk
+        ctx.fillRect(ccx - z * 0.08, ccy, z * 0.16, rad * 0.8);
+        ctx.fillStyle = `rgb(${treeCol[0]},${treeCol[1]},${treeCol[2]})`; // canopy
+        ctx.beginPath();
+        if (name === 'pine') {                              // conifer: a tall triangle
+          ctx.moveTo(ccx, ccy - rad); ctx.lineTo(ccx + rad * 0.8, ccy + rad * 0.6);
+          ctx.lineTo(ccx - rad * 0.8, ccy + rad * 0.6); ctx.closePath();
+        } else {
+          ctx.arc(ccx, ccy, rad, 0, 6.283);
+        }
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1; ctx.stroke();
+      } else {
+        // A low forage clump (grass tuft / shrub / reeds / cactus) — only once it's grown
+        // enough to be worth gathering, so a sparse tile still reads as bare.
+        if (gnorm < 0.22) continue;
+        const r = z * (0.2 + 0.16 * gnorm);
+        ctx.fillStyle = `rgb(${bushCol[0]},${bushCol[1]},${bushCol[2]})`;
+        if (name === 'cactus') {                            // a stout upright pad
+          ctx.fillRect(ccx - r * 0.5, ccy - r, r, r * 1.8);
+          ctx.fillRect(ccx - r, ccy - r * 0.2, r * 0.5, r * 0.9);
+          ctx.fillRect(ccx + r * 0.5, ccy - r * 0.4, r * 0.5, r);
+        } else {
+          for (const [ox, oy] of [[-0.18, 0.06], [0.18, 0.06], [0, -0.12]]) {
+            ctx.beginPath();
+            ctx.arc(ccx + ox * z, ccy + oy * z, r, 0, 6.283); ctx.fill();
+          }
+        }
+        ctx.strokeStyle = 'rgba(0,0,0,0.22)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+    }
+  }
+}
+
 function renderWorld() {
   const d = WORLD.data; if (!d || !WORLD.base || !WORLD.cam) return;
   const cv = document.getElementById('world-canvas');
@@ -3842,35 +3915,17 @@ function renderWorld() {
       (dt.x0 - cam.camX) * z, (dt.y0 - cam.camY) * z, (dt.x1 - dt.x0) * z, (dt.y1 - dt.y0) * z);
   }
   const onScreen = (sx, sy, span) => !(sx < -span * z || sy < -span * z || sx > cv.width || sy > cv.height);
-  // Trees as ~2×2 canopy sprites, drawn from the detail window's veg layer when fully
-  // zoomed in (each detail cell = 1 tile). Above terrain, below entities/buildings.
+  // Foliage sprites (tree canopies + forage clumps) are STATIC relative to the terrain, but
+  // there can be tens of thousands of them in view — redrawing them every animation frame
+  // tanked the framerate, which backed up the websocket and starved the world's tick loop
+  // (entities then "teleported"). So we render them ONCE to an offscreen layer and just blit
+  // it each frame, rebuilding only when the view (zoom/pan/detail window) actually changes.
   if (d.detail && d.detail.step === 1 && z >= 6) {
-    const dt = d.detail, vs = dt.vegSp, vg = dt.vegGrowth;
-    for (let cy = 0; cy < dt.vh; cy++) {
-      for (let cx2 = 0; cx2 < dt.vw; cx2++) {
-        const sp = vs[cy * dt.vw + cx2];
-        const name = sp ? d.plants[sp] : null;
-        const col = name && WTREE_RGB[name];
-        if (!col) continue;
-        const sx = (dt.x0 + cx2 - cam.camX) * z, sy = (dt.y0 + cy - cam.camY) * z;
-        if (!onScreen(sx, sy, WTREE_SPAN)) continue;
-        const grow = 0.62 + 0.38 * (vg[cy * dt.vw + cx2] / 255);
-        const rad = WTREE_SPAN * z * 0.5 * grow;
-        const ccx = sx + z / 2, ccy = sy + z / 2;
-        ctx.fillStyle = 'rgba(40,28,16,0.9)';                 // short trunk
-        ctx.fillRect(ccx - z * 0.08, ccy, z * 0.16, rad * 0.8);
-        ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`; // canopy
-        ctx.beginPath();
-        if (name === 'pine') {                                // conifer: a talled triangle
-          ctx.moveTo(ccx, ccy - rad); ctx.lineTo(ccx + rad * 0.8, ccy + rad * 0.6);
-          ctx.lineTo(ccx - rad * 0.8, ccy + rad * 0.6); ctx.closePath();
-        } else {
-          ctx.arc(ccx, ccy, rad, 0, 6.283);
-        }
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1; ctx.stroke();
-      }
-    }
+    const key = `${d.detail._id || 0}|${z.toFixed(2)}|${cam.camX.toFixed(1)}|${cam.camY.toFixed(1)}|${cv.width}x${cv.height}`;
+    if (key !== WORLD._foliageKey) { buildFoliageLayer(cv, cam, z); WORLD._foliageKey = key; }
+    if (WORLD.foliage) ctx.drawImage(WORLD.foliage, 0, 0);
+  } else {
+    WORLD._foliageKey = null;
   }
   // Ore deposits: a small gem on the rock once you've zoomed in enough to mine-scout.
   if (z >= 3) {
@@ -3949,6 +4004,22 @@ function renderWorld() {
     const hr = Math.max(1.2, bw * 0.6);
     ctx.beginPath();
     ctx.arc(bx + bw / 2, by + hr, hr, 0, 6.283); ctx.fill(); // head
+    // A ⚙ floats over anyone mid-craft (crafting now takes in-world time), with a small
+    // ring filling to show progress — there are no work animations yet, so this is the tell.
+    if (p.crafting && z >= 4) {
+      const gx = bx + bw / 2, gy = by - 8, gr = Math.max(5, Math.min(11, z * 0.5));
+      ctx.font = `${gr * 1.7}px system-ui, sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('⚙', gx, gy);
+      const pct = Math.max(0, Math.min(1, p.crafting.pct || 0));
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 3;
+      ctx.arc(gx, gy, gr + 3, -Math.PI / 2, -Math.PI / 2 + 6.283); ctx.stroke();
+      ctx.beginPath();
+      ctx.strokeStyle = '#7ed79b'; ctx.lineWidth = 2.4;
+      ctx.arc(gx, gy, gr + 3, -Math.PI / 2, -Math.PI / 2 + 6.283 * pct); ctx.stroke();
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
     // A spoken line floats above the head for a short while after they say it (only when
     // zoomed in enough to read it). say_t is in game-minutes; ~25 of those ≈ a minute live.
     if (p.say && z >= 6 && d.clock != null && (d.clock - (p.say_t || 0)) < 25) {
@@ -3974,6 +4045,13 @@ function renderWorld() {
     ctx.fillStyle = 'rgba(126,94,52,0.5)';
     ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
   }
+}
+
+function setActiveSpeed(speed) {
+  const wrap = document.getElementById('whud-speed');
+  if (!wrap) return;
+  wrap.querySelectorAll('button[data-speed]').forEach(b =>
+    b.classList.toggle('active', +b.dataset.speed === Math.round(speed)));
 }
 
 function updateWorldHud() {
@@ -4006,6 +4084,7 @@ function worldOnTick(msg) {
     census: msg.census, version: msg.version,
   });
   if (activeView === 'world') { updateWorldHud(); startWorldAnim(); }
+  if (WORLD._personId != null) refreshPersonPanel(false);   // keep the open inspector live
 }
 
 // Terrain/flora was reshaped (a god acted) — pull a fresh snapshot, debounced.
@@ -4019,6 +4098,7 @@ function worldOnChanged() {
       const j = await (await fetch('/api/world')).json();
       if (j.enabled && j.world) setWorld(j.world);
     } catch (_) {}
+    if (_ledgerOpen()) loadLedger();   // a discovery/teaching may have just been logged
   }, 250);
 }
 
@@ -4103,6 +4183,88 @@ function worldInspect(x, y) {
   WORLD._roTimer = setTimeout(() => ro.classList.remove('show'), 3500);
 }
 
+// ── Person inspector — the full stats + mind of one soul ─────────────────────
+async function worldOpenPerson(pid) {
+  WORLD._personId = pid;
+  const panel = document.getElementById('world-person');
+  if (panel) { panel.style.display = 'flex'; panel.setAttribute('aria-hidden', 'false'); }
+  await refreshPersonPanel(true);
+}
+function worldClosePerson() {
+  WORLD._personId = null;
+  const panel = document.getElementById('world-person');
+  if (panel) { panel.style.display = 'none'; panel.setAttribute('aria-hidden', 'true'); }
+}
+async function refreshPersonPanel(force) {
+  const pid = WORLD._personId; if (pid == null) return;
+  const now = Date.now();
+  if (!force && now - (WORLD._personFetch || 0) < 1400) return;
+  WORLD._personFetch = now;
+  try {
+    const j = await (await fetch(`/api/world/person/${encodeURIComponent(pid)}`)).json();
+    if (!j.person) { worldClosePerson(); return; }
+    if (WORLD._personId === pid) renderPersonPanel(j.person);
+  } catch (_) {}
+}
+function renderPersonPanel(p) {
+  const body = document.getElementById('world-person-body') || document.getElementById('wperson-body');
+  const title = document.getElementById('wperson-title');
+  if (!body) return;
+  const pct = (v) => Math.round((v || 0) * 100);
+  const bar = (label, v, col) =>
+    `<div class="wp-bar"><span>${label}</span><div class="wp-track"><i style="width:${pct(v)}%;background:${col}"></i></div><b>${pct(v)}%</b></div>`;
+  const traits = p.traits || {}, values = p.values || {};
+  const trait = (k) => {
+    const base = traits[k] || 0, drift = values[k] || 0;
+    const sign = drift > 0.001 ? `+${drift.toFixed(2)}` : drift < -0.001 ? drift.toFixed(2) : '·';
+    return `<div class="wp-trait"><span>${k}</span><b>${(base + drift).toFixed(2)}</b><em>${sign}</em></div>`;
+  };
+  const rels = Object.values(p.rel || {}).sort((a, b) => (b.trust || 0) - (a.trust || 0));
+  const relRows = rels.length ? rels.map(r =>
+    `<div class="wp-rel"><span>${escapeHtml(r.name || '?')}</span>` +
+    `<em>trust ${pct(r.trust)}% · ${r.sentiment >= 0 ? 'warm' : 'cold'} ${pct(Math.abs(r.sentiment))}%` +
+    `${r.trades ? ` · ${r.trades} trade${r.trades > 1 ? 's' : ''}` : ''}</em></div>`).join('')
+    : '<div class="wp-empty">No one yet.</div>';
+  const mem = (p.memory || []).slice(-10).reverse();
+  const memRows = mem.length ? mem.map(m =>
+    `<div class="wp-mem"><i>${escapeHtml(m.kind || '')}</i> ${escapeHtml(m.text || '')}</div>`).join('')
+    : '<div class="wp-empty">No memories yet.</div>';
+  const refl = (p.reflections || []).slice(-5).reverse();
+  const reflRows = refl.length ? refl.map(r =>
+    `<div class="wp-refl">“${escapeHtml(typeof r === 'string' ? r : (r.text || ''))}”</div>`).join('') : '';
+  const inv = Object.entries(p.inv || {}).filter(([, n]) => n)
+    .map(([k, n]) => `${n}× ${k.replace(/_/g, ' ')}`).join(', ') || 'nothing';
+  const craftLine = p.crafting
+    ? `<div class="wp-craft">⚙ crafting <b>${(p.crafting.out || p.crafting.rid).replace(/_/g, ' ')}</b> — ${pct(p.crafting.pct)}%` +
+      `${p.crafting.left_min != null ? ` (${Math.round(p.crafting.left_min)} game-min left)` : ''}</div>` : '';
+  if (title) title.textContent = p.name || 'Soul';
+  const age = p.age != null ? `${p.age.toFixed(1)} days` : '—';
+  body.innerHTML =
+    `<div class="wp-sub">${escapeHtml(p.action || 'idle')} · age ${age}</div>` +
+    craftLine +
+    (p.intent ? `<div class="wp-intent">“${escapeHtml(p.intent)}”</div>` : '') +
+    (p.say ? `<div class="wp-say">💬 ${escapeHtml(p.say)}</div>` : '') +
+    `<div class="wp-sec">Body</div>` +
+    bar('health', p.hp, '#7ed79b') +
+    bar('hunger', p.hunger, '#e0a13c') +
+    bar('thirst', p.thirst, '#56b0c4') +
+    bar('fatigue', p.fatigue, '#b07cd8') +
+    `<div class="wp-sec">Temperament <em>(born · lived drift)</em></div>` +
+    `<div class="wp-traits">${['sociability', 'ambition', 'curiosity', 'caution'].map(trait).join('')}</div>` +
+    `<div class="wp-sec">Carrying</div><div class="wp-inv">${escapeHtml(inv)}</div>` +
+    (() => {
+      const SURV = { leaf_flask: 'leaf flask', forage_sack: 'forage sack', sleeping_mat: 'sleeping mat', campfire: 'campfire' };
+      const knows = (p.recipes || []).filter(r => SURV[r]).map(r => SURV[r]);
+      const open = Object.keys(SURV).filter(r => !(p.recipes || []).includes(r)).map(r => SURV[r]);
+      return `<div class="wp-sec">Make-shift craft</div>` +
+        `<div class="wp-inv">knows: ${knows.length ? escapeHtml(knows.join(', ')) : '—'}</div>` +
+        (open.length ? `<div class="wp-inv" style="opacity:.6">still puzzling: ${escapeHtml(open.join(', '))}</div>` : '');
+    })() +
+    `<div class="wp-sec">Relationships <em>${rels.length}</em></div>${relRows}` +
+    (reflRows ? `<div class="wp-sec">Beliefs</div>${reflRows}` : '') +
+    `<div class="wp-sec">Memory stream <em>recent</em></div>${memRows}`;
+}
+
 async function worldPaint(x, y) {
   const d = WORLD.data; if (!d || x < 0 || y < 0 || x >= d.w || y >= d.h) return;
   const r = +(document.getElementById('wbrush')?.value || 4);
@@ -4166,6 +4328,53 @@ async function loadCraftingRecipes() {
   } catch (_) { WORLD._catalog = null; }
   WORLD._catalogLoading = false;
   renderCraftingList();
+}
+
+// ── Ledger of Making — discoveries (who/when/why) + failed inventions ──────────
+async function loadLedger() {
+  const list = document.getElementById('wledger-list');
+  if (list && !list.innerHTML) list.innerHTML = '<div class="wledger-empty">Loading…</div>';
+  try {
+    const j = await (await fetch('/api/world/ledger')).json();
+    WORLD._ledger = j.enabled ? (j.ledger || []) : null;
+  } catch (_) { WORLD._ledger = null; }
+  renderLedger();
+}
+function _ledgerOpen() {
+  const sec = document.querySelector('.wmenu[data-menu="ledger"]');
+  return sec && sec.classList.contains('open');
+}
+function renderLedger() {
+  const list = document.getElementById('wledger-list');
+  if (!list) return;
+  const led = WORLD._ledger;
+  if (!led) { list.innerHTML = '<div class="wledger-empty">Ledger unavailable.</div>'; return; }
+  const made = led.filter(e => e.kind === 'made');
+  const failed = led.filter(e => e.kind === 'failed');
+  const viaLabel = (v) => v && v.startsWith('taught') ? v : (v === 'reasoned out' ? 'reasoned it out' : 'worked it out');
+  let html = '';
+  if (!made.length && !failed.length) {
+    list.innerHTML = '<div class="wledger-empty">Nothing made yet — the band is still figuring things out.</div>';
+    return;
+  }
+  html += `<div class="wledger-grp">Discoveries <span>${made.length}</span></div>`;
+  for (const e of made.slice().reverse()) {
+    html += `<div class="wledger-row${e.first ? ' first' : ''}">` +
+      `<div class="wledger-main"><b>${escapeHtml(e.name || e.rid || '')}</b>` +
+      `${e.first ? '<em class="wledger-first">first!</em>' : ''}</div>` +
+      `<div class="wledger-sub">${escapeHtml(e.who || '?')} ${escapeHtml(viaLabel(e.via))} · Day ${e.day} ${escapeHtml(e.time || '')}</div>` +
+      (e.rationale ? `<div class="wledger-why">“${escapeHtml(e.rationale)}”</div>` : '') +
+      `</div>`;
+  }
+  if (failed.length) {
+    html += `<div class="wledger-grp">Failed inventions <span>${failed.length}</span></div>`;
+    for (const e of failed.slice().reverse().slice(0, 40)) {
+      html += `<div class="wledger-row failed">` +
+        `<div class="wledger-main"><b>${escapeHtml(e.combo || '')}</b> — nothing</div>` +
+        `<div class="wledger-sub">${escapeHtml(e.who || '?')} tried · Day ${e.day} ${escapeHtml(e.time || '')}</div></div>`;
+    }
+  }
+  list.innerHTML = html;
 }
 
 function renderCraftingList(filter = '') {
@@ -4233,6 +4442,7 @@ function bindWorld() {
       const sec = head.parentElement;
       const open = sec.classList.toggle('open');
       if (open && sec.dataset.menu === 'crafting') loadCraftingRecipes();   // lazy-load on first open
+      if (open && sec.dataset.menu === 'ledger') loadLedger();
     });
   });
   const csearch = document.getElementById('wcraft-search');
@@ -4295,6 +4505,35 @@ function bindWorld() {
   const stop = () => { WORLD.dragging = false; WORLD.panning = false; };
   cv?.addEventListener('pointerup', stop);
   cv?.addEventListener('pointercancel', stop);
+
+  // Double-click a soul to lay bare its stats and mind.
+  cv?.addEventListener('dblclick', (ev) => {
+    const { x, y } = worldTileAt(ev);
+    const d = WORLD.data; if (!d) return;
+    let best = null, bd = 9;
+    for (const p of (d.people || [])) {
+      const s = WORLD.smooth && WORLD.smooth.get(p.id);
+      const pxp = s ? s.x : p.x, pyp = s ? s.y : p.y;
+      const dd = Math.abs(pxp - x) + Math.abs(pyp - y);
+      if (dd < bd) { bd = dd; best = p; }
+    }
+    if (best && bd <= 3) worldOpenPerson(best.id);
+  });
+  document.getElementById('wperson-close')?.addEventListener('click', worldClosePerson);
+
+  // World speed (fast-forward) selector.
+  document.getElementById('whud-speed')?.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('button[data-speed]');
+    if (!btn) return;
+    const speed = +btn.dataset.speed;
+    setActiveSpeed(speed);                       // optimistic
+    try {
+      await fetch('/api/world/speed', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ speed }),
+      });
+    } catch (_) {}
+  });
   cv?.addEventListener('pointerleave', () => {
     const co = document.getElementById('whud-coords'); if (co) co.textContent = '';
   });

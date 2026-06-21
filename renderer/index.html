@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=46" />
+  <link rel="stylesheet" href="style.css?v=50" />
 </head>
 <body>
 
@@ -726,12 +726,28 @@
             <div class="whud-clock"><span id="whud-day">Day 0</span><span id="whud-time">08:00</span></div>
             <div class="whud-chip" id="whud-season">spring</div>
             <div class="whud-chip" id="whud-weather">clear</div>
+            <div class="whud-speed" id="whud-speed" title="World speed (fast-forward)">
+              <button data-speed="1" class="active">1×</button>
+              <button data-speed="2">2×</button>
+              <button data-speed="4">4×</button>
+            </div>
             <div class="whud-census" id="whud-census"></div>
           </div>
           <div class="whud-coords" id="whud-coords"></div>
 
           <!-- Inspect readout -->
           <div class="world-readout" id="world-readout"></div>
+
+          <!-- Person inspector — opens on double-clicking a soul; lays bare its stats + mind -->
+          <div class="world-person" id="world-person" style="display:none" aria-hidden="true">
+            <div class="wperson-head">
+              <span id="wperson-title">Soul</span>
+              <button class="wperson-close" id="wperson-close" title="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+              </button>
+            </div>
+            <div class="wperson-body" id="wperson-body"></div>
+          </div>
 
           <!-- Floating god-tools button (bottom-right) -->
           <button class="world-fab" id="world-fab" title="God tools" aria-expanded="false">
@@ -792,6 +808,14 @@
                   <input type="text" id="wcraft-search" class="wcraft-search" placeholder="Search 128 recipes…">
                   <div class="wmenu-label">The tech ladder people can climb — content for gods, the UI &amp; the future mind.</div>
                   <div id="wcraft-list" class="wcraft-list"></div>
+                </div>
+              </section>
+
+              <section class="wmenu" data-menu="ledger">
+                <button class="wmenu-head"><span>Ledger of Making</span><svg class="wmenu-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+                <div class="wmenu-body">
+                  <div class="wmenu-label">Who worked out — or was taught — each survival craft, and the dead ends along the way.</div>
+                  <div id="wledger-list" class="wledger-list"></div>
                 </div>
               </section>
 
@@ -901,6 +925,6 @@
     <div class="pt-hint" id="pt-hint">double-click her to hide the conversation</div>
   </div>
 
-  <script src="app.js?v=46"></script>
+  <script src="app.js?v=50"></script>
 </body>
 </html>

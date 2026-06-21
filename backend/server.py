@@ -247,14 +247,24 @@ async def context_poll_loop():
 
 
 async def broadcast(msg: dict):
-    dead = []
-    for ws in clients:
+    """Fan a message out to every websocket client CONCURRENTLY and with a per-client
+    timeout. Sequential awaits used to let one slow/stuck client (a backgrounded tab, a
+    leftover preview, a renderer that had fallen behind) block the whole send — which threw
+    backpressure onto the high-frequency world tick and froze the sim's clock for seconds at
+    a time. Now a laggard is bounded and dropped instead of stalling everyone."""
+    if not clients:
+        return
+
+    async def _send(ws):
         try:
-            await ws.send_json(msg)
+            await asyncio.wait_for(ws.send_json(msg), timeout=3.0)
+            return None
         except Exception:
-            dead.append(ws)
-    for ws in dead:
-        if ws in clients:
+            return ws                       # timed out or errored → drop it (it can reconnect)
+
+    results = await asyncio.gather(*[_send(ws) for ws in list(clients)])
+    for ws in results:
+        if ws is not None and ws in clients:
             clients.remove(ws)
 
 
@@ -576,24 +586,51 @@ async def company_engine_loop():
 # ecology are dt-scaled, so their balance is identical regardless of this rate.
 WORLD_STEP_SECONDS = float(os.getenv("AITHA_WORLD_STEP", "0.167"))   # real seconds per tick (~6/s)
 WORLD_SAVE_EVERY = int(os.getenv("AITHA_WORLD_SAVE_EVERY", "120"))  # ticks between saves (~1/min)
+WORLD_SPEEDS = (1.0, 2.0, 4.0)          # user-selectable fast-forward multipliers
+_WORLD_SPEED = 1.0                       # current multiplier (mirrors the world's saved value)
+
+
+def _world_speed() -> float:
+    return _WORLD_SPEED if _WORLD_SPEED > 0 else 1.0
 
 
 async def world_engine_loop():
+    global _WORLD_SPEED
     await asyncio.sleep(4)  # let startup settle (kept short so the world feels live at once)
     last = time.time()
+    prev_top = time.time()
     n = 0
     while True:
-        await asyncio.sleep(WORLD_STEP_SECONDS)
+        # The user-set speed multiplier ticks the loop faster AND advances more world-time per
+        # real second, together — so movement and the clock fast-forward in step, with the body
+        # sim's per-game-minute balance unchanged (it sees the same moves per game-minute).
+        speed = _world_speed()
+        await asyncio.sleep(WORLD_STEP_SECONDS / speed)
         try:
             if not (settings.get("capabilities") or {}).get("world", False):
                 last = time.time()      # stay in sync so we don't lurch when re-enabled
                 continue
+            t0 = time.time()
             w = await asyncio.to_thread(world_store.get_world)
+            _WORLD_SPEED = getattr(w, "speed", 1.0) or 1.0   # world is the source of truth
             now = time.time()
-            dt = min(now - last, 30.0)  # cap a long stall (e.g. machine slept)
+            dt = min((now - last) * speed, 30.0)  # cap a long stall (e.g. machine slept)
             last = now
             await asyncio.to_thread(w.step, dt)
+            t_step = time.time()
             await broadcast({"type": "world_tick", **w.tick_state()})
+            t_send = time.time()
+            # If a whole cycle runs long the clock visibly freezes then jumps. Break the gap
+            # down so the cause is unambiguous: `step`/`broadcast` = work in THIS loop; the
+            # leftover `starved` time is the event loop being held elsewhere (a local model
+            # pinning the CPU, a heavy save, another coroutine) — i.e. "waiting for the AI."
+            cycle = t_send - prev_top
+            if cycle > 1.5:
+                work = (t_step - now) + (t_send - t_step)
+                starved = max(0.0, cycle - work - WORLD_STEP_SECONDS / speed)
+                print(f"[world] slow cycle {cycle:.1f}s — step {t_step - now:.1f}s, "
+                      f"broadcast {t_send - t_step:.1f}s, starved {starved:.1f}s, clients {len(clients)}")
+            prev_top = t_send
             n += 1
             if n % WORLD_SAVE_EVERY == 0:
                 await asyncio.to_thread(w.save)
@@ -654,14 +691,14 @@ async def _mind_think_one():
         target = _live(w, pid)
         if target is not None and data:
             mind_store.apply_deliberation(target, data, ctx, clock)
-        # Invention by reasoning: if they've set their mind to tinkering and the band still
-        # has unsolved problems, let the model REASON OUT a make-shift craft (the user's
-        # "guess the ingredients" mechanic). A correct hunch unlocks it for everyone.
+        # Invention by reasoning: if they've set their mind to tinkering and they still have
+        # unsolved problems, let the model REASON OUT a make-shift craft (the "guess the
+        # ingredients" mechanic). A correct hunch unlocks it for THEM (it then spreads by
+        # teaching) and is written into the Ledger of Making; a wrong hunch is logged too.
         if target is not None and ctx.get("unsolved") and (target.get("intention") or {}).get("kind") == "tinker":
             dsys, dusr = mind_store.discover_messages(target, ctx)
             draw = await asyncio.wait_for(brain._complete(dsys, dusr, max_tokens=120), MIND_THINK_BUDGET)
-            rid = mind_store.apply_discovery(target, brain._parse_json_object(draw),
-                                             ctx, w.known_recipes, clock)
+            rid = w.apply_llm_discovery(target, brain._parse_json_object(draw))
             if rid:
                 w.version += 1
                 await broadcast({"type": "world_changed",
@@ -1032,6 +1069,47 @@ async def api_world_view(x0: int = 0, y0: int = 0, x1: int = 0, y1: int = 0, ste
         return {"enabled": False}
     w = await asyncio.to_thread(world_store.get_world)
     return {"enabled": True, "view": await asyncio.to_thread(w.view, x0, y0, x1, y1, step)}
+
+
+@app.get("/api/world/person/{pid}")
+async def api_world_person(pid: str):
+    """The full mind of one world-person — stats, temperament, lived values, memory stream,
+    beliefs, relationships and current intention — for the inspector panel that opens when a
+    god double-clicks them. (Per-tick payloads ship a slimmed person; this is the deep view.)"""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"enabled": False}
+    w = await asyncio.to_thread(world_store.get_world)
+    person = await asyncio.to_thread(w.person_detail, pid)
+    return {"enabled": True, "person": person}
+
+
+@app.post("/api/world/speed")
+async def api_world_speed(req: Request):
+    """Set the live fast-forward multiplier (1×/2×/4×) for the World tab. Persisted on the
+    world so it survives a restart; the tick loop reads it each iteration."""
+    global _WORLD_SPEED
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False}
+    body = await req.json()
+    speed = float(body.get("speed", 1.0))
+    speed = min(WORLD_SPEEDS[-1], max(WORLD_SPEEDS[0], speed))
+    _WORLD_SPEED = speed
+    w = await asyncio.to_thread(world_store.get_world)
+    w.speed = speed
+    await asyncio.to_thread(w.save)
+    await broadcast({"type": "world_speed", "speed": speed})
+    return {"ok": True, "speed": speed}
+
+
+@app.get("/api/world/ledger")
+async def api_world_ledger():
+    """The Ledger of Making — every first-discovered survival craft (who reasoned/worked it
+    out or who taught whom, and when) and every failed experiment (the dead-end material
+    combos). Powers the World-tab Ledger panel."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"enabled": False}
+    w = await asyncio.to_thread(world_store.get_world)
+    return {"enabled": True, "ledger": list(w.ledger)}
 
 
 @app.get("/api/world/recipes")

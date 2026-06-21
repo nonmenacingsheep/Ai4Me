@@ -23,6 +23,7 @@ Design notes that shape everything here:
 
 import base64
 import heapq
+import itertools
 import json
 import os
 import time
@@ -58,6 +59,7 @@ MOUNTAIN_LEVEL = 0.78           # elevation above this reads as mountain/rock
 # re-enter the box fast-forward up to this many game-hours of growth at once.
 ACTIVE_MAX = 768
 ECO_CATCHUP_CAP = 48
+ECO_TIME_BUDGET = 0.05          # max wall-seconds an ecology catch-up may spend in one tick
 OVERVIEW_MAX = 256              # the whole-world snapshot is downsampled to ≤ this per side
 
 # Time pace. This is a *thinking-first* world: the people deliberate about what their lives
@@ -69,6 +71,9 @@ GAME_SEC_PER_REAL_SEC = 8.0     # 1 real second == 8 game-seconds  →  1 game-d
 # body actuates the standing intention every tick between these deliberations.
 DELIBERATE_BEAT = 20.0
 EXPLORE_LEASH = 40              # tiles from home a wanderer ranges before turning back
+TINKER_BEAT = 200.0            # game-minutes between a mind's make-shift-craft experiments
+TEACH_BEAT = 120.0            # game-minutes before a soul can be taught another craft
+LEDGER_CAP = 240               # most entries kept in the Ledger of Making
 DAYS_PER_SEASON = 15
 SEASONS = ("spring", "summer", "autumn", "winter")
 DAYS_PER_YEAR = DAYS_PER_SEASON * len(SEASONS)
@@ -213,7 +218,10 @@ GLYPH_CORE = "C"
 BLOCK_COST = {BLOCK_FLOOR: ("wood", 1), BLOCK_WALL: ("wood", 2), BLOCK_DOOR: ("wood", 2),
               BLOCK_WINDOW: ("wood", 1), BLOCK_FENCE: ("wood", 1), BLOCK_LEAF: ("leaves", 1)}
 ROOF_COST = ("fiber", 2)                 # default thatch over each sheltered tile
-SOLID_BLOCKS = {BLOCK_WALL, BLOCK_LEAF}  # tiles people can't walk through (doors/cores are open)
+SOLID_BLOCKS = {BLOCK_WALL}  # tiles people can't walk through. A leaf lean-to is flimsy and
+# open-fronted, so it is NOT solid: people brush through its panels. (When leaf panels blocked
+# movement, non-overlapping shelters packed along the narrow bank into a wall that boxed folk
+# away from the water they'd settled beside — and they died of thirst at home.)
 
 # Built-in blueprints. layout = rows of glyphs; roof=True thatches every interior
 # (floor/door) tile once the shell is up. "insulation" (0..1) is how well it holds
@@ -335,10 +343,14 @@ class World:
         self.ore_nodes: list[dict] = []  # scattered metal/coal deposits to mine
         self._ore_index: dict[tuple[int, int], dict] = {}  # (x,y)->node, rebuilt on load/seed
         self.log: list[dict] = []        # recent god actions / notable events
-        # The band's shared craft knowledge. It is born knowing the basics; the make-shift
-        # survival crafts (water flask, etc.) must be DISCOVERED by its people and then
-        # spread to all. (See crafting.SURVIVAL_DISCOVERIES + mind discovery.)
+        # Craft knowledge. Everyone is born knowing the basics (STARTER_RECIPES); the make-
+        # shift survival crafts (water flask, etc.) must be DISCOVERED by an individual and
+        # then SPREAD soul to soul by teaching. `known_recipes` is the band-wide union (for
+        # the catalog/UI), but who-knows-what is now personal (p["recipes"]). Every first
+        # making and every failed experiment is written into the Ledger of Making.
         self.known_recipes: set[str] = set(crafting.STARTER_RECIPES)
+        self.ledger: list[dict] = []     # the Ledger of Making — discoveries + dead ends
+        self.speed = 1.0                 # fast-forward multiplier (1×/2×/4×), set from the UI
         self.version = 0                 # bumped on any mutation, for render diffing
         self.rng = np.random.default_rng()
         self._origin = (W // 2, H // 2)  # founding-valley centre
@@ -850,11 +862,22 @@ class World:
         cy0, cy1 = y0 // CHUNK, (y1 - 1) // CHUNK
         cx0, cx1 = x0 // CHUNK, (x1 - 1) // CHUNK
         # Fast-forward by however stale the most-dormant chunk in the box is (capped).
-        lag_hours = (self.clock - float(self._chunk_eco[cy0:cy1 + 1, cx0:cx1 + 1].min())) / 60.0
+        eco_min = float(self._chunk_eco[cy0:cy1 + 1, cx0:cx1 + 1].min())
+        lag_hours = (self.clock - eco_min) / 60.0
         passes = int(min(max(lag_hours, 1), ECO_CATCHUP_CAP))
+        # TIME-BOX the catch-up: a big lag over a large active region (e.g. when a god places
+        # people into long-dormant terrain, or the band spreads toward the 768² cap) used to
+        # run dozens of full-region passes in ONE tick — multi-second freezes that starved the
+        # live loop. Cap the wall-time; advance the dormancy clock only by what we actually
+        # simulated, so the rest catches up over the next few ticks instead of one stall.
+        t0 = time.perf_counter()
+        done = 0
         for _ in range(passes):
             self._tick_ecology(reg)
-        self._chunk_eco[cy0:cy1 + 1, cx0:cx1 + 1] = self.clock
+            done += 1
+            if time.perf_counter() - t0 > ECO_TIME_BUDGET:
+                break
+        self._chunk_eco[cy0:cy1 + 1, cx0:cx1 + 1] = min(self.clock, eco_min + done * 60.0)
 
     def _update_weather(self):
         if self.clock < self._weather_until:
@@ -1106,10 +1129,26 @@ class World:
         spends its days commuting to drink and dies of the round trip."""
         cx, cy = center if center is not None else self._choose_origin()
         bx, by = self._nearest_waterside(cx, cy)             # the band's shared waterside camp
-        for _ in range(count):
-            jx = int(np.clip(bx + self.rng.integers(-3, 4), 0, W - 1))
-            jy = int(np.clip(by + self.rng.integers(-3, 4), 0, H - 1))
-            px, py = self._nearest_waterside(jx, jy, max_r=12)
+        # Settle the band SPREAD OUT along the shore, each on their own bank tile a few tiles
+        # from the next. Tight clustering used to make their shelters either grow inside one
+        # another or (once that was forbidden) pack into a solid wall that boxed people away
+        # from the very water they settled beside. Spacing at the waterside avoids both — and
+        # unlike spacing homes after the fact, it never pushes anyone inland to die commuting.
+        placed: list[tuple[int, int]] = []
+        spread, min_gap, attempts = 11, 4, 0
+        while len(placed) < count and attempts < count * 30:
+            attempts += 1
+            jx = int(np.clip(bx + self.rng.integers(-spread, spread + 1), 0, W - 1))
+            jy = int(np.clip(by + self.rng.integers(-spread, spread + 1), 0, H - 1))
+            px, py = self._nearest_waterside(jx, jy, max_r=14)
+            if all(abs(px - qx) + abs(py - qy) >= min_gap for qx, qy in placed):
+                placed.append((px, py))
+        # If the shore was too cramped to space everyone, fill the rest however we can.
+        while len(placed) < count:
+            jx = int(np.clip(bx + self.rng.integers(-spread, spread + 1), 0, W - 1))
+            jy = int(np.clip(by + self.rng.integers(-spread, spread + 1), 0, H - 1))
+            placed.append(self._nearest_waterside(jx, jy, max_r=14))
+        for px, py in placed:
             self._add_person(px, py)
 
     # ── people: the body loop (cheap, rule-based, no LLM) ───────────────────────
@@ -1206,11 +1245,12 @@ class World:
                     self.veg_growth[y, x] = max(0.0, g - 0.12)   # stripping leaves barely dents the plant
                     p["inv"]["leaves"] = p["inv"].get("leaves", 0) + LEAF_GATHER
             elif action == "craft":
-                if p["inv"].get("axe", 0) < 1 and p["inv"].get("wood", 0) >= BUILD["axe_wood"]:
-                    p["inv"]["wood"] -= BUILD["axe_wood"]
-                    p["inv"]["axe"] = 1
-                    self._note("craft", f"{p['name']} crafted a crude axe.")
-                    mind.remember(p, "shaped my first axe from wood", 0.7, "craft", self.clock)
+                # If nothing's underway yet, start the bootstrap axe (survival crafts start
+                # their own item in the decide step). Then tick the active craft's timer;
+                # the item is only granted when the work is finished.
+                if not p.get("craft") and p["inv"].get("axe", 0) < 1:
+                    self._begin_craft(p, "crude_axe")
+                self._advance_craft(p, dt_game_min)
             elif action == "found_site":
                 self._found_site(p)
             elif action == "build_block":
@@ -1257,6 +1297,8 @@ class World:
                     continue
                 for ev in mind.encounter(a, b, self.clock, self.rng):
                     self._note("social", ev)
+                # Knowledge spreads soul to soul: a trusted neighbour passes on a craft.
+                self._maybe_teach(a, b)
                 # Generosity: whoever has resolved to *provide* gives, if they're beside
                 # the other and carry a surplus — a one-way gift, the warmest social act.
                 if mind._manhattan(a, b) <= 1:
@@ -1377,8 +1419,8 @@ class World:
                 needy_id, needy_name, nd = q["id"], q["name"], d
         nearby = ", ".join(q["name"] for q in self.people
                            if q is not p and abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= PERSON["vision"] * 2)
-        unsolved = crafting.discoverable(self.known_recipes)
-        gear = [r for r in ("leaf_flask", "forage_sack", "sleeping_mat") if r in self.known_recipes]
+        unsolved = self._person_unsolved(p)        # what THIS soul hasn't worked out yet
+        gear = [r for r in ("leaf_flask", "forage_sack", "sleeping_mat") if self._person_knows(p, r)]
         needs_gear = any(p.get("inv", {}).get(r, 0) < 1 for r in gear)
         return {
             "needs_gear": needs_gear,
@@ -1441,14 +1483,9 @@ class World:
                 return "drink_pack", None
             return self._seek(p, x, y, False, drinkable, lx, ly, "water", "drink", "seek_water")
         if kind == "tinker":
-            # Sit and puzzle out a make-shift craft (offline trial-and-error; the LLM mind
-            # can leap straight to the answer separately). A find spreads to the whole band.
-            cand = crafting.discoverable(self.known_recipes)
-            _, rid = mind.experiment(p, cand, self.rng)
-            if rid:
-                mind.learn_recipe(p, self.known_recipes, rid, self.clock)
-                self._note("discovery", f"{p['name']} worked out how to make a {rid.replace('_', ' ')}.")
-                self.version += 1
+            # Sit and puzzle out a make-shift craft — slow, gated, motivated by a felt
+            # problem, and PERSONAL (it spreads to others later by teaching, not at once).
+            self._tinker(p, night)
             return "tinker", None
         if kind == "eat":
             if p["inv"].get("food", 0) > 0 and p["hunger"] > 0.3:
@@ -1514,6 +1551,12 @@ class World:
         inv = p["inv"]
         hx, hy = p["home"]
 
+        # Already mid-craft? Keep at it (the item takes in-world time to finish). The drive
+        # arbiter still owns this person — if a need bites, survival wins the next deliberation
+        # and they break off here; the half-done craft waits, its inputs already reserved.
+        if p.get("craft"):
+            return "craft", None
+
         getters = {
             "wood":   lambda: self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly,
                                          "wood", "chop", "seek_wood"),
@@ -1570,21 +1613,19 @@ class World:
         Returns a body action, or None when they're fully kitted out."""
         inv = p["inv"]
         for rid, have_key, _raw in self._GEAR:
-            if rid not in self.known_recipes:
+            if not self._person_knows(p, rid):
                 continue
             if rid == "leaf_flask" and inv.get("leaf_flask", 0) >= 1:
                 continue
             if rid in ("forage_sack", "sleeping_mat") and inv.get(rid, 0) >= 1:
                 continue
-            if self._craft_known(p, rid):                      # have everything — make it now
-                self._note("craft", f"{p['name']} fashioned a {rid.replace('_', ' ')}.")
-                mind.remember(p, f"made a {rid.replace('_', ' ')} with my own hands",
-                              0.6, "craft", self.clock)
+            if crafting.can_craft(inv, rid, stations=(), tools=None):
+                self._begin_craft(p, rid)                      # have everything — start it (takes time)
                 return "craft", None
             need = crafting.missing(inv, rid)                  # what's short — go get it
             if "rope" in need and inv.get("rope", 0) < need["rope"]:
                 if inv.get("fiber", 0) >= 3:
-                    self._craft_known(p, "rope")               # spin fiber into rope on the spot
+                    self._begin_craft(p, "rope")               # spin fiber into rope (also takes time)
                     return "craft", None
                 return getters["fiber"]()
             for mat in ("leaves", "fiber"):
@@ -1612,14 +1653,16 @@ class World:
                 return t
         return None
 
-    def _blueprint_tasks(self, name, ox, oy):
+    def _blueprint_tasks(self, name, ox, oy, occupied=None):
         """Turn a blueprint at origin (ox,oy) into placement tasks + the home core tile, or
-        (None, None) if the footprint doesn't fit (off-map or over water). Each task carries
-        its own material cost so blueprints can mix wood, thatch and leaves. Blocks are laid
-        first, then roof tiles. A 'C' core lays no block but is roofed and becomes home."""
+        (None, None) if the footprint doesn't fit (off-map, over water, or OVERLAPPING an
+        existing building/site — which is why shelters used to grow inside one another). Each
+        task carries its own material cost so blueprints can mix wood, thatch and leaves.
+        Blocks are laid first, then roof tiles. A 'C' core lays no block but is roofed/home."""
         bp = BLUEPRINTS.get(name)
         if not bp:
             return None, None
+        occupied = occupied if occupied is not None else self._occupied_tiles()
         layout = bp["layout"]
         roof_cost = bp.get("roof_cost", ROOF_COST)
         blocks, roof, core = [], [], None
@@ -1627,7 +1670,8 @@ class World:
             for dx, ch in enumerate(row):
                 tx, ty = ox + dx, oy + dy
                 if ch == GLYPH_CORE:
-                    if not self._in(tx, ty) or self.water[ty, tx] != WATER_NONE:
+                    if not self._in(tx, ty) or self.water[ty, tx] != WATER_NONE \
+                            or (tx, ty) in occupied:
                         return None, None
                     roof.append({"x": tx, "y": ty, "code": int(BLOCK_FLOOR), "layer": "roof",
                                  "cost": list(roof_cost), "done": False})
@@ -1636,7 +1680,8 @@ class World:
                 code = BLOCK_CHARS.get(ch, BLOCK_EMPTY)
                 if code == BLOCK_EMPTY:
                     continue
-                if not self._in(tx, ty) or self.water[ty, tx] != WATER_NONE:
+                if not self._in(tx, ty) or self.water[ty, tx] != WATER_NONE \
+                        or (tx, ty) in occupied:
                     return None, None
                 blocks.append({"x": tx, "y": ty, "code": int(code), "layer": "block",
                                "cost": list(BLOCK_COST[code]), "done": False})
@@ -1645,18 +1690,48 @@ class World:
                                  "cost": list(roof_cost), "done": False})
         return blocks + roof, core
 
+    def _occupied_tiles(self) -> set:
+        """Every tile already taken by a placed block, a roof, or a pending construction
+        site — so a new footprint can be rejected before it's laid over someone's home."""
+        occ = set(self.blocks.keys())
+        occ |= set(self.roofs)
+        for s in self.sites:
+            if s.get("done"):
+                continue
+            for t in s["tasks"]:
+                occ.add((t["x"], t["y"]))
+        return occ
+
+    @staticmethod
+    def _site_offsets():
+        """Footprint origins to try, spiralling outward from home so a site lands as close
+        as it can but steps away ring by ring when the near ground is taken."""
+        offs = [(0, 0)]
+        for r in range(1, 7):
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    if max(abs(dx), abs(dy)) == r:
+                        offs.append((dx, dy))
+        return offs
+
     def _found_site(self, p, name: str = "leaf_shelter"):
         """Reserve a building footprint near the person's home. Tries the chosen blueprint
         (falling back to the always-cheap leaf shelter) over a few offsets so a tree/edge
         doesn't block it forever; on failure sets a cooldown before retrying."""
         bx, by = p["home"]
+        occupied = self._occupied_tiles()
         cands = [name] + (["leaf_shelter"] if name != "leaf_shelter" else [])
         for cand in cands:
             bp = BLUEPRINTS[cand]
             bw, bh = len(bp["layout"][0]), len(bp["layout"])
-            for off in ((0, 0), (1, 0), (0, 1), (-1, 0), (0, -1), (2, 1), (-2, -1)):
+            for off in self._site_offsets():
                 ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
-                tasks, core = self._blueprint_tasks(cand, ox, oy)
+                # Non-overlapping footprint only (so shelters no longer grow inside one
+                # another). We deliberately DON'T force homes far apart: the band settles
+                # tight on the waterside, and pushing a home inland to make room is what
+                # kills people on the commute to drink. The spiral finds the nearest free
+                # spot, which stays by the bank.
+                tasks, core = self._blueprint_tasks(cand, ox, oy, occupied)
                 if not tasks:
                     continue
                 site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
@@ -1726,15 +1801,214 @@ class World:
         if cap > 0 and inv.get("water", 0) < cap:
             inv["water"] = cap
 
+    # ── Crafting takes time ──────────────────────────────────────────────────────
+    # A craft is no longer instant: beginning one pays its inputs up front and starts a
+    # game-minute timer (crafting.craft_minutes). The worker holds station with a ⚙ over
+    # their head until it finishes, when the item is granted. State lives on the person as
+    # p["craft"] = {rid, out, qty, left, total}; None when idle.
+    _CRAFT_DONE_NOTE = {
+        "crude_axe": "shaped my first axe from wood",
+        "rope": "twisted fiber into a length of rope",
+        "leaf_flask": "made a leaf flask to carry water",
+        "forage_sack": "wove a sack to forage more",
+        "sleeping_mat": "wove a mat to rest well anywhere",
+    }
+
+    def _begin_craft(self, p, rid: str) -> bool:
+        """Start crafting `rid` if nothing's already underway: pay the inputs now and set a
+        timer. Returns True if a craft is active afterwards (so the caller holds position)."""
+        if p.get("craft"):
+            return True
+        inv = p["inv"]
+        if rid == "crude_axe":                                  # bootstrap tool, predates recipes
+            if inv.get("wood", 0) < BUILD["axe_wood"]:
+                return False
+            inv["wood"] -= BUILD["axe_wood"]
+            out, qty = "axe", 1
+        else:
+            if rid in crafting.SURVIVAL_DISCOVERIES and not self._person_knows(p, rid):
+                return False                                     # can't make what they haven't worked out
+            if not crafting.can_craft(inv, rid, stations=(), tools=None):
+                return False
+            r = crafting.RECIPES[rid]
+            for k, n in r["inp"].items():                       # reserve inputs up front
+                inv[k] = inv.get(k, 0) - n
+                if inv[k] <= 0:
+                    del inv[k]
+            out, qty = r["out"], r["qty"]
+        mins = crafting.craft_minutes(rid)
+        p["craft"] = {"rid": rid, "out": out, "qty": qty, "left": mins, "total": mins}
+        self.version += 1
+        return True
+
+    def _advance_craft(self, p, dt_game_min: float) -> bool:
+        """Tick an in-progress craft; grant the item and clear the state when it finishes.
+        Returns True on the tick it completes."""
+        c = p.get("craft")
+        if not c:
+            return False
+        c["left"] = max(0.0, c["left"] - dt_game_min)
+        if c["left"] > 0:
+            return False
+        p["inv"][c["out"]] = p["inv"].get(c["out"], 0) + c["qty"]
+        self.version += 1
+        rid = c["rid"]
+        p["craft"] = None
+        nice = rid.replace("_", " ")
+        self._note("craft", f"{p['name']} finished a {nice}.")
+        mind.remember(p, self._CRAFT_DONE_NOTE.get(rid, f"crafted a {nice} with my own hands"),
+                      0.6, "craft", self.clock)
+        return True
+
     def _craft_known(self, p, rid: str) -> bool:
         """Craft a recipe the band has discovered, consuming inputs from the person's pack.
-        Tier-0 survival crafts need no station; returns True on success."""
+        Tier-0 survival crafts need no station; returns True on success. (Instant — used by
+        tests and any path that wants an immediate result; the live body uses _begin_craft
+        so crafting takes time.)"""
         if rid not in self.known_recipes:
             return False
         ok = crafting.do_craft(p["inv"], rid, stations=(), tools=None)
         if ok:
             self.version += 1
         return ok
+
+    # ── Recipe knowledge: personal, discovered, taught, logged ───────────────────
+    # The felt problem that prompts each experiment — invention is MOTIVATED, so a soul
+    # works out the water flask when thirst has been biting, not by idle luck.
+    _DISCOVERY_TRIGGER = {
+        "leaf_flask":   lambda p, night: p.get("thirst", 0) > 0.28,
+        "forage_sack":  lambda p, night: p.get("hunger", 0) > 0.28,
+        "sleeping_mat": lambda p, night: p.get("fatigue", 0) > 0.32,
+        "campfire":     lambda p, night: night or p.get("fatigue", 0) > 0.45,
+    }
+    _DISCOVERY_RATIONALE = {
+        "leaf_flask":   "If I fold broad leaves and bind them with cord, they might hold water to carry.",
+        "forage_sack":  "A pouch woven of fibre and cord could carry far more than my two hands.",
+        "sleeping_mat": "Leaves layered over fibre would make a mat to rest on, away from home.",
+        "campfire":     "Stack wood on stone and work it hard enough — maybe I can keep the fire.",
+    }
+
+    def _person_knows(self, p, rid: str) -> bool:
+        return rid in crafting.STARTER_RECIPES or rid in p.get("recipes", [])
+
+    def _person_unsolved(self, p) -> list:
+        known = p.get("recipes", [])
+        return [rid for rid in crafting.SURVIVAL_DISCOVERIES if rid not in known]
+
+    def _ledger_add(self, entry: dict) -> None:
+        self.ledger.append(entry)
+        if len(self.ledger) > LEDGER_CAP:
+            del self.ledger[0]
+
+    def _grant_recipe(self, p, rid: str, via: str, rationale: str = "") -> bool:
+        """Teach/record a survival craft to ONE soul: add it to their knowledge, burn a proud
+        (or grateful) memory, and write it into the Ledger of Making. Returns True if new to
+        them. `via` ∈ worked out | reasoned out | taught by <name>."""
+        if not rid or self._person_knows(p, rid):
+            return False
+        p.setdefault("recipes", []).append(rid)
+        self.known_recipes.add(rid)
+        name = rid.replace("_", " ")
+        problem = crafting.SURVIVAL_DISCOVERIES.get(rid, "")
+        first = not any(e.get("rid") == rid for e in self.ledger if e.get("kind") == "made")
+        mind.remember(p, f"I {via} how to make a {name}" + (f" — for {problem}" if problem else ""),
+                      0.9, "discovery", self.clock)
+        if via in ("worked out", "reasoned out"):
+            mind.speak(p, f"I've worked out how to make a {name}!", self.clock)
+            vals = p.setdefault("values", {t: 0.0 for t in mind.TRAITS})
+            vals["curiosity"] = round(min(mind.VALUE_CAP, vals.get("curiosity", 0.0) + 0.05), 3)
+        self._ledger_add({"kind": "made", "rid": rid, "name": name, "who": p["name"],
+                          "who_id": p["id"], "via": via, "rationale": rationale, "first": first,
+                          "day": self.day(), "clock": round(self.clock, 1),
+                          "time": f"{int(self.time_of_day()):02d}:00"})
+        return True
+
+    def _record_failed(self, p, guess) -> None:
+        """Log a make-shift experiment that came to nothing — the Ledger's failed-inventions
+        column. De-duplicated per person so one tinkerer can't flood it."""
+        if not guess:
+            return
+        combo = ", ".join(sorted(guess))
+        for e in reversed(self.ledger[-12:]):
+            if e.get("kind") == "failed" and e.get("who_id") == p["id"] and e.get("combo") == combo:
+                return
+        self._ledger_add({"kind": "failed", "who": p["name"], "who_id": p["id"], "combo": combo,
+                          "day": self.day(), "clock": round(self.clock, 1),
+                          "time": f"{int(self.time_of_day()):02d}:00"})
+
+    def _tinker(self, p, night: bool) -> None:
+        """Gated offline invention: only now and then (TINKER_BEAT), and only toward a problem
+        the person is actually feeling, do they try a fresh combination of materials. A hit
+        becomes a real discovery; a miss is logged as a dead end. The slow, earned offline
+        path — the LLM mind can leap straight to the answer separately."""
+        if self.clock < p.get("tinker_cd", 0):
+            return
+        p["tinker_cd"] = self.clock + TINKER_BEAT * (0.7 + 0.6 * self.rng.random())
+        unsolved = self._person_unsolved(p)
+        targets = [rid for rid in unsolved
+                   if self._DISCOVERY_TRIGGER.get(rid, lambda *_: True)(p, night)]
+        if not targets:
+            return
+        tried = {tuple(t) for t in p.get("tried", [])}
+        combos = [c for k in (2, 3) for c in itertools.combinations(mind.CRAFT_VOCAB, k)
+                  if c not in tried]
+        if not combos:
+            return
+        guess = list(combos[int(self.rng.integers(len(combos)))])
+        rid = crafting.identify(set(guess), targets)            # solves a problem they FEEL?
+        if rid:
+            p.setdefault("tried", []).append(guess)             # don't re-derive it
+            self._grant_recipe(p, rid, via="worked out",
+                               rationale=self._DISCOVERY_RATIONALE.get(rid, ""))
+            self._note("discovery", f"{p['name']} worked out how to make a {rid.replace('_', ' ')}.")
+        else:
+            # Burn it as a dead end ONLY if it matches no survival craft at all; a combo that
+            # would solve a problem they don't yet feel is left for when they do.
+            if crafting.identify(set(guess), self._person_unsolved(p)) is None:
+                p.setdefault("tried", []).append(guess)
+            self._record_failed(p, guess)
+
+    def apply_llm_discovery(self, p, data: dict) -> str | None:
+        """Route an LLM craft-hypothesis through the same grant/log path as offline invention:
+        canonicalize the guessed materials, and if they match a craft this soul hasn't worked
+        out, they reason it into being. Returns the recipe id, or None. Used by the mind loop."""
+        if not isinstance(data, dict):
+            return None
+        raw = data.get("ingredients") or []
+        guess = {m for m in (mind.canon_material(str(x)) for x in raw) if m}
+        say = str(data.get("say", "") or "")
+        if say:
+            mind.speak(p, say, self.clock)
+        rid = crafting.identify(guess, self._person_unsolved(p))
+        if rid:
+            self._grant_recipe(p, rid, via="reasoned out", rationale=say or
+                               self._DISCOVERY_RATIONALE.get(rid, ""))
+            return rid
+        if guess:
+            self._record_failed(p, guess)
+        return None
+
+    def _maybe_teach(self, a, b) -> None:
+        """When two souls are together, the one who knows a survival craft the other lacks may
+        pass it on — gated by trust and a per-learner cooldown, so knowledge spreads over days
+        rather than all at once. Records a 'taught by' line in the Ledger."""
+        for teacher, learner in ((a, b), (b, a)):
+            if self.clock < learner.get("learn_cd", 0):
+                continue
+            gap = [rid for rid in (teacher.get("recipes") or []) if not self._person_knows(learner, rid)]
+            if not gap:
+                continue
+            rel = learner.get("rel", {}).get(teacher["id"]) or {}
+            trust = rel.get("trust", 0.0)
+            if trust < 0.4 or self.rng.random() > 0.5:
+                continue
+            rid = gap[int(self.rng.integers(len(gap)))]
+            if self._grant_recipe(learner, rid, via=f"taught by {teacher['name']}",
+                                  rationale=f"{teacher['name']} showed me how"):
+                learner["learn_cd"] = self.clock + TEACH_BEAT * (0.7 + 0.6 * self.rng.random())
+                self._note("discovery",
+                           f"{teacher['name']} taught {learner['name']} to make a {rid.replace('_', ' ')}.")
+                return
 
     def _adjacent_water(self, x, y) -> bool:
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -1920,13 +2194,13 @@ class World:
             "w": W, "h": H, "ovw": ovw, "ovh": ovh, "ov_step": step,
             "version": self.version, "seed": self.seed,
             "clock": round(self.clock, 1), "day": self.day(), "time": round(self.time_of_day(), 2),
-            "season": self.season(), "weather": self.weather,
+            "season": self.season(), "weather": self.weather, "speed": self.speed,
             "biomes": BIOMES, "sea_level": int(SEA_LEVEL * 255),
             "plants": {sp: PLANTS[sp]["name"] for sp in PLANTS},
             "block_names": BLOCK_NAMES,
             "layers": self._pack_layers(0, H, 0, W, step),
             "animals": self.animals,
-            "people": self.people,
+            "people": self._people_light(),
             "structures": self.structures,
             "blocks": self._blocks_payload(),
             "roofs": self._roofs_payload(),
@@ -1948,6 +2222,25 @@ class World:
             "version": self.version, "layers": self._pack_layers(y0, y1, x0, x1, step),
         }
 
+    # Per-person keys too heavy to ship every tick (the mind's memory stream + distilled
+    # beliefs grow over a life). The live renderer doesn't need them; the inspector panel
+    # pulls the full mind on demand via person_detail(). Stripping them keeps the ~6/s
+    # broadcast small so the world stays smooth instead of stuttering.
+    _HEAVY_PERSON_KEYS = ("memory", "reflections", "craft")
+
+    def _people_light(self) -> list:
+        """People minus their heavy mind state, with a compact crafting summary added so
+        the renderer can float a ⚙ (and progress) over a worker's head."""
+        out = []
+        for p in self.people:
+            q = {k: v for k, v in p.items() if k not in self._HEAVY_PERSON_KEYS}
+            c = p.get("craft")
+            if c and c.get("total"):
+                q["crafting"] = {"rid": c["rid"], "out": c["out"],
+                                 "pct": round(max(0.0, 1.0 - c["left"] / c["total"]), 3)}
+            out.append(q)
+        return out
+
     def tick_state(self) -> dict:
         """Light per-tick payload for the live renderer (no heavy tile layers — those
         come once via snapshot(); ticks just move time, weather and entities)."""
@@ -1955,17 +2248,41 @@ class World:
             "version": self.version, "clock": round(self.clock, 1), "day": self.day(),
             "time": round(self.time_of_day(), 2), "season": self.season(),
             "weather": self.weather, "census": self.census(),
-            "animals": self.animals, "people": self.people,
+            "animals": self.animals, "people": self._people_light(),
             "structures": self.structures,
             "blocks": self._blocks_payload(),
             "roofs": self._roofs_payload(),
         }
 
+    def person_detail(self, pid) -> dict | None:
+        """The full mind of one person — temperament, lived values, the memory stream,
+        distilled beliefs, relationships and current intention — for the inspector panel
+        opened by double-clicking them. Returns None if no such living person."""
+        for p in self.people:
+            if str(p.get("id")) == str(pid):
+                c = p.get("craft")
+                d = dict(p)
+                if c and c.get("total"):
+                    d["crafting"] = {"rid": c["rid"], "out": c["out"],
+                                     "pct": round(max(0.0, 1.0 - c["left"] / c["total"]), 3),
+                                     "left_min": round(c["left"], 1)}
+                return d
+        return None
+
+    # Vegetation tallies scan the whole (up to 4M-tile) map, so they're cached and only
+    # recomputed every so often in game-time — the counts drift slowly and needn't be exact
+    # every tick. This is the difference between a smooth world and a stuttering one.
+    CENSUS_VEG_EVERY = 60.0      # game-minutes between full vegetation recounts
+
     def census(self) -> dict:
         counts = {}
         for a in self.animals:
             counts[a["sp"]] = counts.get(a["sp"], 0) + 1
-        veg = {PLANTS[sp]["name"]: int((self.veg_sp == sp).sum()) for sp in PLANTS}
+        veg = getattr(self, "_census_veg", None)
+        if veg is None or (self.clock - getattr(self, "_census_veg_t", -1e9)) > self.CENSUS_VEG_EVERY:
+            veg = {PLANTS[sp]["name"]: int((self.veg_sp == sp).sum()) for sp in PLANTS}
+            self._census_veg = veg
+            self._census_veg_t = self.clock
         buildings = sum(1 for s in self.sites if s["done"])
         return {"animals": counts, "vegetation": veg, "people": len(self.people),
                 "structures": len(self.structures), "buildings": buildings,
@@ -2042,6 +2359,8 @@ class World:
                 "sites": self.sites, "ore_nodes": self.ore_nodes,
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
+                "ledger": self.ledger,
+                "speed": self.speed,
             }
             tmp = PATH_META + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -2093,6 +2412,8 @@ class World:
             self._rebuild_ore_index()
             self.log = meta.get("log", [])
             self.known_recipes = set(meta.get("known_recipes") or crafting.STARTER_RECIPES)
+            self.ledger = meta.get("ledger") or []
+            self.speed = float(meta.get("speed") or 1.0)
             self.version = meta.get("version", 0)
             self.rng = np.random.default_rng()
             return True

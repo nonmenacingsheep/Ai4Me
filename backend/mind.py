@@ -141,6 +141,10 @@ def ensure_mind(p: dict, rng=None) -> None:
     p.setdefault("think_n", 0)          # how many LLM thoughts (reflect cadence)
     p.setdefault("last_social_t", 0.0)  # last meaningful contact (drives loneliness)
     p.setdefault("last_explore_t", 0.0) # last venture into the unknown (drives curiosity)
+    p.setdefault("recipes", [])         # survival crafts THIS person personally knows
+    p.setdefault("tinker_cd", 0.0)      # clock of next make-shift-craft experiment
+    p.setdefault("learn_cd", 0.0)       # clock before they can be taught another craft
+    p.setdefault("tried", [])           # material combos already experimented with (dead ends)
 
 
 # ─── memory stream ─────────────────────────────────────────────────────────────────
@@ -497,6 +501,8 @@ def learn_recipe(p: dict, world_known: set, rid: str, clock: float, via: str = "
     if not rid or rid in world_known:
         return False
     world_known.add(rid)
+    if rid not in p.setdefault("recipes", []):    # personal knowledge, too
+        p["recipes"].append(rid)
     name = rid.replace("_", " ")
     problem = crafting.SURVIVAL_DISCOVERIES.get(rid, "")
     remember(p, f"I {via} how to make a {name}" + (f" — for {problem}" if problem else ""),
