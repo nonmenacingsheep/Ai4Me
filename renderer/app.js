@@ -548,13 +548,13 @@ function handleMessage(data) {
       break;
 
     case 'world_tick':
-      worldOnTick(msg);   // entities + clock move forward (cheap; layers come via snapshot)
+      worldOnTick(data);   // entities + clock move forward (cheap; layers come via snapshot)
       break;
     case 'world_changed':
       worldOnChanged();   // terrain/flora/wildlife was reshaped — refresh the map
       break;
     case 'world_speed':
-      setActiveSpeed(msg.speed);   // fast-forward multiplier changed (maybe by the other god)
+      setActiveSpeed(data.speed);   // fast-forward multiplier changed (maybe by the other god)
       break;
     case 'room_changed':
       if (activeView === 'room') loadRoom();   // she reshaped her space — refresh it live
