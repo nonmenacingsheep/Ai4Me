@@ -60,8 +60,15 @@ ACTIVE_MAX = 768
 ECO_CATCHUP_CAP = 48
 OVERVIEW_MAX = 256              # the whole-world snapshot is downsampled to ≤ this per side
 
-# Accelerated time: 1 game-day == 1 real hour  →  1 real second == 24 game-seconds.
-GAME_SEC_PER_REAL_SEC = 24.0
+# Time pace. This is a *thinking-first* world: the people deliberate about what their lives
+# are for, and that wants a contemplative clock — so a day takes a few real hours, giving
+# each mind room to choose, act, and be voiced rather than blurring past. (Lowering this
+# only slows real-time pace; in-game balance is calibrated per game-minute and unchanged.)
+GAME_SEC_PER_REAL_SEC = 8.0     # 1 real second == 8 game-seconds  →  1 game-day ≈ 3 real hours
+# How often (game-minutes) a settled mind re-weighs its drives and may change its aim. The
+# body actuates the standing intention every tick between these deliberations.
+DELIBERATE_BEAT = 20.0
+EXPLORE_LEASH = 40              # tiles from home a wanderer ranges before turning back
 DAYS_PER_SEASON = 15
 SEASONS = ("spring", "summer", "autumn", "winter")
 DAYS_PER_YEAR = DAYS_PER_SEASON * len(SEASONS)
@@ -1062,7 +1069,7 @@ class World:
             "heading": None,                             # persistent roaming direction while searching
             "action": "wander",                          # current body behaviour (for the renderer)
         })
-        mind.ensure_mind(self.people[-1])                # attach memory / relationships / goal
+        mind.ensure_mind(self.people[-1], self.rng)      # attach mind + roll temperament
 
     def _add_structure(self, kind: str, x: int, y: int, by: str = "?") -> str:
         sid = "s_" + uuid.uuid4().hex[:8]
@@ -1074,14 +1081,31 @@ class World:
         self._note("build", f"{by} built a {kind} at ({x},{y}).")
         return sid
 
+    def _nearest_waterside(self, x: int, y: int, max_r: int = 60) -> tuple[int, int]:
+        """Closest walkable tile that BORDERS water, spiralling out from (x,y). People settle
+        here so their home — and the resting they do in it — is a step from a drink. A home
+        far from water turns every thirst into a fatiguing trek and quietly kills a band."""
+        for r in range(0, max_r):
+            for dy in range(-r, r + 1):
+                for dx in range(-r, r + 1):
+                    if max(abs(dx), abs(dy)) != r:           # only the new ring each pass
+                        continue
+                    nx, ny = x + dx, y + dy
+                    if (self._in(nx, ny) and self.water[ny, nx] == WATER_NONE
+                            and self._adjacent_water(nx, ny)):
+                        return nx, ny
+        return self._nearest_land(x, y)
+
     def _seed_initial_people(self, count: int, center=None):
-        """Settle a small founding band together near the chosen origin (hospitable,
-        watered ground — thirst is the fastest need, so a dry start is a death sentence)."""
+        """Settle a small founding band together by water near the chosen origin. Thirst is
+        the fastest need, so a band that settles on the bank thrives; one that settles inland
+        spends its days commuting to drink and dies of the round trip."""
         cx, cy = center if center is not None else self._choose_origin()
+        bx, by = self._nearest_waterside(cx, cy)             # the band's shared waterside camp
         for _ in range(count):
-            jx = int(np.clip(cx + self.rng.integers(-4, 5), 0, W - 1))
-            jy = int(np.clip(cy + self.rng.integers(-4, 5), 0, H - 1))
-            px, py = self._nearest_land(jx, jy)
+            jx = int(np.clip(bx + self.rng.integers(-3, 4), 0, W - 1))
+            jy = int(np.clip(by + self.rng.integers(-3, 4), 0, H - 1))
+            px, py = self._nearest_waterside(jx, jy, max_r=12)
             self._add_person(px, py)
 
     # ── people: the body loop (cheap, rule-based, no LLM) ───────────────────────
@@ -1094,7 +1118,10 @@ class World:
 
         dead = []
         for p in self.people:
-            mind.ensure_mind(p)                          # idempotent; covers any path that skipped it
+            mind.ensure_mind(p, self.rng)                # idempotent; covers any path that skipped it
+            if self.clock >= p.get("cryst_cd", 0):       # identity forms slowly, from a life lived
+                mind.crystallize_values(p)
+                p["cryst_cd"] = self.clock + 1440.0      # once a game-day
             p["age"] += dt_day
             p["hunger"] = min(1.0, p["hunger"] + PERSON["hunger_rate"] * dt_game_min)
             p["thirst"] = min(1.0, p["thirst"] + PERSON["thirst_rate"] * dt_game_min)
@@ -1214,6 +1241,17 @@ class World:
                     continue
                 for ev in mind.encounter(a, b, self.clock, self.rng):
                     self._note("social", ev)
+                # Generosity: whoever has resolved to *provide* gives, if they're beside
+                # the other and carry a surplus — a one-way gift, the warmest social act.
+                if mind._manhattan(a, b) <= 1:
+                    for giver, taker in ((a, b), (b, a)):
+                        inten = giver.get("intention") or {}
+                        if (inten.get("kind") == "provide"
+                                and giver.get("inv", {}).get("food", 0) > mind.TRADE_SURPLUS
+                                and taker.get("inv", {}).get("food", 0) <= 1):
+                            ev = mind.give(giver, taker, "food", self.clock)
+                            if ev:
+                                self._note("social", ev)
 
     def _perceive(self, x, y):
         """Build this person's small perception windows (edible/drinkable/tree/stone)
@@ -1298,55 +1336,134 @@ class World:
                 return act_seek, (int(np.sign(kx - x)), int(np.sign(ky - y)))
         return act_seek, self._explore_dir(p)
 
+    def _mind_ctx(self, p, night) -> dict:
+        """The slice of world a mind weighs when it deliberates: time, who's about, and the
+        people it feels most warmly/coldly toward (and any nearby soul in want). Kept small
+        and cheap — built once per deliberation, not per tick."""
+        names = {q["id"]: q["name"] for q in self.people}
+        fav_id = fav_name = foe_id = foe_name = None
+        foe_mag = 0.0
+        rels = p.get("rel", {})
+        if rels:
+            best = max(rels.items(), key=lambda kv: kv[1]["sentiment"])
+            worst = min(rels.items(), key=lambda kv: kv[1]["sentiment"])
+            if best[1]["sentiment"] > 0.15 and best[0] in names:
+                fav_id, fav_name = best[0], best[1]["name"]
+            if worst[1]["sentiment"] < -0.15 and worst[0] in names:
+                foe_id, foe_name, foe_mag = worst[0], worst[1]["name"], -worst[1]["sentiment"]
+        needy_id = needy_name = None
+        nd = 999
+        for q in self.people:
+            if q is p:
+                continue
+            d = abs(q["x"] - p["x"]) + abs(q["y"] - p["y"])
+            if q.get("inv", {}).get("food", 0) <= 1 and d < nd and d <= PERSON["vision"] * 3:
+                needy_id, needy_name, nd = q["id"], q["name"], d
+        nearby = ", ".join(q["name"] for q in self.people
+                           if q is not p and abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= PERSON["vision"] * 2)
+        return {
+            "clock": self.clock, "night": night, "season": self.season(),
+            "weather": self.weather, "time_str": f"{int(self.time_of_day()):02d}:00",
+            "others_exist": len(self.people) > 1,
+            "alive_ids": tuple(names.keys()), "_names": names,
+            "fav_id": fav_id, "fav_name": fav_name,
+            "foe_id": foe_id, "foe_name": foe_name, "foe_mag": foe_mag,
+            "needy_id": needy_id, "needy_name": needy_name,
+            "nearby": nearby or "no one",
+        }
+
     def _person_decide(self, p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly):
-        """Pick the most pressing body action. Returns (action, movedir|None). Masks are
-        window-local; lx,ly is the person's position inside them.
-        Priority: thirst → hunger → rest → opportunistic forage → craft/build → wander."""
+        """Actuate the mind's standing INTENTION (set by the drive arbiter / LLM) into one
+        body action. Returns (action, movedir|None). The body no longer decides *what* to
+        pursue — only *how* to take the next step toward what the mind has resolved on.
+
+        Survival is not privileged here: it wins only because, when a need bites, its drive
+        out-scores the rest and the arbiter picks drink/eat/rest. Two thin reflexes remain —
+        a re-think when a need spikes mid-task, and a sip/bite when literally standing on
+        relief — so a daydreaming wanderer never starves beside a stream."""
         x, y = p["x"], p["y"]
-        if p["thirst"] >= PERSON["t_thirst"]:
-            # Drink here, else head to water in sight / remembered / go search for it.
+        # (Re)deliberate when there's no aim, the beat has elapsed, or a need has spiked past
+        # whatever the current intention is worth (an emergency interrupt).
+        inten = p.get("intention")
+        # Emergency interrupt: if a need spikes past whatever we're doing, re-deliberate —
+        # UNLESS the current aim already relieves *that* need. (Crucially, a person resting
+        # must still break off to drink when thirst turns dangerous — neglecting one need
+        # while tending another is how the founding band quietly died.)
+        relieves = {"drink": "thirst", "eat": "hunger", "rest": "fatigue"}
+        worst, worst_u = max((("thirst", mind.need_urgency(p["thirst"])),
+                              ("hunger", mind.need_urgency(p["hunger"])),
+                              ("fatigue", mind.need_urgency(p["fatigue"]))), key=lambda kv: kv[1])
+        spike = inten and relieves.get(inten.get("kind")) != worst \
+            and worst_u > inten.get("u", 1.0) + mind.HYSTERESIS
+        if (inten is None) or (self.clock >= p.get("delib_cd", 0)) or spike:
+            ctx = self._mind_ctx(p, night)
+            inten = mind.deliberate(p, ctx, self.rng)
+            p["delib_cd"] = self.clock + DELIBERATE_BEAT * (0.7 + 0.6 * self.rng.random())
+
+        kind = inten["kind"]; target = inten.get("target")
+
+        # Reflex sips while passing relief (doesn't change the standing intention).
+        if kind not in ("drink", "eat", "rest"):
+            if drinkable[ly, lx] and p["thirst"] > 0.3:
+                return "drink", None
+            if edible[ly, lx] and self.veg_growth[y, x] > 0.12 and p["hunger"] > 0.35:
+                return "eat", None
+
+        if kind == "drink":
             return self._seek(p, x, y, bool(drinkable[ly, lx]), drinkable, lx, ly,
                               "water", "drink", "seek_water")
-        if p["hunger"] >= PERSON["t_hunger"]:
-            if p["inv"].get("food", 0) > 0:
+        if kind == "eat":
+            if p["inv"].get("food", 0) > 0 and p["hunger"] > 0.3:
                 return "eat", None
             return self._seek(p, x, y, bool(edible[ly, lx]) and self.veg_growth[y, x] > 0.12,
                               edible, lx, ly, "food", "eat", "seek_food")
-        if p["fatigue"] >= PERSON["t_rest"] or (night and p["fatigue"] > 0.35):
+        if kind == "rest":
             return "rest", None
-        # Opportunistic top-ups: sip or nibble while standing on a resource.
-        if drinkable[ly, lx] and p["thirst"] > 0.25:
-            return "drink", None
-        if edible[ly, lx] and self.veg_growth[y, x] > 0.12 and p["hunger"] > 0.30:
-            return "eat", None
-        # Always keep a small emergency food reserve in the pack before doing anything else.
-        if (edible[ly, lx] and self.veg_growth[y, x] > PERSON["gather_min"]
-                and p["inv"].get("food", 0) < 3):
-            return "gather", None
-        # Then, when comfortable and daylit, work on the project (axe → shelter → stone)
-        # rather than hoarding food beyond the reserve.
-        if (p["hunger"] < 0.5 and p["thirst"] < 0.5 and p["fatigue"] < 0.6 and not night
-                and self.clock >= p.get("build_cd", 0)):
-            # Honor the mind's high-level goal — but only once shelter is secured, so a
-            # social whim never overrides the body's need for a roof (hierarchical goals).
-            goal = (p.get("goal") or "survive").split(":")[0]
-            if p.get("home_struct") is not None and goal in ("socialize", "trade"):
-                move = self._seek_person(p)
-                if move is not None:
-                    return ("socialize", move)
-            elif p.get("home_struct") is not None and goal == "explore":
-                return "wander", self._explore_dir(p)
+        if kind in ("build", "provide"):
+            # Both lean on the build/forage machinery; provide also gathers a food surplus
+            # to give away (the gift itself happens on contact in the social pass).
             proj = self._person_build_decide(p, tree, stone, fiber, leaf, lx, ly)
             if proj:
                 return proj
-        # Otherwise lay in a little food while standing on a rich patch.
-        if (edible[ly, lx] and self.veg_growth[y, x] > PERSON["gather_min"]
-                and p["inv"].get("food", 0) < PERSON["inv_cap"]):
-            return "gather", None
-        # Idle: drift back toward home if we've strayed, else amble.
+            if kind == "provide" and target:
+                move = self._seek_toward(p, target)
+                if move is not None:
+                    return "socialize", move
+            return self._idle(p)
+        if kind in ("socialize", "befriend"):
+            move = self._seek_toward(p, target) if target else self._seek_person(p)
+            if move is not None:
+                return "socialize", move
+            return self._idle(p)          # already beside them — the social pass does the rest
+        if kind == "explore":
+            p["last_explore_t"] = self.clock
+            # Curiosity is leashed to home range: range out, but turn back before straying
+            # past easy return to known water — wonder shouldn't be a death sentence.
+            hx, hy = p["home"]
+            if abs(hx - x) + abs(hy - y) > EXPLORE_LEASH:
+                return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+            return "wander", self._explore_dir(p)
+        if kind == "avoid" and target:
+            t = next((q for q in self.people if q["id"] == target), None)
+            if t is not None and (t["x"] != x or t["y"] != y):
+                return "wander", (int(np.sign(x - t["x"])), int(np.sign(y - t["y"])))
+        return self._idle(p)
+
+    def _seek_toward(self, p, target_id):
+        """Step toward a specific person by id (or None if gone/adjacent)."""
+        t = next((q for q in self.people if q["id"] == target_id), None)
+        if t is None:
+            return None
+        d = abs(t["x"] - p["x"]) + abs(t["y"] - p["y"])
+        if d <= 1:
+            return None
+        return (int(np.sign(t["x"] - p["x"])), int(np.sign(t["y"] - p["y"])))
+
+    def _idle(self, p):
+        """Drift home if strayed, else amble — the resting state of a mind between aims."""
         hx, hy = p["home"]
-        if abs(hx - x) + abs(hy - y) > 6:
-            return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+        if abs(hx - p["x"]) + abs(hy - p["y"]) > 6:
+            return "wander", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
         return "wander", None
 
     def _person_build_decide(self, p, tree, stone, fiber, leaf, lx, ly):
@@ -1864,7 +1981,7 @@ class World:
             self._weather_until = meta.get("weather_until", 0.0)
             self.animals = meta.get("animals", []); self.people = meta.get("people", [])
             for _p in self.people:                       # heal legacy saves that predate the mind
-                mind.ensure_mind(_p)
+                mind.ensure_mind(_p, self.rng)
             self.structures = meta.get("structures", [])
             self.blocks = {}
             for k, c in (meta.get("blocks") or {}).items():
@@ -1931,28 +2048,33 @@ if __name__ == "__main__":
     print(f"  start census: {w.census()}")
     print(f"  founding band: {[p['name'] for p in w.people]}")
 
-    # Simulate ~20 game-days (1 step = 1 real sec = 24 game-sec → 3600 steps/game-day).
-    # Watch populations and vegetation across a couple of season turns.
+    # Simulate ~8 game-days. We advance a fixed 24 game-seconds per step (independent of the
+    # real-time pace constant), so this test keeps the same granularity and runtime whatever
+    # GAME_SEC_PER_REAL_SEC is set to. Watch populations across season turns.
     days = 8
-    steps = days * 3600
+    step_dt = 24.0 / GAME_SEC_PER_REAL_SEC          # real-sec per step → 24 game-sec/step
+    steps = int(days * 86400 / 24.0)
     print("\n  day  season   weather  rabbit deer wolf  ppl bldg tiles  vegtiles  ms/step")
     t0 = time.time()
     last_day = -1
     day_t0 = t0
     for i in range(steps):
-        w.step(dt_real_sec=1.0)
+        w.step(dt_real_sec=step_dt)
         if w.day() != last_day:
             last_day = w.day()
             c = w.census()
             an = c["animals"]
             now = time.time()
-            ms = (now - day_t0) * 1000 / 3600
+            ms = (now - day_t0) * 1000 / (steps / days)
             day_t0 = now
             print(f"  {w.day():>3}  {w.season():<7}  {w.weather:<7}  "
                   f"{an.get('rabbit',0):>6} {an.get('deer',0):>4} {an.get('wolf',0):>4}  "
                   f"{c['people']:>3} {c['buildings']:>4} {c['blocks']:>5}  "
                   f"{sum(c['vegetation'].values()):>8}  {ms:>6.2f}", flush=True)
     sim_s = time.time() - t0
+    deaths = [e["text"] for e in w.log if e["kind"] == "death"]
+    print(f"  survival: {len(w.people)}/7 of the founding band alive; "
+          f"deaths logged: {deaths if deaths else 'none'}")
     if w.people:
         sample = w.people[0]
         print(f"  survivor sample — {sample['name']}: hunger {sample['hunger']:.2f} "
@@ -2068,6 +2190,29 @@ if __name__ == "__main__":
     minds_ok = traded and knows and whispered
     print(f"  minds test: traded={traded} knows={knows} whisper_landed={whispered} "
           f"trust={bram['rel'][cael['id']]['trust']:.2f} -> {'OK' if minds_ok else 'FAILED'}")
+
+    # Thinking-first: the body actuates the mind's INTENTION. A parched soul deliberates to
+    # drink; a sated, housed loner reaches for company — survival is just one drive winning
+    # when it bites, not a hardcoded priority. Driven entirely through the real body loop.
+    wt = World().generate(seed=5); wt.people = []
+    ty, tx = np.argwhere((wt.water == WATER_NONE) & (wt.biome == B["grassland"]))[0]
+    wt._add_person(int(tx), int(ty), name="Thirsty")
+    th = wt.people[0]; th["thirst"] = 0.9
+    edible, drinkable, tree, stone, fiber, leaf, lx, ly, _, _ = wt._perceive(th["x"], th["y"])
+    wt._person_decide(th, edible, drinkable, tree, stone, fiber, leaf, False, lx, ly)
+    survive_first = th["intention"]["kind"] == "drink"
+    # Now a comfortable, housed, lonely soul beside a friend should choose company, not calories.
+    wt._add_person(int(tx) + 2, int(ty), name="Mae")
+    loner = wt.people[1]
+    loner["home_struct"] = "s"; loner["thirst"] = loner["hunger"] = loner["fatigue"] = 0.1
+    loner["traits"]["sociability"] = 0.9; loner["last_social_t"] = -3000
+    loner["delib_cd"] = 0; wt.clock = 5000
+    e2, d2, t2, s2, f2, l2, lx2, ly2, _, _ = wt._perceive(loner["x"], loner["y"])
+    wt._person_decide(loner, e2, d2, t2, s2, f2, l2, False, lx2, ly2)
+    meaning_when_safe = loner["intention"]["kind"] in ("socialize", "befriend", "explore")
+    think_ok = survive_first and meaning_when_safe
+    print(f"  thinking-first test: thirsty→{th['intention']['kind']}, "
+          f"safe-loner→{loner['intention']['kind']} -> {'OK' if think_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")

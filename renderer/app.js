@@ -4071,10 +4071,19 @@ function worldInspect(x, y) {
     const friend = r.reduce((a, b) => (b.trust > (a ? a.trust : 0) ? b : a), null);
     return friend ? ` · knows ${r.length} (closest ${friend.name}, ${Math.round(friend.trust * 100)}% trust)` : '';
   };
+  // Character: the temperament trait a life has leaned into most (their emerging identity).
+  const character = (p) => {
+    const t = p.traits; if (!t) return '';
+    const v = p.values || {};
+    const tot = {}; for (const k in t) tot[k] = (t[k] || 0) + (v[k] || 0);
+    const top = Object.keys(tot).reduce((a, b) => (tot[b] > tot[a] ? b : a));
+    const word = { sociability: 'sociable', ambition: 'ambitious', curiosity: 'curious', caution: 'cautious' }[top];
+    return word ? ` · ${word}` : '';
+  };
   const folkLine = folk.map(p =>
-    `<br><strong>${p.name}</strong> — ${p.action} · hunger ${pct(p.hunger)}% thirst ${pct(p.thirst)}% ` +
+    `<br><strong>${p.name}</strong> — ${p.action}${character(p)} · hunger ${pct(p.hunger)}% thirst ${pct(p.thirst)}% ` +
     `rest ${pct(1 - (p.fatigue || 0))}% · health ${pct(p.hp)}%${invStr(p.inv)}` +
-    (p.intent ? `<br><em>aims to ${escapeHtml(p.intent)}</em>` : '') +
+    (p.intent ? `<br><em>${escapeHtml(p.intent)}</em>` : '') +
     (p.say ? `<br>💬 “${escapeHtml(p.say)}”` : '') + knows(p)).join('');
   const builds = (d.structures || []).filter(st => st.x === x && st.y === y);
   let buildLine = builds.map(st => `<br>🛖 ${st.kind}${st.by ? ` (built by ${st.by})` : ''}`).join('');

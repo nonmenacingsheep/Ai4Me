@@ -50,24 +50,67 @@ GOSSIP_PULL = 0.25           # how far the listener's view shifts toward the spe
 # Goods a person will barter, and which need each relieves (drives who wants what).
 TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 
-# The goals a mind may hold. The body honors these only when survival is handled, so a
-# social goal never gets anyone killed (hierarchical goals: survival outranks status).
-GOALS = ("survive", "build_home", "stockpile", "socialize", "trade", "explore", "rest")
+# ─── the thinking-civilization core: drives, temperament, intentions ─────────────────
+# This is a "mind-first" sim: survival is not a hardcoded priority chain but ONE drive
+# among many, competing in a utility arbiter against belonging, status, curiosity and
+# fear. Whatever wins becomes the person's INTENTION, and the body merely actuates it.
+# The arbiter is pure Python so a full inner life runs offline; the LLM (when present)
+# supplies what a utility function cannot — novel intentions, reasons, beliefs, identity
+# and speech — at a slow, human cadence.
+
+# A person's standing intention is one of these kinds (some carry a target person id):
+INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "socialize",
+                "befriend", "explore", "avoid", "tend")
+
+# Temperament — fixed-ish character rolled at birth. It weights the drives, so two people
+# in the same circumstance want different things. This is where individuality (and, in
+# aggregate, culture) comes from. Values (below) nudge these over a life from experience.
+TRAITS = ("sociability", "ambition", "curiosity", "caution")
+
+# Survival drives stay quiet when a need is low (so meaning can win) but ramp HARD once a
+# need crosses into danger, so no one daydreams themselves to death. Below ~0.4 it's a
+# gentle power curve; above it a steep linear ramp quickly out-scores every other pull.
+NEED_GAIN = 1.6
+DANGER_FROM = 0.32          # need level past which survival urgency ramps steeply
+DANGER_SLOPE = 2.0          # prudent: top needs up well before they turn deadly
+
+
+def need_urgency(n: float) -> float:
+    """Urgency of relieving a need at level `n` — the survival drive's value, also used by
+    the body's emergency-interrupt so the two agree on when survival must take over."""
+    return n ** NEED_GAIN + max(0.0, n - DANGER_FROM) * DANGER_SLOPE
+HYSTERESIS = 0.12            # an intention must be beaten by this margin to be dropped
+SOCIAL_FORGET = 1440.0      # a day alone fully "lonelies" a sociable soul
+VALUE_CAP = 0.25            # how far lived experience can bend a trait
+
+
+def _clamp01(x: float) -> float:
+    return 0.0 if x < 0 else (1.0 if x > 1 else x)
 
 
 # ─── lifecycle ────────────────────────────────────────────────────────────────────
-def ensure_mind(p: dict) -> None:
+def ensure_mind(p: dict, rng=None) -> None:
     """Idempotently attach mind fields to a person dict (new spawns AND legacy/loaded
     saves that predate the mind). Safe to call every tick."""
     p.setdefault("memory", [])          # [{t, text, imp, kind}]
     p.setdefault("reflections", [])     # distilled beliefs (also retrievable as memories)
     p.setdefault("rel", {})             # other_id -> {name, trust, sentiment, met, trades, last}
-    p.setdefault("goal", "survive")     # one of GOALS (may carry ":target")
-    p.setdefault("intent", "")          # short human-readable phrasing of the goal
+    if "traits" not in p:               # temperament, rolled once (0.2..0.8 each)
+        if rng is not None:
+            p["traits"] = {t: round(float(rng.random()) * 0.6 + 0.2, 2) for t in TRAITS}
+        else:
+            p["traits"] = {t: 0.5 for t in TRAITS}
+    p.setdefault("values", {t: 0.0 for t in TRAITS})  # lived drift on traits (identity)
+    p.setdefault("intention", None)     # {kind, target, u, why} — what they're set on now
+    p.setdefault("goal", "tend")        # back-compat label for UI (kind, maybe :target)
+    p.setdefault("intent", "")          # human phrasing of the current intention's "why"
     p.setdefault("say", "")             # last spoken line (renderer shows it briefly)
     p.setdefault("say_t", 0.0)          # clock when last spoken (for bubble fade)
-    p.setdefault("think_cd", 0.0)       # clock before which this mind won't think again
-    p.setdefault("think_n", 0)          # how many times it has thought (reflect cadence)
+    p.setdefault("delib_cd", 0.0)       # clock of next scheduled deliberation
+    p.setdefault("think_cd", 0.0)       # clock cursor for the LLM round-robin
+    p.setdefault("think_n", 0)          # how many LLM thoughts (reflect cadence)
+    p.setdefault("last_social_t", 0.0)  # last meaningful contact (drives loneliness)
+    p.setdefault("last_explore_t", 0.0) # last venture into the unknown (drives curiosity)
 
 
 # ─── memory stream ─────────────────────────────────────────────────────────────────
@@ -158,6 +201,7 @@ def encounter(p: dict, other: dict, clock: float, rng) -> list[str]:
     # Don't spam the memory stream every tick a pair stands together — a periodic greeting.
     if clock - ra["last"] >= GREET_COOLDOWN:
         ra["last"] = rb["last"] = clock
+        p["last_social_t"] = other["last_social_t"] = clock   # contact eases loneliness
         # Gossip: pass along a strong opinion about a third party, so good/bad names travel.
         if rng.random() < GOSSIP_CHANCE:
             spread = _gossip(p, other, clock)
@@ -233,31 +277,150 @@ def _surplus_the_other_wants(giver: dict, taker: dict) -> str | None:
     return None
 
 
-# ─── goals: the bias the body reads when it isn't busy surviving ────────────────────
-def heuristic_goal(p: dict, ctx: dict) -> tuple[str, str]:
-    """The rule-based mind — sets a sensible goal with no LLM at all. Used directly when
-    offline, and as the always-available fallback when an LLM think fails. Returns
-    (goal, intent)."""
+# ─── the drive arbiter: the always-on, model-free mind ──────────────────────────────
+def _trait(p: dict, name: str) -> float:
+    """A trait, bent by the values a life has crystallized (identity)."""
+    return _clamp01(p.get("traits", {}).get(name, 0.5) + p.get("values", {}).get(name, 0.0))
+
+
+def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
+    """Score every pull on this person right now as (kind, target, utility, why). Survival,
+    shelter, belonging, status, curiosity and fear all compete on one scale — this is the
+    whole point of a thinking-first world: the agent *weighs what matters*, it doesn't run
+    a fixed survival script. `ctx` is the small slice of world the body hands in."""
+    soc, amb, cur, cau = (_trait(p, "sociability"), _trait(p, "ambition"),
+                          _trait(p, "curiosity"), _trait(p, "caution"))
     inv = p.get("inv", {})
+    clock = ctx.get("clock", 0.0)
+    out: list[tuple[str, str | None, float, str]] = []
+
+    # Survival — quiet until a need bites, then overwhelming (steep danger ramp).
+    out.append(("drink", None, need_urgency(p.get("thirst", 0)), "my throat is parched"))
+    hunger_u = need_urgency(p.get("hunger", 0))
+    if p.get("hunger", 0) < 0.3 and inv.get("food", 0) > 0:
+        hunger_u *= 0.5                                  # a fed person with food in the pack isn't driven to eat
+    out.append(("eat", None, hunger_u, "hunger gnaws at me"))
+    fatigue_u = need_urgency(p.get("fatigue", 0))
+    night = ctx.get("night")
+    if night:
+        # People sleep at night. Fatigue rises fast (~a full day's worth daily), so a nightly
+        # rest is non-negotiable — only a pressing thirst/hunger (whose danger ramp out-scores
+        # this) should wake them. Without this they socialize through the night and waste away.
+        fatigue_u = max(fatigue_u, 0.75)
+    out.append(("rest", None, fatigue_u, "weariness drags at me"))
+
+    # Shelter & ambition — a home of one's own is half survival, half pride.
     if p.get("home_struct") is None:
-        return "build_home", "raise a shelter before the weather turns"
-    # Lean season ahead or thin larder → stock up; a snug, fed person seeks company.
-    if inv.get("food", 0) < 3 or ctx.get("season") == "autumn":
-        return "stockpile", "lay in food against scarcity"
-    if len(p.get("rel", {})) < 2:
-        return "socialize", "find others and make their acquaintance"
-    # Someone they have surplus to trade with → seek a deal.
-    if any(inv.get(g, 0) > TRADE_SURPLUS for g in TRADEABLE):
-        return "trade", "barter the surplus for what's lacking"
-    return "explore", "range out and learn the land"
+        out.append(("build", None, 0.5 + 0.18 * amb, "I must raise a roof of my own"))
+    else:
+        out.append(("build", None, 0.10 * amb, "I could make my home finer"))
+        needy_id, needy_name = ctx.get("needy_id"), ctx.get("needy_name")
+        if needy_id and inv.get("food", 0) > TRADE_SURPLUS:
+            out.append(("provide", needy_id, 0.25 * amb + 0.2 * soc,
+                        f"I have plenty — {needy_name} does not"))
+
+    # Belonging — loneliness grows the longer since real contact; sociable souls feel it most.
+    # Hushed at night, when the world sleeps.
+    night_damp = 0.3 if night else 1.0
+    lonely = _clamp01((clock - p.get("last_social_t", 0.0)) / SOCIAL_FORGET)
+    if ctx.get("others_exist"):
+        fav_id, fav_name = ctx.get("fav_id"), ctx.get("fav_name")
+        if fav_id:
+            out.append(("befriend", fav_id, (0.18 + soc * lonely) * night_damp,
+                        f"I'd seek out {fav_name}"))
+        out.append(("socialize", None, (0.14 + soc * lonely * 0.85) * night_damp, "I want for company"))
+
+    # Curiosity — the unknown tugs at restless minds that have lingered too long.
+    bored = _clamp01((clock - p.get("last_explore_t", 0.0)) / SOCIAL_FORGET)
+    out.append(("explore", None, (0.08 + cur * bored * 0.75) * night_damp, "the far country calls"))
+
+    # Fear / grudge — keep distance from someone who has wronged or unsettled them.
+    foe_id, foe_name, foe_mag = ctx.get("foe_id"), ctx.get("foe_name"), ctx.get("foe_mag", 0.0)
+    if foe_id and foe_mag > 0.3:
+        out.append(("avoid", foe_id, cau * foe_mag, f"I'll keep clear of {foe_name}"))
+
+    # A low baseline of just tending one's own patch, so an idle mind has somewhere to rest.
+    out.append(("tend", None, 0.07, "tend to my own"))
+    return out
+
+
+def deliberate(p: dict, ctx: dict, rng=None) -> dict:
+    """Weigh the drives and (re)set the standing intention. Hysteresis keeps a person from
+    flip-flopping every beat — the current aim must be clearly out-competed to be dropped.
+    Returns the intention dict. This is the model-free mind; it always yields a choice."""
+    cand = drives(p, ctx)
+    cand.sort(key=lambda c: -c[2])
+    best = cand[0]
+    cur = p.get("intention")
+    if cur and _intention_valid(cur, ctx):
+        cur_u = next((c[2] for c in cand if c[0] == cur["kind"] and c[1] == cur.get("target")), 0.0)
+        if cur_u + HYSTERESIS >= best[2]:
+            cur["u"] = round(float(cur_u), 3)
+            return cur
+    kind, target, u, why = best
+    changed = (not cur) or cur.get("kind") != kind or cur.get("target") != target
+    inten = {"kind": kind, "target": target, "u": round(float(u), 3), "why": why}
+    _set_intention(p, inten, ctx)
+    # Choosing a *deliberate* aim (not just answering thirst) is itself a remembered moment.
+    if changed and kind not in ("drink", "eat", "rest", "tend"):
+        remember(p, f"resolved to {p['intent']}", 0.4, "intent", ctx.get("clock", 0.0))
+    return inten
+
+
+def _intention_valid(inten: dict, ctx: dict) -> bool:
+    """An intention is stale if it aimed at someone no longer present/alive."""
+    tgt = inten.get("target")
+    if tgt and tgt not in ctx.get("alive_ids", ()):
+        return False
+    return True
+
+
+def _set_intention(p: dict, inten: dict, ctx: dict) -> None:
+    p["intention"] = inten
+    kind, target = inten["kind"], inten.get("target")
+    label = kind if not target else f"{kind}:{ctx.get('_names', {}).get(target, target)}"
+    p["goal"] = label
+    p["intent"] = (inten.get("why") or kind)[:120]
 
 
 def set_goal(p: dict, goal: str, intent: str) -> None:
-    base = (goal or "survive").split(":")[0].strip()
-    if base not in GOALS:
-        base = "survive"
-    p["goal"] = goal.strip() if ":" in goal else base
+    """Back-compat shim: coerce a bare goal string into an intention (no target resolution).
+    Kept so older call-sites and the LLM-glue path keep working."""
+    kind = (goal or "tend").split(":")[0].strip()
+    if kind not in INTENT_KINDS:
+        kind = "tend"
+    p["intention"] = {"kind": kind, "target": None, "u": 0.5, "why": intent}
+    p["goal"] = goal.strip() if ":" in goal else kind
     p["intent"] = (intent or "").strip()[:120]
+
+
+def heuristic_goal(p: dict, ctx: dict) -> tuple[str, str]:
+    """Compatibility wrapper: run the drive arbiter and report (goal, intent). The real
+    decision lives in `deliberate`; this just exposes it in the old (goal, intent) shape."""
+    inten = deliberate(p, ctx)
+    return p.get("goal", inten["kind"]), inten.get("why", "")
+
+
+def crystallize_values(p: dict) -> None:
+    """Identity forms from what a person actually does: the kind of memory they accrue most
+    nudges the matching trait, so a habitual builder becomes ambitious, a habitual trader
+    sociable. This is culture in miniature — character emerging from history, no LLM needed."""
+    counts: dict[str, int] = {}
+    for m in p.get("memory", []):
+        counts[m["kind"]] = counts.get(m["kind"], 0) + 1
+    lean = {"build": "ambition", "craft": "ambition", "trade": "sociability",
+            "social": "sociability", "gossip": "sociability", "explore": "curiosity",
+            "death": "caution", "whisper": "curiosity"}
+    bump: dict[str, float] = {}
+    for kind, n in counts.items():
+        tr = lean.get(kind)
+        if tr:
+            bump[tr] = bump.get(tr, 0.0) + n
+    if not bump:
+        return
+    top = max(bump, key=bump.get)
+    vals = p.setdefault("values", {t: 0.0 for t in TRAITS})
+    vals[top] = round(min(VALUE_CAP, vals.get(top, 0.0) + 0.03), 3)
 
 
 def speak(p: dict, line: str, clock: float) -> None:
@@ -269,46 +432,68 @@ def speak(p: dict, line: str, clock: float) -> None:
 
 # ─── LLM touch-points (prompt builders + result appliers; the call itself is in the
 #     server, so this module stays sync/testable and free of the brain dependency) ────
-def think_messages(p: dict, ctx: dict) -> tuple[str, str]:
-    """Build (system, user) for one 'what should I pursue now' completion. `ctx` carries
-    the small slice of world the agent can sense: season, weather, time, what's nearby,
-    and the names of folk in sight."""
+def deliberate_messages(p: dict, ctx: dict) -> tuple[str, str]:
+    """Build (system, user) for a deliberation — the LLM reasons over the SAME drives the
+    arbiter weighs, plus memory, relationships and hard-won values, and chooses what to set
+    its mind on. The drive scores are shown so the model grounds in the body's reality but
+    is free to follow meaning over mere calories. This is the heart of a thinking-first
+    world: the agent decides what its life is *for*, moment to moment."""
     name = p["name"]
     system = (
-        f"You are the inner voice of {name}, one of the first people in a wild, newborn "
-        "world — a forager learning to survive and live alongside a few others. Think in "
-        "the first person, plainly and concretely, like an early human, never like an AI. "
-        "Decide the single thing to pursue next.\n"
-        "Reply ONLY as compact JSON: {\"goal\": one of "
-        f"{list(GOALS)} (you may append ':Name' to trade/socialize), "
-        "\"intent\": a short phrase, \"say\": a brief line you'd speak aloud or \"\"}."
+        f"You are the mind of {name}, one of the first people in a wild, newborn world. You "
+        "are not only surviving — you want company, standing, discovery, a place that is "
+        "yours; hunger and thirst are just some of the pulls you weigh. Think in the first "
+        "person, plainly, like an early human, never like an AI. Choose ONE thing to set "
+        "your mind on now, and why it matters to you.\n"
+        f"Reply ONLY as compact JSON: {{\"intention\": one of {list(INTENT_KINDS)} "
+        "(append ':Name' for befriend/provide/avoid to aim at a person), "
+        '"why": a short first-person reason, "say": a brief line you\'d speak aloud or ""}.'
     )
     needs = _needs_phrase(p)
+    pulls = "; ".join(f"{k}{':'+ctx.get('_names',{}).get(t,t) if t else ''} {u:.2f}"
+                      for k, t, u, _ in sorted(drives(p, ctx), key=lambda c: -c[2])[:5])
     mems = retrieve(p, f"{ctx.get('season','')} {p.get('intent','')} {needs}", ctx.get("clock", 0.0), 4)
     rel_lines = _rel_phrase(p)
+    vals = _values_phrase(p)
     inv = ", ".join(f"{k}×{v}" for k, v in (p.get("inv") or {}).items() if v) or "nothing"
     user = (
-        f"It is {ctx.get('time_str','day')}, {ctx.get('season','')} , weather {ctx.get('weather','')}.\n"
-        f"My condition: {needs}.\n"
-        f"I carry: {inv}. Home: {'built' if p.get('home_struct') else 'none yet'}.\n"
-        f"Nearby: {ctx.get('nearby','no one') }.\n"
-        f"What I remember:\n- " + ("\n- ".join(mems) if mems else "not much yet") + "\n"
-        + (f"People I know:\n- " + "\n- ".join(rel_lines) + "\n" if rel_lines else "")
-        + f"My current aim: {p.get('intent') or 'just getting by'}.\n"
-        "What do I do next, and is there anything I'd say?"
+        f"It is {ctx.get('time_str','day')}, {ctx.get('season','')}, weather {ctx.get('weather','')}.\n"
+        f"My body: {needs}. I carry: {inv}. Home: {'built' if p.get('home_struct') else 'none yet'}.\n"
+        f"Nearby: {ctx.get('nearby','no one')}.\n"
+        f"What pulls at me (and how strongly): {pulls}.\n"
+        + (f"Who I am becoming: {vals}.\n" if vals else "")
+        + "What I remember:\n- " + ("\n- ".join(mems) if mems else "not much yet") + "\n"
+        + ("People I know:\n- " + "\n- ".join(rel_lines) + "\n" if rel_lines else "")
+        + f"My current aim: {p.get('intent') or 'drifting'}.\n"
+        "What do I set my mind on, why, and is there anything I'd say aloud?"
     )
     return system, user
 
 
-def apply_think(p: dict, data: dict, clock: float) -> None:
-    """Apply a parsed think result (from the LLM) to the person. Tolerant of junk."""
+def apply_deliberation(p: dict, data: dict, ctx: dict, clock: float) -> None:
+    """Apply a parsed LLM deliberation: override the standing intention with the reasoned
+    one (validated; target names resolved to ids), and maybe speak. Junk is ignored, in
+    which case the arbiter's own intention stands — the body is never left without one."""
+    p["think_n"] = p.get("think_n", 0) + 1
     if not isinstance(data, dict):
         return
-    goal = str(data.get("goal", "") or "")
-    if goal:
-        set_goal(p, goal, str(data.get("intent", "")))
+    raw = str(data.get("intention", "") or "").strip()
+    why = str(data.get("why", "") or "").strip()
     speak(p, str(data.get("say", "")), clock)
-    p["think_n"] = p.get("think_n", 0) + 1
+    if not raw:
+        return
+    kind = raw.split(":")[0].strip().lower()
+    if kind not in INTENT_KINDS:
+        return
+    target = None
+    if ":" in raw:
+        want = raw.split(":", 1)[1].strip().lower()
+        for tid, nm in ctx.get("_names", {}).items():
+            if nm.lower() == want and tid in ctx.get("alive_ids", ()):
+                target = tid
+                break
+    inten = {"kind": kind, "target": target, "u": 0.6, "why": why or kind}
+    _set_intention(p, inten, ctx)
 
 
 def reflect_messages(p: dict, clock: float) -> tuple[str, str]:
@@ -322,12 +507,15 @@ def reflect_messages(p: dict, clock: float) -> tuple[str, str]:
         "here — beliefs worth keeping. First person, plain words.\n"
         'Reply ONLY as JSON: {"reflections": ["...", "..."]}.'
     )
-    user = "Lately:\n- " + ("\n- ".join(recent) if recent else "little has happened") + \
-           "\nWhat have I learned?"
+    user = ("Lately:\n- " + ("\n- ".join(recent) if recent else "little has happened") +
+            "\nWhat have I learned, and in a word, who am I becoming "
+            f"({', '.join(TRAITS)}, or none)?")
     return system, user
 
 
 def apply_reflections(p: dict, data: dict, clock: float) -> None:
+    """Fold reflections into durable beliefs, and let a named self-image bend a trait — so
+    a mind doesn't just remember, it becomes someone (identity feeding back into drives)."""
     if not isinstance(data, dict):
         return
     out = data.get("reflections") or []
@@ -338,6 +526,10 @@ def apply_reflections(p: dict, data: dict, clock: float) -> None:
             refs.append({"t": round(clock, 1), "text": r})
     if len(refs) > 8:
         del refs[: len(refs) - 8]
+    ident = str(data.get("identity", "") or "").strip().lower()
+    if ident in TRAITS:
+        vals = p.setdefault("values", {t: 0.0 for t in TRAITS})
+        vals[ident] = round(min(VALUE_CAP, vals.get(ident, 0.0) + 0.06), 3)
 
 
 # ─── helpers / read-side ────────────────────────────────────────────────────────────
@@ -359,6 +551,29 @@ def _needs_phrase(p: dict) -> str:
     return ", ".join(parts)
 
 
+def _values_phrase(p: dict) -> str:
+    """The traits a life has most strongly bent — a person's emerging self-image."""
+    vals = {t: v for t, v in (p.get("values") or {}).items() if v >= 0.06}
+    if not vals:
+        return ""
+    return ", ".join(t for t, _ in sorted(vals.items(), key=lambda kv: -kv[1]))
+
+
+def give(p: dict, other: dict, good: str, clock: float) -> str | None:
+    """A one-way gift — generosity, not barter. It costs the giver and builds a bond and the
+    giver's standing; both remember it warmly. The social glue a trading economy alone lacks."""
+    if p.get("inv", {}).get(good, 0) <= 0:
+        return None
+    p["inv"][good] -= 1
+    other.setdefault("inv", {})[good] = other["inv"].get(good, 0) + 1
+    ra, rb = _rel(p, other, clock), _rel(other, p, clock)
+    _adjust(ra, 0.05, 0.18); _adjust(rb, 0.10, 0.25)        # the receiver warms most
+    remember(p, f"gave {good} to {other['name']}, freely", 0.6, "social", clock)
+    remember(other, f"{p['name']} gave me {good} when I had none", 0.75, "social", clock)
+    p["last_social_t"] = other["last_social_t"] = clock
+    return f"{p['name']} gave {good} to {other['name']}."
+
+
 def _rel_phrase(p: dict) -> list[str]:
     out = []
     for r in sorted(p.get("rel", {}).values(), key=lambda r: -abs(r["sentiment"]))[:4]:
@@ -376,9 +591,10 @@ def digest(people: list[dict], clock: float, n: int = 6) -> str:
         return ""
     lines = []
     for p in people[:n]:
-        bit = f"{p['name']} aims to {p.get('intent') or p.get('goal','get by')}"
+        why = p.get("intent") or p.get("goal", "getting by")
+        bit = f"{p['name']} ({why})"
         if p.get("say") and clock - p.get("say_t", 0) < 600:
-            bit += f' — "{p["say"]}"'
+            bit += f' says "{p["say"]}"'
         lines.append(bit)
     return "; ".join(lines) + "."
 
@@ -425,19 +641,48 @@ if __name__ == "__main__":
     assert d["rel"][c["id"]]["sentiment"] > 0.1
     print("gossip OK -> Dara now feels", round(d["rel"][c["id"]]["sentiment"], 2), "about Cael")
 
-    # heuristic goal: no home -> build; offline mind always returns a valid goal
-    g, intent = heuristic_goal(mk("Eli", 0), {"season": "spring"})
-    assert g == "build_home", g
-    print("heuristic OK ->", g, "|", intent)
+    # gift: one-way generosity builds a strong bond, more than a trade
+    g1 = mk("Finn", 0, {"food": 5}); g2 = mk("Orla", 1, {"food": 0})
+    msg = give(g1, g2, "food", clock)
+    assert g2["inv"]["food"] == 1 and g1["inv"]["food"] == 4 and msg
+    assert g2["rel"][g1["id"]]["sentiment"] > 0.2
+    print("gift OK ->", msg)
 
-    # prompt builders don't crash and produce non-empty strings
-    sysm, usr = think_messages(b, {"season": "spring", "weather": "clear",
-                                   "time_str": "midday", "nearby": "Cael", "clock": clock})
-    assert "JSON" in sysm and "remember" in usr
-    apply_think(b, {"goal": "trade:Cael", "intent": "swap for stone", "say": "Fair trade?"}, clock)
-    assert b["goal"] == "trade:Cael" and b["say"] == "Fair trade?"
-    apply_reflections(b, {"reflections": ["Cael deals fairly — keep close."]}, clock)
-    assert b["reflections"] and "Cael" in b["reflections"][0]["text"]
-    print("llm-glue OK ->", digest([b, c], clock))
+    # DRIVE ARBITER — survival is one drive among many. A thirsty soul drinks; a sated one
+    # with no home builds; a settled, fed loner (alone a while) reaches for company.
+    base = {"clock": 5000.0, "season": "spring", "weather": "clear", "night": False,
+            "others_exist": True, "alive_ids": (), "_names": {}}
+    thirsty = mk("Pell", 0); thirsty["thirst"] = 0.9
+    assert deliberate(thirsty, base)["kind"] == "drink", thirsty["intention"]
+    homeless = mk("Rua", 0)                     # comfortable, no roof
+    assert deliberate(homeless, base)["kind"] == "build", homeless["intention"]
+    settled = mk("Sefa", 0); settled["home_struct"] = "s"; settled["traits"]["sociability"] = 0.8
+    settled["last_social_t"] = 0.0              # lonely for a long while
+    ctx_soc = {**base, "fav_id": c["id"], "fav_name": "Cael", "_names": {c["id"]: "Cael"},
+               "alive_ids": (c["id"],)}
+    k = deliberate(settled, ctx_soc)["kind"]
+    assert k in ("socialize", "befriend"), settled["intention"]
+    print("arbiter OK -> thirsty=drink, homeless=build, lonely=", k)
+
+    # identity crystallizes from what you do: a habitual builder grows ambitious
+    builder = mk("Tam", 0)
+    for _ in range(20):
+        remember(builder, "laid another wall", 0.3, "build", clock)
+    for _ in range(5):
+        crystallize_values(builder)
+    assert builder["values"]["ambition"] > 0, builder["values"]
+    print("identity OK -> Tam's ambition drifted to", builder["values"]["ambition"])
+
+    # LLM glue: deliberation prompt builds, and a reasoned override sets the intention
+    sysm, usr = deliberate_messages(settled, ctx_soc)
+    assert "JSON" in sysm and "pulls at me" in usr
+    apply_deliberation(settled, {"intention": "befriend:Cael", "why": "I miss good company",
+                                 "say": "Cael! Walk with me?"}, ctx_soc, clock)
+    assert settled["intention"]["kind"] == "befriend" and settled["intention"]["target"] == c["id"]
+    assert settled["say"].startswith("Cael")
+    apply_reflections(settled, {"reflections": ["Cael deals fairly — keep close."],
+                                "identity": "sociability"}, clock)
+    assert settled["values"]["sociability"] > 0
+    print("llm-glue OK ->", digest([settled, c], clock))
 
     print("\nall mind self-tests passed ✓")

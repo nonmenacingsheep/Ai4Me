@@ -601,33 +601,33 @@ async def world_engine_loop():
             print(f"[world] tick error: {e}")
 
 
-# ─── The minds — LLM enrichment for the world's people ───────────────────────
-# The body (world.py) gives every person memory, relationships, trade and a rule-based
-# goal with NO model, so the civilization grows fine offline. This loop adds the inner
-# voice on top: once in a while it picks one comfortable person and lets the model set a
-# naturalistic goal and maybe speak a line, and periodically reflect old memories into
-# beliefs. It is fully async, time-boxed, and degrades to the rule-based goal on any
-# failure or when no model is reachable — the world loop never waits on it.
-MIND_TICK = float(os.getenv("AITHA_MIND_TICK", "15"))      # real seconds between thinks
-MIND_THINK_BUDGET = float(os.getenv("AITHA_MIND_BUDGET", "30"))  # max seconds per LLM think
-REFLECT_EVERY = 6                                          # thinks between a reflection
-_mind_rr = 0                                               # round-robin cursor over people
+# ─── The minds — LLM deliberation for the world's people ─────────────────────
+# This is a thinking-FIRST world. The body (world.py) already runs a full inner life with
+# NO model: a drive arbiter weighs survival against belonging, status, curiosity and fear
+# and sets each person's standing INTENTION, which the body actuates. This loop is the
+# voice and meaning on top — it lets the model reason over the very same drives and choose
+# what to set its mind on (and why, and what to say), and periodically reflect experience
+# into beliefs and identity. Run on whoever has gone longest unheard (the struggling too,
+# not only the settled — survival is something to reason about now). Fully async and
+# time-boxed; on any failure the arbiter's own intention stands, so the body never waits.
+MIND_TICK = float(os.getenv("AITHA_MIND_TICK", "8"))       # real seconds between deliberations
+MIND_THINK_BUDGET = float(os.getenv("AITHA_MIND_BUDGET", "30"))  # max seconds per LLM call
+REFLECT_EVERY = 6                                          # deliberations between a reflection
 
 
 def _pick_thinker(people: list[dict]):
-    """The comfortable person who has gone longest without a thought (round-robin-ish), so
-    attention spreads evenly and no one monologues. None if nobody is settled enough."""
-    settled = [p for p in people if mind_store._comfortable(p)]
-    if not settled:
+    """Whoever has gone longest without being voiced — attention spreads evenly over the
+    whole population (including those in trouble, who now have the most to reason about)."""
+    if not people:
         return None
-    settled.sort(key=lambda p: p.get("think_cd", 0.0))
-    return settled[0]
+    return min(people, key=lambda p: p.get("think_cd", 0.0))
 
 
 async def _mind_think_one():
-    """Run (at most) one LLM think — and maybe a reflection — for a single person, then
-    write the result back onto the live world. Pure best-effort: the heuristic goal is set
-    first so something sensible always holds even if the model is slow or absent."""
+    """Voice one person: let the model deliberate over their drives and set a reasoned
+    intention (and maybe speak / reflect), writing it back to the live world. Best-effort —
+    the arbiter has already set a grounded intention, so any LLM failure simply leaves that
+    in place."""
     w = await asyncio.to_thread(world_store.get_world)
     if not w.people:
         return
@@ -636,33 +636,26 @@ async def _mind_think_one():
         return
     pid = p["id"]
     clock = w.clock
-    ctx = {
-        "season": w.season(), "weather": w.weather, "clock": clock,
-        "time_str": f"{int(w.time_of_day()):02d}:00",
-        "nearby": ", ".join(q["name"] for q in w.people
-                            if q is not p and abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= 12) or "no one",
-    }
-    # Baseline: the rule-based mind always yields a valid goal (this is the offline path).
-    g, intent = mind_store.heuristic_goal(p, ctx)
-    mind_store.set_goal(p, g, intent)
-    p["think_cd"] = clock + 1.0                            # mark attended even if the LLM fails
+    night = w.time_of_day() < 6 or w.time_of_day() >= 21
+    ctx = await asyncio.to_thread(w._mind_ctx, p, night)   # same context the arbiter sees
+    # Ground first: the model-free arbiter always yields a valid intention (offline path).
+    mind_store.deliberate(p, ctx, w.rng)
+    p["think_cd"] = clock + 1.0                            # mark voiced even if the LLM fails
 
-    # Enrichment: let the model refine the goal and perhaps speak. Time-boxed; any failure
-    # (no key, model cold, timeout, bad JSON) just leaves the heuristic goal in place.
     try:
         do_reflect = p.get("think_n", 0) and p["think_n"] % REFLECT_EVERY == 0
         if do_reflect:
             sysm, usr = mind_store.reflect_messages(p, clock)
-            raw = await asyncio.wait_for(brain._complete(sysm, usr, max_tokens=160), MIND_THINK_BUDGET)
+            raw = await asyncio.wait_for(brain._complete(sysm, usr, max_tokens=180), MIND_THINK_BUDGET)
             mind_store.apply_reflections(_live(w, pid) or p, brain._parse_json_object(raw), clock)
-        sysm, usr = mind_store.think_messages(p, ctx)
-        raw = await asyncio.wait_for(brain._complete(sysm, usr, max_tokens=140), MIND_THINK_BUDGET)
+        sysm, usr = mind_store.deliberate_messages(p, ctx)
+        raw = await asyncio.wait_for(brain._complete(sysm, usr, max_tokens=150), MIND_THINK_BUDGET)
         data = brain._parse_json_object(raw)
         target = _live(w, pid)
         if target is not None and data:
-            mind_store.apply_think(target, data, clock)
+            mind_store.apply_deliberation(target, data, ctx, clock)
     except Exception as e:
-        print(f"[mind] think fell back to heuristic ({type(e).__name__}: {e})")
+        print(f"[mind] deliberation fell back to the arbiter ({type(e).__name__}: {e})")
 
 
 def _live(w, pid: str):
