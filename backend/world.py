@@ -335,6 +335,10 @@ class World:
         self.ore_nodes: list[dict] = []  # scattered metal/coal deposits to mine
         self._ore_index: dict[tuple[int, int], dict] = {}  # (x,y)->node, rebuilt on load/seed
         self.log: list[dict] = []        # recent god actions / notable events
+        # The band's shared craft knowledge. It is born knowing the basics; the make-shift
+        # survival crafts (water flask, etc.) must be DISCOVERED by its people and then
+        # spread to all. (See crafting.SURVIVAL_DISCOVERIES + mind discovery.)
+        self.known_recipes: set[str] = set(crafting.STARTER_RECIPES)
         self.version = 0                 # bumped on any mutation, for render diffing
         self.rng = np.random.default_rng()
         self._origin = (W // 2, H // 2)  # founding-valley centre
@@ -1154,6 +1158,15 @@ class World:
                     p["hunger"] = max(0.0, p["hunger"] - 0.35)
             elif action == "drink":
                 p["thirst"] = max(0.0, p["thirst"] - PERSON["drink_rate"] * dt_game_min)
+                self._fill_containers(p)                 # top up any flask while at the water
+            elif action == "drink_pack":
+                # Drink from a carried flask — the whole point of the water-bottle craft:
+                # one stored drink fully slakes a good measure of thirst, anywhere.
+                if p["inv"].get("water", 0) > 0:
+                    p["inv"]["water"] -= 1
+                    if p["inv"]["water"] <= 0:
+                        del p["inv"]["water"]
+                    p["thirst"] = max(0.0, p["thirst"] - 0.45)
             elif action == "rest":
                 # A sheltered person resting at home recovers faster — but only as well as
                 # their home insulates (a leaf lean-to barely helps; a timber hut is snug).
@@ -1161,10 +1174,13 @@ class World:
                 if p.get("home_struct") and (x, y) == tuple(p["home"]):
                     insul = p.get("insul", 1.0)
                     mult = 1.0 + (BUILD["rest_sheltered_mult"] - 1.0) * insul
+                elif p["inv"].get("sleeping_mat", 0) > 0:    # a discovered mat helps anywhere
+                    mult = 1.0 + (BUILD["rest_sheltered_mult"] - 1.0) * 0.5
                 p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
-                if edible[ly, lx] and g > PERSON["gather_min"] and p["inv"].get("food", 0) < PERSON["inv_cap"]:
+                food_cap = PERSON["inv_cap"] + (6 if p["inv"].get("forage_sack", 0) else 0)
+                if edible[ly, lx] and g > PERSON["gather_min"] and p["inv"].get("food", 0) < food_cap:
                     take = min(g - 0.2, 0.3)
                     self.veg_growth[y, x] = g - take
                     p["inv"]["food"] = p["inv"].get("food", 0) + 1
@@ -1361,7 +1377,11 @@ class World:
                 needy_id, needy_name, nd = q["id"], q["name"], d
         nearby = ", ".join(q["name"] for q in self.people
                            if q is not p and abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= PERSON["vision"] * 2)
+        unsolved = crafting.discoverable(self.known_recipes)
+        gear = [r for r in ("leaf_flask", "forage_sack", "sleeping_mat") if r in self.known_recipes]
+        needs_gear = any(p.get("inv", {}).get(r, 0) < 1 for r in gear)
         return {
+            "needs_gear": needs_gear,
             "clock": self.clock, "night": night, "season": self.season(),
             "weather": self.weather, "time_str": f"{int(self.time_of_day()):02d}:00",
             "others_exist": len(self.people) > 1,
@@ -1370,6 +1390,11 @@ class World:
             "foe_id": foe_id, "foe_name": foe_name, "foe_mag": foe_mag,
             "needy_id": needy_id, "needy_name": needy_name,
             "nearby": nearby or "no one",
+            # What the band still hasn't figured out, and how hard-pressed this soul is —
+            # so a curious, recently-thirsty person is the keenest to invent.
+            "unsolved": unsolved,
+            "unsolved_problems": [crafting.SURVIVAL_DISCOVERIES[r] for r in unsolved],
+            "hardship": min(1.0, max(p.get("thirst", 0), p.get("fatigue", 0) * 0.6)),
         }
 
     def _person_decide(self, p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly):
@@ -1410,8 +1435,21 @@ class World:
                 return "eat", None
 
         if kind == "drink":
-            return self._seek(p, x, y, bool(drinkable[ly, lx]), drinkable, lx, ly,
-                              "water", "drink", "seek_water")
+            if drinkable[ly, lx]:
+                return "drink", None
+            if p["inv"].get("water", 0) > 0:        # carried water (a flask) — drink anywhere
+                return "drink_pack", None
+            return self._seek(p, x, y, False, drinkable, lx, ly, "water", "drink", "seek_water")
+        if kind == "tinker":
+            # Sit and puzzle out a make-shift craft (offline trial-and-error; the LLM mind
+            # can leap straight to the answer separately). A find spreads to the whole band.
+            cand = crafting.discoverable(self.known_recipes)
+            _, rid = mind.experiment(p, cand, self.rng)
+            if rid:
+                mind.learn_recipe(p, self.known_recipes, rid, self.clock)
+                self._note("discovery", f"{p['name']} worked out how to make a {rid.replace('_', ' ')}.")
+                self.version += 1
+            return "tinker", None
         if kind == "eat":
             if p["inv"].get("food", 0) > 0 and p["hunger"] > 0.3:
                 return "eat", None
@@ -1509,10 +1547,50 @@ class World:
                 return "haul", (int(np.sign(task["x"] - x)), int(np.sign(task["y"] - y)))
             return getters.get(item, getters["wood"])()
 
-        # Home raised — lay in stone for the next slice (stone houses, workshops).
+        # Home raised — now make any DISCOVERED make-shift survival gear they still lack
+        # (the water flask first; it's what frees them from the riverbank).
+        gear = self._survival_craft_decide(p, fiber, leaf, getters)
+        if gear:
+            return gear
+
+        # Then lay in stone for the next slice (stone houses, workshops).
         if inv.get("stone", 0) < BUILD["stone_stock"]:
             return self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly,
                               "stone", "mine", "seek_stone")
+        return None
+
+    # Survival gear the band has discovered, in priority order, with what each does and the
+    # raw it ultimately comes from (rope is made from fiber on the spot).
+    _GEAR = (("leaf_flask", "water", "leaves"), ("forage_sack", "sack", "fiber"),
+             ("sleeping_mat", "mat", "fiber"))
+
+    def _survival_craft_decide(self, p, fiber, leaf, getters):
+        """If the band knows a make-shift craft this person lacks, gather its materials and
+        assemble it. Rope (fiber→rope) is spun as an intermediate when a recipe calls for it.
+        Returns a body action, or None when they're fully kitted out."""
+        inv = p["inv"]
+        for rid, have_key, _raw in self._GEAR:
+            if rid not in self.known_recipes:
+                continue
+            if rid == "leaf_flask" and inv.get("leaf_flask", 0) >= 1:
+                continue
+            if rid in ("forage_sack", "sleeping_mat") and inv.get(rid, 0) >= 1:
+                continue
+            if self._craft_known(p, rid):                      # have everything — make it now
+                self._note("craft", f"{p['name']} fashioned a {rid.replace('_', ' ')}.")
+                mind.remember(p, f"made a {rid.replace('_', ' ')} with my own hands",
+                              0.6, "craft", self.clock)
+                return "craft", None
+            need = crafting.missing(inv, rid)                  # what's short — go get it
+            if "rope" in need and inv.get("rope", 0) < need["rope"]:
+                if inv.get("fiber", 0) >= 3:
+                    self._craft_known(p, "rope")               # spin fiber into rope on the spot
+                    return "craft", None
+                return getters["fiber"]()
+            for mat in ("leaves", "fiber"):
+                if need.get(mat, 0) > 0 and mat in getters:
+                    return getters[mat]()
+            break
         return None
 
     # ── tile building: blueprint → site → block placement ───────────────────────
@@ -1641,6 +1719,23 @@ class World:
             p["x"], p["y"] = nx, ny
 
     # ── live-sim material sourcing (clay/sand/flint/ore beyond wood & fiber) ────
+    def _fill_containers(self, p):
+        """Top a person's carried water up to the capacity of the flasks/skins they hold."""
+        inv = p["inv"]
+        cap = sum(crafting.CONTAINER_WATER.get(c, 0) * inv.get(c, 0) for c in crafting.CONTAINER_WATER)
+        if cap > 0 and inv.get("water", 0) < cap:
+            inv["water"] = cap
+
+    def _craft_known(self, p, rid: str) -> bool:
+        """Craft a recipe the band has discovered, consuming inputs from the person's pack.
+        Tier-0 survival crafts need no station; returns True on success."""
+        if rid not in self.known_recipes:
+            return False
+        ok = crafting.do_craft(p["inv"], rid, stations=(), tools=None)
+        if ok:
+            self.version += 1
+        return ok
+
     def _adjacent_water(self, x, y) -> bool:
         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             if self._in(x + dx, y + dy) and self.water[y + dy, x + dx] != WATER_NONE:
@@ -1896,6 +1991,10 @@ class World:
             inner = mind.digest(self.people, self.clock)
             if inner:
                 ppl += "Their minds: " + inner + " "
+            invented = [r for r in crafting.SURVIVAL_DISCOVERIES if r in self.known_recipes]
+            if invented:
+                ppl += ("They have worked out: "
+                        + ", ".join(r.replace("_", " ") for r in invented) + ". ")
         else:
             ppl = "People: none yet — the land is unpeopled. "
         return (
@@ -1942,6 +2041,7 @@ class World:
                 "roofs": [[x, y] for (x, y) in self.roofs],
                 "sites": self.sites, "ore_nodes": self.ore_nodes,
                 "log": self.log, "version": self.version,
+                "known_recipes": sorted(self.known_recipes),
             }
             tmp = PATH_META + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -1992,6 +2092,7 @@ class World:
             self.ore_nodes = meta.get("ore_nodes", [])
             self._rebuild_ore_index()
             self.log = meta.get("log", [])
+            self.known_recipes = set(meta.get("known_recipes") or crafting.STARTER_RECIPES)
             self.version = meta.get("version", 0)
             self.rng = np.random.default_rng()
             return True
@@ -2213,6 +2314,28 @@ if __name__ == "__main__":
     think_ok = survive_first and meaning_when_safe
     print(f"  thinking-first test: thirsty→{th['intention']['kind']}, "
           f"safe-loner→{loner['intention']['kind']} -> {'OK' if think_ok else 'FAILED'}")
+
+    # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
+    # one, fills it at the water, and can then drink from the pack far from any river — the
+    # crafting fix for the thirst problem, end to end through the real body loop.
+    wf = World().generate(seed=5); wf.people = []
+    fy, fx = np.argwhere((wf.water == WATER_NONE) & (wf.biome == B["grassland"]))[0]
+    wf._add_person(int(fx), int(fy), name="Tinker")
+    tk = wf.people[0]
+    learned = mind.learn_recipe(tk, wf.known_recipes, "leaf_flask", wf.clock)   # band discovers it
+    tk["inv"] = {"leaves": 6, "fiber": 6}                # raw stock to fashion flask + rope
+    made = wf._craft_known(tk, "rope") and wf._craft_known(tk, "leaf_flask")
+    has_flask = tk["inv"].get("leaf_flask", 0) >= 1
+    wf._fill_containers(tk)                              # as if standing at the water
+    filled = tk["inv"].get("water", 0) >= 1
+    # Now far from water and thirsty, the body should choose to drink from the pack.
+    tk["thirst"] = 0.9; tk["home_struct"] = "s"; tk["delib_cd"] = 0; wf.clock = 5000
+    e3, d3, t3, s3, fi3, le3, lx3, ly3, _, _ = wf._perceive(tk["x"], tk["y"])
+    d3[:] = False                                       # pretend no water in reach
+    act, _ = wf._person_decide(tk, e3, d3, t3, s3, fi3, le3, False, lx3, ly3)
+    bottle_ok = learned and has_flask and filled and act == "drink_pack"
+    print(f"  water-bottle test: discovered={learned} crafted={has_flask} filled={filled} "
+          f"drinks-from-pack-away-from-water={act == 'drink_pack'} -> {'OK' if bottle_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")

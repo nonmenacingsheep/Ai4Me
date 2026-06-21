@@ -26,8 +26,10 @@ plain person dicts and a tiny read-only context, so it can be unit-tested headle
 (`python mind.py`) and the world loop can call it without import cycles.
 """
 from __future__ import annotations
-import math
+import itertools
 import re
+
+import crafting   # the recipe registry / discovery matcher (pure data, no cycle)
 
 # ── memory-retrieval weights (Park et al.: recency / importance / relevance) ──────
 W_RECENCY = 0.3
@@ -60,7 +62,35 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "socialize",
-                "befriend", "explore", "avoid", "tend")
+                "befriend", "explore", "avoid", "tend", "tinker")
+
+# The vocabulary a tinkering mind brainstorms from when guessing how to make a make-shift
+# craft (raws it can gather plus rope, which every band knows). Offline discovery is honest
+# trial-and-error over this small space; the LLM reasons straight to the answer.
+CRAFT_VOCAB = ("leaves", "fiber", "rope", "wood", "stone")
+
+# Loose names → canonical material ids, so an LLM saying "cord", "vines" or "branches"
+# still lands on the right ingredient.
+MATERIAL_SYNONYMS = {
+    "cord": "rope", "cordage": "rope", "twine": "rope", "string": "rope", "vine": "rope",
+    "vines": "rope", "plant fiber": "fiber", "fibre": "fiber", "fibres": "fiber",
+    "grass": "fiber", "reeds": "fiber", "straw": "fiber", "leaf": "leaves",
+    "foliage": "leaves", "frond": "leaves", "fronds": "leaves", "branch": "wood",
+    "branches": "wood", "log": "wood", "logs": "wood", "timber": "wood", "stick": "wood",
+    "rock": "stone", "rocks": "stone", "stones": "stone", "pebble": "stone",
+}
+
+
+def canon_material(name: str) -> str | None:
+    """Map a free-text material name to a known ingredient id, or None if unrecognized."""
+    n = (name or "").strip().lower()
+    if n in MATERIAL_SYNONYMS:
+        return MATERIAL_SYNONYMS[n]
+    if n in crafting.ITEMS:
+        return n
+    if n.endswith("s") and n[:-1] in crafting.ITEMS:   # singular fallback (stones→stone)
+        return n[:-1]
+    return None
 
 # Temperament — fixed-ish character rolled at birth. It weights the drives, so two people
 # in the same circumstance want different things. This is where individuality (and, in
@@ -312,6 +342,10 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     # Shelter & ambition — a home of one's own is half survival, half pride.
     if p.get("home_struct") is None:
         out.append(("build", None, 0.5 + 0.18 * amb, "I must raise a roof of my own"))
+    elif ctx.get("needs_gear"):
+        # A roof is up but the band has worked out make-shift gear this soul still lacks
+        # (a water flask, say) — worth the effort to fashion it.
+        out.append(("build", None, 0.42, "I should fashion the gear we've worked out"))
     else:
         out.append(("build", None, 0.10 * amb, "I could make my home finer"))
         needy_id, needy_name = ctx.get("needy_id"), ctx.get("needy_name")
@@ -333,6 +367,14 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     # Curiosity — the unknown tugs at restless minds that have lingered too long.
     bored = _clamp01((clock - p.get("last_explore_t", 0.0)) / SOCIAL_FORGET)
     out.append(("explore", None, (0.08 + cur * bored * 0.75) * night_damp, "the far country calls"))
+
+    # Invention — when the band still has problems it hasn't solved (no way to carry water,
+    # say), a curious mind tinkers toward a make-shift fix. Sharpened by hardship recently
+    # felt: a soul that has known thirst is keener to crack the water problem.
+    if ctx.get("unsolved") and not night:
+        hardship = _clamp01(ctx.get("hardship", 0.0))
+        out.append(("tinker", None, (0.16 + cur * 0.5 + hardship * 0.3) * night_damp,
+                    "I'll puzzle out something to make"))
 
     # Fear / grudge — keep distance from someone who has wronged or unsettled them.
     foe_id, foe_name, foe_mag = ctx.get("foe_id"), ctx.get("foe_name"), ctx.get("foe_mag", 0.0)
@@ -428,6 +470,80 @@ def speak(p: dict, line: str, clock: float) -> None:
     if line:
         p["say"] = line
         p["say_t"] = round(clock, 1)
+
+
+# ─── discovery: a people works out its own make-shift crafts ────────────────────────
+def experiment(p: dict, candidates: list[str], rng) -> tuple[list[str] | None, str | None]:
+    """The OFFLINE inventor: brainstorm an untried small combination of materials and see if
+    it amounts to anything (honest trial and error, no model). Returns (guess, recipe_id|None);
+    recipe_id is set only when the hunch hits an as-yet-undiscovered craft. Tried combos are
+    remembered so a mind doesn't keep banging the same two rocks together."""
+    if not candidates:
+        return None, None
+    tried = {tuple(t) for t in p.setdefault("tried", [])}
+    combos = [c for k in (2, 3) for c in itertools.combinations(CRAFT_VOCAB, k)]
+    untried = [c for c in combos if c not in tried]
+    if not untried:
+        return None, None
+    guess = list(untried[int(rng.integers(len(untried)))])
+    p["tried"].append(list(guess))
+    return guess, crafting.identify(set(guess), candidates)
+
+
+def learn_recipe(p: dict, world_known: set, rid: str, clock: float, via: str = "worked out") -> bool:
+    """Record a discovery: add it to the band's shared knowledge, burn it into memory as a
+    proud moment, voice it, and let the breakthrough deepen a curious self-image. Returns
+    True if it was genuinely new."""
+    if not rid or rid in world_known:
+        return False
+    world_known.add(rid)
+    name = rid.replace("_", " ")
+    problem = crafting.SURVIVAL_DISCOVERIES.get(rid, "")
+    remember(p, f"I {via} how to make a {name}" + (f" — for {problem}" if problem else ""),
+             0.92, "discovery", clock)
+    speak(p, f"I've worked out how to make a {name}!", clock)
+    vals = p.setdefault("values", {t: 0.0 for t in TRAITS})
+    vals["curiosity"] = round(min(VALUE_CAP, vals.get("curiosity", 0.0) + 0.05), 3)
+    return True
+
+
+def discover_messages(p: dict, ctx: dict) -> tuple[str, str]:
+    """Build (system, user) asking the mind to REASON OUT a make-shift craft: given a problem
+    it's struggling with and the materials at hand, guess the thing and what it's made of.
+    A correct guess of the ingredients unlocks it — invention by insight, not by luck."""
+    problems = ctx.get("unsolved_problems") or ["surviving out here"]
+    system = (
+        f"You are {p['name']}, an early human facing a hard problem with only raw materials "
+        "and your wits. Invent a simple make-shift thing you could fashion to solve it, and "
+        "say plainly what it is MADE OF. Think like a resourceful forager.\n"
+        'Reply ONLY as JSON: {"make": short name of the thing, "ingredients": '
+        "[2-3 materials from " + str(list(CRAFT_VOCAB)) + '], "say": a brief line or ""}.'
+    )
+    user = (
+        f"My trouble: {problems[0]}.\n"
+        f"Materials I can gather: {', '.join(CRAFT_VOCAB)}.\n"
+        "What simple thing could I make, and from which materials?"
+    )
+    return system, user
+
+
+def apply_discovery(p: dict, data: dict, ctx: dict, world_known: set, clock: float) -> str | None:
+    """Check an LLM craft-hypothesis: canonicalize the guessed materials and, if they match a
+    real undiscovered craft, learn it. Returns the discovered recipe id, or None."""
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("ingredients") or []
+    guess = {m for m in (canon_material(str(x)) for x in raw) if m}
+    say = str(data.get("say", "") or "")
+    if say:
+        speak(p, say, clock)
+    rid = crafting.identify(guess, ctx.get("unsolved") or [])
+    if rid and learn_recipe(p, world_known, rid, clock, via="reasoned out"):
+        return rid
+    # A wrong guess is still a lesson — remember the dead end so it isn't tried forever.
+    if guess:
+        p.setdefault("tried", []).append(sorted(guess))
+    return None
 
 
 # ─── LLM touch-points (prompt builders + result appliers; the call itself is in the
@@ -684,5 +800,23 @@ if __name__ == "__main__":
                                 "identity": "sociability"}, clock)
     assert settled["values"]["sociability"] > 0
     print("llm-glue OK ->", digest([settled, c], clock))
+
+    # discovery: offline trial-and-error finds the hidden flask; an LLM-style ingredient
+    # guess ("leaves + cord") reasons straight to it; both unlock it for the band.
+    inventor = mk("Wren", 0)
+    band = set(crafting.STARTER_RECIPES)
+    for _ in range(80):
+        _, rid = experiment(inventor, crafting.discoverable(band), rng)
+        if rid:
+            learn_recipe(inventor, band, rid, clock)
+        if "leaf_flask" in band:
+            break
+    assert "leaf_flask" in band, "offline experimentation should eventually find the flask"
+    assert any(m["kind"] == "discovery" for m in inventor["memory"])
+    band2 = set(crafting.STARTER_RECIPES)
+    got = apply_discovery(mk("Sage", 0), {"make": "water holder", "ingredients": ["leaves", "cord"]},
+                          {"unsolved": crafting.discoverable(band2)}, band2, clock)
+    assert got == "leaf_flask" and "leaf_flask" in band2, "leaves+cord should reason to a flask"
+    print("discovery OK -> offline found gear; 'leaves+cord' reasoned to the flask")
 
     print("\nall mind self-tests passed ✓")

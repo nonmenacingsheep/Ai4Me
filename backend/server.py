@@ -654,6 +654,18 @@ async def _mind_think_one():
         target = _live(w, pid)
         if target is not None and data:
             mind_store.apply_deliberation(target, data, ctx, clock)
+        # Invention by reasoning: if they've set their mind to tinkering and the band still
+        # has unsolved problems, let the model REASON OUT a make-shift craft (the user's
+        # "guess the ingredients" mechanic). A correct hunch unlocks it for everyone.
+        if target is not None and ctx.get("unsolved") and (target.get("intention") or {}).get("kind") == "tinker":
+            dsys, dusr = mind_store.discover_messages(target, ctx)
+            draw = await asyncio.wait_for(brain._complete(dsys, dusr, max_tokens=120), MIND_THINK_BUDGET)
+            rid = mind_store.apply_discovery(target, brain._parse_json_object(draw),
+                                             ctx, w.known_recipes, clock)
+            if rid:
+                w.version += 1
+                await broadcast({"type": "world_changed",
+                                 "changes": [f"{target['name']} reasoned out a {rid.replace('_', ' ')}"]})
     except Exception as e:
         print(f"[mind] deliberation fell back to the arbiter ({type(e).__name__}: {e})")
 

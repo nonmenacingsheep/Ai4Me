@@ -92,6 +92,14 @@ _RECIPE_ROWS = [
     ("torch",          2, {"stick": 1, "fiber": 1},           None, None, 0),
     ("flint_shard",    2, {"flint": 1},                       None, None, 0),
     ("basket",         1, {"fiber": 4},                       None, None, 0),
+    # ── Make-shift survival kit — the hand-figured early crafts a band must DISCOVER
+    #    (see SURVIVAL_DISCOVERIES). Each has a deliberately distinct ingredient-type set
+    #    so a correct guess of *what it's made of* identifies it. Solving water/food/rest
+    #    out here is what lets people range from the riverbank and live. ──────────────
+    ("leaf_flask",     1, {"leaves": 3, "rope": 1},           None, None, 0),  # carry water
+    ("forage_sack",    1, {"fiber": 4, "rope": 1},            None, None, 0),  # carry more food
+    ("sleeping_mat",   1, {"leaves": 4, "fiber": 2},          None, None, 0),  # rest well anywhere
+    ("campfire",       1, {"wood": 3, "stone": 2, "leaves": 1}, None, None, 0),  # station: cooking
     ("bow",            1, {"stick": 2, "rope": 1},            None, None, 0),
     ("arrow",          4, {"stick": 1, "flint": 1},           None, None, 0),
     ("workbench",      1, {"wood": 4, "stick": 2},            None, None, 0),  # station
@@ -359,6 +367,50 @@ def available(inv: dict, stations=(), tools=None) -> list[str]:
     return [rid for rid in RECIPES if can_craft(inv, rid, stations, tools)]
 
 
+# ════════════════════════════════════════════════════════════════════════════
+#  Discovery — recipes are the laws of physics, but a people doesn't KNOW them.
+#  Knowledge is earned: an agent hypothesises what an item is made of, and a
+#  correct guess of the ingredient *types* (counts don't matter — it's the idea
+#  that's hard) identifies the recipe and unlocks it for the whole band. The body
+#  uses an offline experiment loop; the LLM mind reasons its way to the answer.
+#  Only this make-shift survival tier is hidden — the deeper tech tree is content
+#  the gods/UI expose, not something the rule-based folk grope toward unaided.
+# ════════════════════════════════════════════════════════════════════════════
+# What every newborn band already knows in its bones (so existing behaviour stands).
+STARTER_RECIPES = ("stick", "crude_axe", "crude_pickaxe", "rope", "workbench", "basket")
+
+# The hidden make-shift crafts a band must work out for itself, each tagged with the
+# survival problem it eases — so a mind can aim its experiments at what it lacks.
+SURVIVAL_DISCOVERIES = {
+    "leaf_flask":   "carrying water away from the river",
+    "forage_sack":  "carrying more food at once",
+    "sleeping_mat": "resting well far from home",
+    "campfire":     "making fire to cook by",
+}
+
+# How much water a filled container holds (drinks-worth), by container item.
+CONTAINER_WATER = {"leaf_flask": 4, "waterskin": 6, "clay_jug": 8, "wooden_bucket": 10}
+
+
+def identify(input_types, candidates) -> str | None:
+    """Given a guessed SET of ingredient types and the recipes still unknown to a band,
+    return the recipe whose inputs are exactly those types — i.e. 'did this hunch hit a
+    real make-shift craft?'. Counts and station are ignored: the insight is the materials."""
+    want = frozenset(t for t in input_types if t)
+    if not want:
+        return None
+    for rid in candidates:
+        r = RECIPES.get(rid)
+        if r and frozenset(r["inp"].keys()) == want:
+            return rid
+    return None
+
+
+def discoverable(known) -> list[str]:
+    """Make-shift survival recipes a band hasn't worked out yet."""
+    return [rid for rid in SURVIVAL_DISCOVERIES if rid not in set(known)]
+
+
 def catalog() -> dict:
     """The whole registry as plain JSON-able data — for GET /api/world/recipes, the
     god-tools UI, and the future LLM mind. Recipes are grouped by tier for display."""
@@ -394,7 +446,19 @@ TECH_LADDER = [
 # ════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print(f"recipes: {len(RECIPES)}  |  items: {len(ITEMS)}  |  raw: {len(RAW)}")
-    assert len(RECIPES) == 128, f"expected 128 recipes, got {len(RECIPES)}"
+    assert len(RECIPES) == 132, f"expected 132 recipes, got {len(RECIPES)}"
+
+    # Discovery: a correct ingredient guess identifies a hidden survival craft; a wrong one
+    # doesn't; and each discoverable recipe has a UNIQUE ingredient-type set (so a right
+    # guess is unambiguous).
+    cand = discoverable(STARTER_RECIPES)
+    assert identify({"leaves", "rope"}, cand) == "leaf_flask", "leaves+rope should be a flask"
+    assert identify({"wood", "stone", "leaves"}, cand) == "campfire"
+    assert identify({"leaves"}, cand) is None, "a lone material shouldn't match"
+    assert identify({"gold_ore", "rope"}, cand) is None, "nonsense shouldn't match"
+    sets = [frozenset(RECIPES[r]["inp"]) for r in SURVIVAL_DISCOVERIES]
+    assert len(sets) == len(set(sets)), "discoverable recipes need distinct ingredient sets"
+    print("discovery: correct guesses identify hidden crafts, wrong ones don't  ✓")
 
     # Every recipe input must be a known item (no dangling references).
     bad = []
