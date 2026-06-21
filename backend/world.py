@@ -46,7 +46,7 @@ H = 2048
 # satisfy. A save stamped with a different (or missing) schema is treated as
 # incompatible and regenerated on load, so a world written by a broken/older
 # build self-heals on the next launch instead of staying frozen forever.
-SCHEMA = 6
+SCHEMA = 7
 CHUNK = 64                      # tiles per chunk → (W//CHUNK)² dormancy bookkeeping cells
 NCHUNK = W // CHUNK
 SEA_LEVEL = 0.36                # elevation below this is ocean
@@ -90,7 +90,7 @@ BIOMES = (
 B = {name: i for i, name in enumerate(BIOMES)}
 
 # ─── Water layer ─────────────────────────────────────────────────────────────
-WATER_NONE, WATER_RIVER, WATER_LAKE, WATER_OCEAN = 0, 1, 2, 3
+WATER_NONE, WATER_RIVER, WATER_LAKE, WATER_OCEAN, WATER_SHALLOW = 0, 1, 2, 3, 4
 
 # ─── Vegetation species ──────────────────────────────────────────────────────
 # Each plant defines where it thrives: the biomes it tolerates, its temperature and
@@ -379,6 +379,7 @@ class World:
 
         self.biome = self._classify_biomes()
         self._shape_beaches()
+        self._add_coastal_shelf()
         # Soil: fertile where moist & low, poor on rock/desert/snow; plus noise.
         soil = np.clip(0.35 + self.moisture * 0.5 - elev * 0.25, 0, 1)
         soil += (_fractal_noise(H, W, 6, np.random.default_rng(self.seed ^ 0x12345)) - 0.5) * 0.2
@@ -543,7 +544,7 @@ class World:
         lake_c = (~sea) & (fe > ce + 5e-4)
         # Rivers = land cells carrying more than a threshold volume; width grows with √flow.
         land_acc = acc[~sea]
-        thresh = np.quantile(land_acc, 0.93) if land_acc.size else 1e9
+        thresh = np.quantile(land_acc, 0.972) if land_acc.size else 1e9
         river_c = (~sea) & (acc > thresh)
 
         # Paint lakes (upscaled blocks) onto the full-res water grid.
@@ -657,7 +658,9 @@ class World:
         exposure = _smooth(ocean.astype(np.float32), 6)
         sediment = _smooth((self.water == WATER_RIVER).astype(np.float32), 5)
         # Width budget per coastal tile: sediment & shelter widen it, slope narrows it.
-        wf = np.clip(1.6 + sediment * 14.0 - slope * 22.0 - exposure * 2.2, 0.0, 6.0)
+        # River-mouth deltas (high sediment) get a much bigger budget so they read as
+        # broad sandy beaches; steep/exposed shores stay thin.
+        wf = np.clip(1.6 + sediment * 26.0 - slope * 22.0 - exposure * 2.2, 0.0, 12.0)
         # Shingle where steep, exposed and starved of river sand; sand everywhere else.
         # Thresholds are relative to THIS coast's own distribution so a sensible fraction
         # of the steep, wave-exposed shore turns to gravel regardless of overall relief.
@@ -670,7 +673,7 @@ class World:
         mat[shingle] = B["shingle"]
         budget = np.where(coast, wf, 0.0).astype(np.float32)
         inbeach = coast.copy()
-        for _ in range(6):                      # grow the beach inland, width ∝ budget
+        for _ in range(12):                     # grow the beach inland, width ∝ budget
             best = np.zeros((H, W), np.float32)
             bestmat = np.zeros((H, W), np.uint8)
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -685,6 +688,32 @@ class World:
             inbeach |= grow
         set_tiles = inbeach & (mat != 0) & land
         self.biome[set_tiles] = mat[set_tiles]
+
+    def _add_coastal_shelf(self):
+        """Mark a band of shallow water hugging the coast (rendered a lighter blue), which
+        BULGES out where rivers meet the sea — the sediment a river dumps builds a shallow
+        delta/fan offshore. Purely a water-layer distinction; the tiles are still ocean."""
+        ocean = self.water == WATER_OCEAN
+        if not ocean.any():
+            return
+
+        def grow(seed_mask, rings):
+            m = seed_mask.copy()
+            for _ in range(rings):
+                acc = m.copy()
+                for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    acc |= np.roll(np.roll(m, dy, 0), dx, 1)
+                m = acc
+            return m
+
+        land = self.water == WATER_NONE
+        shelf = grow(land, 3) & ocean                       # a thin shelf all around the coast
+        # Bulge: rivers carry sediment offshore, so the shelf reaches much farther out
+        # opposite a river mouth (a delta fan).
+        mouths = grow(self.water == WATER_RIVER, 1) & ocean
+        if mouths.any():
+            shelf |= grow(mouths, 12) & ocean
+        self.water[shelf] = WATER_SHALLOW
 
     def _suitability(self, species: int, reg=None) -> np.ndarray:
         """Per-tile growth suitability in [-1,1] for a plant *right now* (season-aware).
@@ -981,7 +1010,7 @@ class World:
             sx = int(self.rng.integers(-1, 2)); sy = int(self.rng.integers(-1, 2))
         for _ in range(speed):
             nx, ny = a["x"] + sx, a["y"] + sy
-            if 0 <= nx < W and 0 <= ny < H and self.water[ny, nx] != WATER_OCEAN:
+            if 0 <= nx < W and 0 <= ny < H and self.water[ny, nx] not in (WATER_OCEAN, WATER_SHALLOW):
                 a["x"], a["y"] = nx, ny
             else:
                 break

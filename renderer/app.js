@@ -3578,7 +3578,7 @@ const WBIOME_RGB = {
   swamp: [74, 93, 58], mountain: [138, 128, 115], rock: [107, 107, 107],
   shingle: [150, 140, 120],            // gravel/pebble shore
 };
-const WWATER_RGB = { 1: [79, 155, 217], 2: [47, 111, 176], 3: [22, 52, 90] }; // river/lake/ocean
+const WWATER_RGB = { 1: [79, 155, 217], 2: [47, 111, 176], 3: [22, 52, 90], 4: [86, 176, 196] }; // river/lake/ocean/shallow
 const WPLANT_TINT = {
   grass: [120, 180, 70], shrub: [110, 150, 70], oak: [40, 95, 45], pine: [28, 72, 50],
   cactus: [80, 140, 90], reeds: [95, 155, 80], palm: [50, 125, 70],
@@ -4039,7 +4039,7 @@ function worldInspect(x, y) {
   const i = oy * d.ovw + ox;
   const ro = document.getElementById('world-readout');
   const water = d.water[i];
-  const biome = water ? ['', 'river', 'lake', 'ocean'][water] : d.biomes[d.biome[i]];
+  const biome = water ? ['', 'river', 'lake', 'ocean', 'shallow'][water] : d.biomes[d.biome[i]];
   const sp = d.vegSp[i];
   const flora = sp ? `${d.plants[sp]} (${Math.round(d.vegGrowth[i] / 255 * 100)}%)` : '—';
   const here = d.animals.filter(a => a.x === x && a.y === y).map(a => a.sp);
