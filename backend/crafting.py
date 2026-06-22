@@ -413,7 +413,9 @@ def available(inv: dict, stations=(), tools=None) -> list[str]:
 #  the gods/UI expose, not something the rule-based folk grope toward unaided.
 # ════════════════════════════════════════════════════════════════════════════
 # What every newborn band already knows in its bones (so existing behaviour stands).
-STARTER_RECIPES = ("stick", "crude_axe", "crude_pickaxe", "rope", "workbench", "basket")
+# NOTE: crude_axe is NOT here — a band must WORK OUT the axe (knap a sharp edge) through the
+# experience of chopping wood by hand; it then spreads by teaching like any craft. See world.py.
+STARTER_RECIPES = ("stick", "crude_pickaxe", "rope", "workbench", "basket")
 
 # The hidden make-shift crafts a band must work out for itself, each tagged with the
 # survival problem it eases — so a mind can aim its experiments at what it lacks.

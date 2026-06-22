@@ -110,6 +110,8 @@ WATER_NONE, WATER_RIVER, WATER_LAKE, WATER_OCEAN, WATER_SHALLOW = 0, 1, 2, 3, 4
 FORDABLE_WATER = (WATER_NONE, WATER_RIVER, WATER_SHALLOW)
 WET_DURATION = 90.0                 # game-minutes a soul stays wet after wading
 SEEN_FORGET = 720.0                 # game-minutes a remembered sighting of someone stays worth chasing
+KNAP_CHOPS = 6                      # hand-chops of wood before a soul works out the axe (knaps a sharp edge)
+GATHER_WORK = 2.5                   # game-minutes of hand-work per armful of leaves/fiber (so it's SEEN, not instant)
 # The eight step directions, used by the obstacle-aware walker to slide around barriers
 # instead of freezing nose-to-the-water (the old greedy single-step just stopped dead).
 _STEP_DIRS = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
@@ -1509,26 +1511,39 @@ class World:
                     if self.veg_growth[y, x] <= 0.05:        # felled — the tile clears
                         self.veg_sp[y, x] = VEG_NONE
                         self.veg_growth[y, x] = 0.0
-                    gain = BUILD["chop_yield"] + (BUILD["axe_bonus"] if p["inv"].get("axe", 0) else 0)
+                    has_axe = p["inv"].get("axe", 0) > 0
+                    gain = BUILD["chop_yield"] + (BUILD["axe_bonus"] if has_axe else 0)
                     p["inv"]["wood"] = p["inv"].get("wood", 0) + gain
+                    # Hacking wood by hand is hard, slow work — and out of that struggle a soul
+                    # WORKS OUT the axe (knaps a sharp edge). It then spreads by teaching, so not
+                    # everyone must rediscover it. (No one is born knowing how to make a tool.)
+                    if not has_axe and not self._person_knows(p, "crude_axe"):
+                        p["knap"] = p.get("knap", 0) + 1
+                        if p["knap"] >= KNAP_CHOPS and self._grant_recipe(
+                                p, "crude_axe", via="worked out",
+                                rationale="a sharpened stone bites far deeper than bare hands — an axe!"):
+                            self._note("discovery", f"{p['name']} worked out how to make a crude axe.")
             elif action == "mine":
                 if stone[ly, lx]:
                     p["inv"]["stone"] = p["inv"].get("stone", 0) + BUILD["mine_yield"]
             elif action == "gather_fiber":
                 g = float(self.veg_growth[y, x])
-                if fiber[ly, lx] and g > 0.20 and p["inv"].get("fiber", 0) < PERSON["inv_cap"]:
+                if (fiber[ly, lx] and g > 0.20 and p["inv"].get("fiber", 0) < PERSON["inv_cap"]
+                        and self._gather_ready(p, "fiber", dt_game_min)):
                     self.veg_growth[y, x] = max(0.0, g - 0.25)
                     p["inv"]["fiber"] = p["inv"].get("fiber", 0) + 1
             elif action == "gather_leaves":
                 g = float(self.veg_growth[y, x])
-                if leaf[ly, lx] and g > 0.25 and p["inv"].get("leaves", 0) < LEAF_CAP:
+                if (leaf[ly, lx] and g > 0.25 and p["inv"].get("leaves", 0) < LEAF_CAP
+                        and self._gather_ready(p, "leaves", dt_game_min)):
                     self.veg_growth[y, x] = max(0.0, g - 0.12)   # stripping leaves barely dents the plant
                     p["inv"]["leaves"] = p["inv"].get("leaves", 0) + LEAF_GATHER
             elif action == "craft":
                 # If nothing's underway yet, start the bootstrap axe (survival crafts start
                 # their own item in the decide step). Then tick the active craft's timer;
                 # the item is only granted when the work is finished.
-                if not p.get("craft") and p["inv"].get("axe", 0) < 1:
+                if (not p.get("craft") and p["inv"].get("axe", 0) < 1
+                        and self._person_knows(p, "crude_axe")):
                     self._begin_craft(p, "crude_axe")
                 self._advance_craft(p, dt_game_min)
             elif action == "found_site":
@@ -2038,8 +2053,10 @@ class World:
                                          "stone", "mine", "seek_stone"),
         }
 
-        # First project: a crude axe — cheap, and it makes every later chop yield more.
-        if inv.get("axe", 0) < 1:
+        # Once they've WORKED OUT the axe (by chopping wood by hand — see the chop handler), they
+        # fashion one: it makes every later chop yield more. A soul who hasn't yet had the insight
+        # builds and gathers bare-handed, and works it out along the way.
+        if inv.get("axe", 0) < 1 and self._person_knows(p, "crude_axe"):
             if inv.get("wood", 0) >= BUILD["axe_wood"]:
                 return "craft", None
             return getters["wood"]()
@@ -2567,6 +2584,20 @@ class World:
                       "build", self.clock)
         self._earn_renown(p, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
 
+    def _gather_ready(self, p, key, dt) -> bool:
+        """Spread a hand-gather over visible game-time: True (and resets) only once GATHER_WORK
+        minutes of work have accrued at the task, so a soul is SEEN working an armful loose rather
+        than filling its pack in a blink. Keyed per material so switching tasks banks no stale work."""
+        gw = p.get("gwork")
+        if not gw or gw.get("k") != key:
+            gw = {"k": key, "t": 0.0}
+            p["gwork"] = gw
+        gw["t"] += dt
+        if gw["t"] >= GATHER_WORK:
+            gw["t"] = 0.0
+            return True
+        return False
+
     def _passable(self, nx, ny) -> bool:
         """A tile a person may step onto: in bounds, not deep water (rivers/shallows are fordable),
         and not a solid wall."""
@@ -2918,8 +2949,8 @@ class World:
         if p.get("craft"):
             return True
         inv = p["inv"]
-        if rid == "crude_axe":                                  # bootstrap tool, predates recipes
-            if inv.get("wood", 0) < BUILD["axe_wood"]:
+        if rid == "crude_axe":                                  # the first tool — must be WORKED OUT first
+            if not self._person_knows(p, "crude_axe") or inv.get("wood", 0) < BUILD["axe_wood"]:
                 return False
             inv["wood"] -= BUILD["axe_wood"]
             out, qty = "axe", 1
@@ -3694,6 +3725,7 @@ if __name__ == "__main__":
     wc._add_person(int(bx), int(by), name="Builder")
     b = wc.people[0]
     b["inv"].update({"wood": 80, "fiber": 40, "leaves": 30})   # logs, thatch & leaves to work
+    b["recipes"] = ["crude_axe"]                   # already worked out the axe (knapping tested separately)
     wc.clock = 12 * 60                              # high noon (daytime → secondary drives active)
     for _ in range(1500):
         b["hunger"] = b["thirst"] = 0.1; b["fatigue"] = 0.1   # stay comfortable
@@ -3706,6 +3738,22 @@ if __name__ == "__main__":
           f"first home = {site['name'] if site else 'none'}, blocks={len(wc.blocks)}, "
           f"roofs={len(wc.roofs)}, insul={b.get('insul')}, housed={b.get('home_struct') is not None} "
           f"-> {'OK' if built_ok else 'FAILED'}")
+
+    # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
+    # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.
+    wk = World().generate(seed=7); wk.people = []
+    ky, kx = np.argwhere((wk.water == WATER_NONE) & (wk.biome == B["grassland"]))[0]
+    wk._add_person(int(kx), int(ky), name="Knapper")
+    kn = wk.people[0]
+    born_knowing = wk._person_knows(kn, "crude_axe")            # should be False — not a starter anymore
+    for _ in range(KNAP_CHOPS):                                 # simulate hand-chops working it out
+        kn["knap"] = kn.get("knap", 0) + 1
+        if kn["knap"] >= KNAP_CHOPS:
+            wk._grant_recipe(kn, "crude_axe", via="worked out")
+    knapped = wk._person_knows(kn, "crude_axe")
+    axe_ok = (not born_knowing) and knapped
+    print(f"  axe-discovery test: born-knowing-axe={born_knowing} learns-by-knapping={knapped} "
+          f"-> {'OK' if axe_ok else 'FAILED'}")
 
     # And the blueprint library scales up: force a cabin and confirm it can be raised too.
     wc2 = World().generate(seed=7); wc2.people = []
