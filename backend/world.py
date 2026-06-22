@@ -250,6 +250,14 @@ BLUEPRINTS = {
     ]),
 }
 
+# The dwelling ladder — ascending comfort. Once a soul has any roof and is kitted out,
+# their standing "life project" is to climb this: a draughty leaf lean-to → a snug timber
+# hut → a roomy cabin. Each rung is built tile-by-tile from forageable wood & thatch (no
+# station needed), so it's pure, visible material progress with the machinery that already
+# works. (The deeper crafting tree — stations, metal, furniture — is a later rung that
+# needs station-proximity; this is the foundation those layers build on.)
+DWELLING_LADDER = ["leaf_shelter", "hut", "cabin"]
+
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
 # map, each gated by the right tool (see crafting.RAW): fiber from grasses, clay
@@ -1252,7 +1260,7 @@ class World:
                     self._begin_craft(p, "crude_axe")
                 self._advance_craft(p, dt_game_min)
             elif action == "found_site":
-                self._found_site(p)
+                self._found_site(p, p.pop("next_bp", "leaf_shelter"))
             elif action == "build_block":
                 self._build_next_block(p)
             # Seeking and wandering move the body; acting-in-place does not.
@@ -1422,8 +1430,11 @@ class World:
         unsolved = self._person_unsolved(p)        # what THIS soul hasn't worked out yet
         gear = [r for r in ("leaf_flask", "forage_sack", "sleeping_mat") if self._person_knows(p, r)]
         needs_gear = any(p.get("inv", {}).get(r, 0) < 1 for r in gear)
+        proj = self._project_for(p)          # the soul's standing life-project (climb the dwelling ladder)
+        p["project"] = proj                  # stash so the body can pursue it (the mind only weighs it)
         return {
             "needs_gear": needs_gear,
+            "project": proj,
             "clock": self.clock, "night": night, "season": self.season(),
             "weather": self.weather, "time_str": f"{int(self.time_of_day()):02d}:00",
             "others_exist": len(self.people) > 1,
@@ -1572,23 +1583,9 @@ class World:
                 return "craft", None
             return getters["wood"]()
 
-        # Main project: build a home, tile by tile, from a blueprint (a leaf shelter first).
+        # First home: build a quick leaf lean-to, tile by tile, from its blueprint.
         if p.get("home_struct") is None:
-            site = self._person_site(p)
-            if site is None:                                   # no footprint yet — lay one at home
-                if abs(hx - x) + abs(hy - y) <= 1:
-                    return "found_site", None
-                return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
-            task = self._site_next_task(site)
-            if task is None:                                   # all tiles placed → finish it
-                self._finish_site(p, site)
-                return None
-            item, qty = task["cost"]
-            if inv.get(item, 0) >= qty:                        # have the material — go lay it
-                if max(abs(task["x"] - x), abs(task["y"] - y)) <= 2:
-                    return "build_block", None
-                return "haul", (int(np.sign(task["x"] - x)), int(np.sign(task["y"] - y)))
-            return getters.get(item, getters["wood"])()
+            return self._pursue_building(p, "leaf_shelter", getters)
 
         # Home raised — now make any DISCOVERED make-shift survival gear they still lack
         # (the water flask first; it's what frees them from the riverbank).
@@ -1596,10 +1593,74 @@ class World:
         if gear:
             return gear
 
-        # Then lay in stone for the next slice (stone houses, workshops).
+        # The life-project: climb the dwelling ladder to a snugger home (hut, then cabin).
+        # This is what fills the once-empty hours after survival is met — a real, visible goal.
+        proj = p.get("project")
+        if proj and proj.get("kind") == "dwelling":
+            act = self._pursue_building(p, proj["bp"], getters)
+            if act:
+                return act
+
+        # Otherwise lay in stone for the next slice (stone houses, workshops).
         if inv.get("stone", 0) < BUILD["stone_stock"]:
             return self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly,
                               "stone", "mine", "seek_stone")
+        return None
+
+    def _pursue_building(self, p, bp_name, getters):
+        """Raise a building from a blueprint tile by tile: found the footprint at home, then
+        forage each tile's material and lay it. Returns a body action, or None when there's
+        nothing to do this beat (between steps, or just finished). Shared by the first
+        lean-to and every dwelling-ladder upgrade, so the climb reuses proven machinery."""
+        x, y = p["x"], p["y"]
+        inv = p["inv"]
+        hx, hy = p["home"]
+        site = self._person_site(p)
+        if site is None:                                       # no footprint yet — lay one at home
+            if p.get("build_cd", 0) > self.clock:              # nowhere to build last time; bide
+                return None
+            if abs(hx - x) + abs(hy - y) <= 1:
+                p["next_bp"] = bp_name                          # the handler founds this blueprint
+                return "found_site", None
+            return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+        task = self._site_next_task(site)
+        if task is None:                                       # all tiles placed → finish it
+            self._finish_site(p, site)
+            return None
+        item, qty = task["cost"]
+        if inv.get(item, 0) >= qty:                            # have the material — go lay it
+            if max(abs(task["x"] - x), abs(task["y"] - y)) <= 2:
+                return "build_block", None
+            return "haul", (int(np.sign(task["x"] - x)), int(np.sign(task["y"] - y)))
+        return getters.get(item, getters["wood"])()
+
+    def _current_dwelling_bp(self, p):
+        """The blueprint name of the soul's current finished home, or None if they've no roof
+        yet. Looked up from the site `home_struct` points at (finished sites are kept)."""
+        sid = p.get("home_struct")
+        if not sid:
+            return None
+        for s in self.sites:
+            if s["id"] == sid:
+                return s.get("bp")
+        return None
+
+    def _project_for(self, p):
+        """The soul's standing life-project once survival & first shelter are met: climb the
+        dwelling ladder to a snugger home. Returns a project dict {kind, bp, why} or None
+        (no home yet, or already at the top rung). The mind weighs this against company,
+        wandering and rest; an unambitious, content soul may simply linger in their hut."""
+        if p.get("home_struct") is None:
+            return None                                        # first shelter is the survival path's job
+        cur = self._current_dwelling_bp(p)
+        try:
+            i = DWELLING_LADDER.index(cur)
+        except ValueError:
+            i = len(DWELLING_LADDER) - 1                       # unknown/custom home — treat as topped out
+        if i + 1 < len(DWELLING_LADDER):
+            nxt = DWELLING_LADDER[i + 1]
+            return {"kind": "dwelling", "bp": nxt,
+                    "why": f"raise a finer home — a proper {BLUEPRINTS[nxt]['name'].lower()}"}
         return None
 
     # Survival gear the band has discovered, in priority order, with what each does and the
@@ -2322,8 +2383,9 @@ class World:
             f"Craft: people can work {len(crafting.RECIPES)} recipes across a tech ladder "
             f"(wood/stone tools → workbench → cooking → pottery → smelting → metalwork → "
             f"buildings). They raise real tile-by-tile buildings (walls/door/floor/thatch roof) "
-            f"from blueprints; today they autonomously chase only the first rungs (axe → a leaf "
-            f"lean-to, with sturdier huts/cabins in the blueprint library for later). "
+            f"from blueprints, and once survival is met they autonomously climb the dwelling "
+            f"ladder (axe → a leaf lean-to → a snug hut → a roomy cabin), so settled souls keep "
+            f"raising ever-finer homes rather than standing idle. "
             f"Ore/clay/sand/flint are mineable across the map (tool-gated) for the higher recipes. "
             f"Recent godly acts: {recent}.\n"
             "You may shape it with hidden directives (stripped from what he sees) — each "

@@ -351,7 +351,24 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         # (a water flask, say) — worth the effort to fashion it.
         out.append(("build", None, 0.42, "I should fashion the gear we've worked out"))
     else:
-        out.append(("build", None, 0.10 * amb, "I could make my home finer"))
+        # Survival & first shelter are behind them — now a standing LIFE-PROJECT pulls,
+        # so a comfortable soul climbs toward a finer life instead of standing idle. The
+        # world hands in the next worthwhile project (a snugger home, …); having a real
+        # target makes this a genuine pull, keenest in ambitious & curious souls and a
+        # little stronger once the body's needs are quiet. Still below survival's danger
+        # ramp, so it never starves anyone — it just fills the empty hours with purpose.
+        proj = ctx.get("project")
+        if proj:
+            # Comfort GATES the project (multiplies it), so the pull fades as any need rises:
+            # a content soul throws themselves into building, but the moment thirst/hunger/
+            # fatigue creep up the project shrinks and survival reclaims the wheel well before
+            # crisis — a soul must never march off to forage timber while quietly dying of
+            # thirst inland, out of reach of a passing sip.
+            comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+            u = (0.22 + 0.22 * amb + 0.12 * cur) * comfort
+            out.append(("build", None, u, proj.get("why") or "I'll make my home finer"))
+        else:
+            out.append(("build", None, 0.10 * amb, "I could make my home finer"))
         needy_id, needy_name = ctx.get("needy_id"), ctx.get("needy_name")
         if needy_id and inv.get("food", 0) > TRADE_SURPLUS:
             out.append(("provide", needy_id, 0.25 * amb + 0.2 * soc,
