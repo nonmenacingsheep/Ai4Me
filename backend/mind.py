@@ -385,6 +385,9 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         # A roof is up but the band has worked out make-shift gear this soul still lacks
         # (a water flask, say) — worth the effort to fashion it.
         out.append(("build", None, 0.42, "I should fashion the gear we've worked out"))
+    elif ctx.get("needs_hearth"):
+        # They've learned raw water sickens but have no hearth to boil it — raise one.
+        out.append(("build", None, 0.44, "I must raise a hearth to boil my water clean"))
     else:
         # Survival & first shelter are behind them — now a standing LIFE-PROJECT pulls,
         # so a comfortable soul climbs toward a finer life instead of standing idle. The

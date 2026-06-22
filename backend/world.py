@@ -335,6 +335,7 @@ DISEASE = {
 WATERBORNE = tuple(DISEASE)
 WATER_INFECT_CHANCE = 0.012        # chance a single raw drink from a natural source infects
 IMMUNITY_DAYS = 90.0               # how long recovery shields against that same disease
+HEARTH_COST = {"wood": 3, "stone": 2, "leaves": 1}   # the campfire a soul raises to boil water by
 
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
@@ -1323,6 +1324,14 @@ class World:
                     p["thirst"] = max(0.0, p["thirst"] - 0.45)
                     self._refill(p, "hydration", 0.3)
                     self._maybe_infect(p)                # the flask holds raw water too — still a risk
+            elif action == "drink_safe":
+                # Boiled water from the pack — slakes thirst like any drink, but carries NO sickness.
+                if p["inv"].get("safe_water", 0) > 0:
+                    p["inv"]["safe_water"] -= 1
+                    if p["inv"]["safe_water"] <= 0:
+                        del p["inv"]["safe_water"]
+                    p["thirst"] = max(0.0, p["thirst"] - 0.45)
+                    self._refill(p, "hydration", 0.3)
             elif action == "rest":
                 # A sheltered person resting at home recovers faster — but only as well as
                 # their home insulates (a leaf lean-to barely helps; a timber hut is snug).
@@ -1334,6 +1343,8 @@ class World:
                     mult = 1.0 + (BUILD["rest_sheltered_mult"] - 1.0) * 0.5
                 p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
                 self._refill(p, "stamina", PERSON["restore_rate"] * mult * dt_game_min)
+                if p.get("hearth") and (x, y) == tuple(p["home"]):
+                    self._boil_at_home(p)                # tend the fire while resting: raw water → safe
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
                 food_cap = PERSON["inv_cap"] + (6 if p["inv"].get("forage_sack", 0) else 0)
@@ -1664,8 +1675,11 @@ class World:
         p["project"] = proj                  # stash so the body can pursue it (the mind only weighs it)
         voc = None if is_child else mind.vocation(p)        # the soul's calling (division of labour)
         p["vocation"] = voc
+        needs_hearth = (not is_child and p.get("home_struct") is not None
+                        and self._person_knows(p, "campfire") and not p.get("hearth"))
         return {
             "needs_gear": needs_gear,
+            "needs_hearth": needs_hearth,
             "project": proj,
             "vocation": voc,
             "clock": self.clock, "night": night, "season": self.season(),
@@ -1716,15 +1730,21 @@ class World:
 
         # Reflex sips while passing relief (doesn't change the standing intention).
         if kind not in ("drink", "eat", "rest"):
-            if drinkable[ly, lx] and p["thirst"] > 0.3:
+            if p["inv"].get("safe_water", 0) > 0 and p["thirst"] > 0.3:
+                return "drink_safe", None                    # boiled water is always the first choice
+            # Only a soul who hasn't learned better gulps raw water on reflex; one who knows to
+            # boil holds out for safe water (unless truly parched — handled by the drink intent).
+            if drinkable[ly, lx] and p["thirst"] > 0.3 and not self._person_knows(p, "campfire"):
                 return "drink", None
             if edible[ly, lx] and self.veg_growth[y, x] > 0.12 and p["hunger"] > 0.35:
                 return "eat", None
 
         if kind == "drink":
+            if p["inv"].get("safe_water", 0) > 0:   # boiled water in the pack — safe, drink it
+                return "drink_safe", None
             if drinkable[ly, lx]:
                 return "drink", None
-            if p["inv"].get("water", 0) > 0:        # carried water (a flask) — drink anywhere
+            if p["inv"].get("water", 0) > 0:        # carried RAW water (a flask) — drink anywhere
                 return "drink_pack", None
             return self._seek(p, x, y, False, drinkable, lx, ly, "water", "drink", "seek_water")
         if kind == "tinker":
@@ -1812,6 +1832,8 @@ class World:
                                          "fiber", "gather_fiber", "seek_fiber"),
             "leaves": lambda: self._seek(p, x, y, bool(leaf[ly, lx]), leaf, lx, ly,
                                          "leaves", "gather_leaves", "seek_leaves"),
+            "stone":  lambda: self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly,
+                                         "stone", "mine", "seek_stone"),
         }
 
         # First project: a crude axe — cheap, and it makes every later chop yield more.
@@ -1829,6 +1851,11 @@ class World:
         gear = self._survival_craft_decide(p, fiber, leaf, getters)
         if gear:
             return gear
+
+        # A soul who has learned that raw water sickens raises a HEARTH at home to boil it safe.
+        hearth = self._hearth_decide(p, getters)
+        if hearth:
+            return hearth
 
         # The life-project: climb the dwelling ladder to a snugger home (hut, then cabin).
         # This is what fills the once-empty hours after survival is met — a real, visible goal.
@@ -1854,6 +1881,41 @@ class World:
             return self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly,
                               "stone", "mine", "seek_stone")
         return None
+
+    def _hearth_decide(self, p, getters):
+        """A soul who has learned raw water sickens raises a HEARTH (campfire) at home to boil it
+        clean: gather the materials, then lay it. Returns a body action, or None if not needed."""
+        if not self._person_knows(p, "campfire") or p.get("hearth"):
+            return None
+        inv = p["inv"]
+        for mat, need in HEARTH_COST.items():
+            if inv.get(mat, 0) < need:
+                return getters[mat]()                         # short on a material — go get it
+        hx, hy = p["home"]
+        if abs(hx - p["x"]) + abs(hy - p["y"]) > 1:           # have it all — bring it home and build
+            return "haul", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
+        for mat, need in HEARTH_COST.items():
+            inv[mat] = inv.get(mat, 0) - need
+            if inv[mat] <= 0:
+                inv.pop(mat, None)
+        p["hearth"] = True
+        self._add_structure("campfire", hx, hy, by=p["name"])
+        mind.remember(p, "raised a hearth — now I can boil my water clean", 0.8, "build", self.clock)
+        return "tend", None
+
+    def _boil_at_home(self, p):
+        """Tend the home fire: convert a measure of raw flask water into SAFE (boiled) water, up
+        to the capacity of the vessels carried. Cheap, runs each rest-tick beside the hearth."""
+        inv = p["inv"]
+        if inv.get("water", 0) <= 0:
+            return
+        cap = sum(crafting.CONTAINER_WATER.get(c, 0) * inv.get(c, 0) for c in crafting.CONTAINER_WATER)
+        if cap <= 0 or inv.get("safe_water", 0) >= cap:        # need a vessel to hold boiled water
+            return
+        inv["water"] -= 1
+        if inv["water"] <= 0:
+            inv.pop("water", None)
+        inv["safe_water"] = inv.get("safe_water", 0) + 1
 
     def _pursue_building(self, p, bp_name, getters, communal: bool = False):
         """Raise a building from a blueprint tile by tile: found the footprint at home, then
@@ -2277,6 +2339,13 @@ class World:
             p.setdefault("immune", {})[ill["d"]] = now + IMMUNITY_DAYS * 1440.0
             p["illness"] = None
             mind.remember(p, "the sickness has passed — I feel myself again", 0.7, "illness", now)
+            if not p.get("knows_boil"):
+                # The hard-won lesson: bad water made me ill — fire must clean it. (Spreads to
+                # others by teaching, like any craft; grants the campfire recipe to build a hearth.)
+                p["knows_boil"] = True
+                if "campfire" not in p.setdefault("recipes", []):
+                    p["recipes"].append("campfire")
+                mind.remember(p, "I will boil my water over a fire from now on — raw water sickens", 0.85, "build", now)
 
     # ── live-sim material sourcing (clay/sand/flint/ore beyond wood & fiber) ────
     def _fill_containers(self, p):
