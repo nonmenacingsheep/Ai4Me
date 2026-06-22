@@ -65,6 +65,10 @@ INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "social
                 "befriend", "explore", "avoid", "tend", "tinker", "ply")
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
+# Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
+# ease off in spring's plenty (mirrors world.SEASON_STOCK_MULT; kept here so the mind stays
+# free of any world import).
+SEASON_STOCK_MULT = {"spring": 1.0, "summer": 1.15, "autumn": 2.1, "winter": 1.6}
 
 # Vocations — a soul's calling, emerging from temperament (division of labour). A driven soul
 # becomes the band's BUILDER, a restless curious one its TOOLMAKER, and the steady rest its
@@ -448,10 +452,15 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     # below survival's danger ramp — a hungry soul eats now and stocks later, never the reverse.
     if p.get("home_struct") is not None and not night:
         larder = p.get("store", {}).get("food", 0)
-        if larder < PROVISION_TARGET:
+        target = PROVISION_TARGET * SEASON_STOCK_MULT.get(ctx.get("season", "spring"), 1.0)
+        if larder < target:
             comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
-            want = 1.0 - larder / PROVISION_TARGET          # keener when the cupboard's bare
-            out.append(("provision", None, (0.17 + 0.13 * want) * comfort, "lay in food against lean days"))
+            want = 1.0 - larder / target                    # keener when the cupboard's bare
+            # The pull itself stiffens in autumn — winter is coming and the larder must be deep.
+            urgency = 1.0 + 0.25 * (SEASON_STOCK_MULT.get(ctx.get("season", "spring"), 1.0) - 1.0)
+            why = ("lay in food before winter" if ctx.get("season") == "autumn"
+                   else "lay in food against lean days")
+            out.append(("provision", None, (0.17 + 0.13 * want) * comfort * urgency, why))
 
     # Vocation — a settled soul plies its trade in the hours survival and projects leave free,
     # producing the surplus that division of labour runs on (a forager's full larder, a

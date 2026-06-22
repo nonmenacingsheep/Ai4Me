@@ -393,6 +393,23 @@ COOKED_SATIETY = 0.22
 RAW_HUNGER_RELIEF = 0.35           # raw flesh fills you too — but it's a gamble
 RAW_SATIETY = 0.12
 
+# ─── Food spoilage, seasonal stockpiling & larder allure (P5) ────────────────
+# Fresh food rots. Raw flesh turns in a day or two, cooked meals keep a while, gathered
+# produce lasts longer, and only PRESERVED food (dried/smoked/pemmican) truly lasts — so a
+# band that wants to outlast winter must dry its surplus at the hearth, not just pile up meat.
+# Shelf lives are in game-DAYS; an item absent from this map never spoils (the preserved goods).
+PERISHABLE = {"meat": 1.2, "fish": 1.0, "cooked_meat": 3.5, "cooked_fish": 3.0,
+              "food": 8.0, "berry": 2.5}
+# Stockpiling scales with the season: a band lays in heavily through AUTUMN against the lean
+# white months, eases off in spring's plenty. Multiplies the provisioning/larder targets.
+SEASON_STOCK_MULT = {"spring": 1.0, "summer": 1.15, "autumn": 2.1, "winter": 1.6}
+PRESERVE_AT = 4                    # raw meat/fish at/above this is dried at the hearth for the long haul
+# Allure: a fat larder of fresh food draws vermin. Stores above the threshold risk a raid that
+# eats a chunk — the cost of hoarding perishables, and a nudge toward preserving instead.
+PEST_STORE_THRESHOLD = 16          # stored food above this starts drawing pests
+PEST_RAID_CHANCE = 0.16            # base per-day chance once over the threshold (scales with excess)
+PEST_RAID_LOSS = 0.4               # fraction of the food store a raid carries off
+
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
 # map, each gated by the right tool (see crafting.RAW): fiber from grasses, clay
@@ -474,6 +491,8 @@ class World:
         self.seed = 0
         self.clock = 0.0                 # game-minutes since creation
         self._last_eco = 0.0             # game-minute of last ecology pass
+        self._last_spoil = 0.0           # game-minute of last food-spoilage pass (P5)
+        self._last_pest = 0.0            # game-minute of last larder-pest check (P5)
         self.weather = "clear"           # clear | cloudy | rain | storm | snow
         self.weather_intensity = 0.0     # 0..1
         self._weather_until = 0.0        # game-minute the current weather expires
@@ -569,7 +588,7 @@ class World:
         self._seed_initial_people(count=7, center=self._origin)
 
         self.clock = 8 * 60.0            # start at 08:00 on day 0
-        self._last_eco = self.clock
+        self._last_eco = self._last_spoil = self._last_pest = self.clock
         # Every chunk starts "freshly grown"; dormant ones fast-forward on revisit.
         self._chunk_eco = np.full((NCHUNK, NCHUNK), self.clock, np.float32)
         self.version += 1
@@ -1003,6 +1022,12 @@ class World:
         if self.clock - self._last_eco >= 60.0:                    # one game-hour elapsed
             self._tick_ecology_active()
             self._last_eco = self.clock
+        if self.clock - self._last_spoil >= 60.0:                  # spoil perishables hourly (P5)
+            self._tick_spoilage(min(1.0, (self.clock - self._last_spoil) / 1440.0))
+            self._last_spoil = self.clock
+        if self.clock - self._last_pest >= 1440.0:                 # vermin check once a game-day (P5)
+            self._tick_pests()
+            self._last_pest = self.clock
         self.version += 1
 
     # ── active region & dormancy (the key to a huge, smooth world) ───────────────
@@ -2283,12 +2308,13 @@ class World:
         voc = p.get("vocation", "forager")
         if voc == "forager":
             cap = PERSON["inv_cap"] + (6 if inv.get("forage_sack", 0) else 0)
+            meat_target = int(MEAT_STOCK * SEASON_STOCK_MULT.get(self.season(), 1.0))   # hunt harder pre-winter
             # Game first — a carcass is the richest haul. Then cast for fish if water's at hand.
-            if inv.get("meat", 0) < MEAT_STOCK:
+            if inv.get("meat", 0) < meat_target:
                 hunt = self._hunt(p)
                 if hunt:
                     return hunt
-            if inv.get("fish", 0) < MEAT_STOCK and (drinkable[ly, lx] or self._nearest_local(drinkable, lx, ly)):
+            if inv.get("fish", 0) < meat_target and (drinkable[ly, lx] or self._nearest_local(drinkable, lx, ly)):
                 fish = self._fish(p, drinkable, lx, ly)
                 if fish:
                     return fish
@@ -2649,15 +2675,67 @@ class World:
         return None
 
     def _cook_at_home(self, p):
-        """Tend the hearth fire: turn a measure of raw meat/fish into a safe, cooked meal. Runs
-        each rest-tick beside the home hearth, like boiling water (P1b)."""
+        """Tend the hearth fire: turn raw meat/fish into food. A big raw haul is DRIED into
+        preserved stores (dried_meat/dried_fish — they never spoil, the larder for winter); a
+        smaller catch is simply cooked for eating now. Runs each rest-tick beside the hearth."""
         inv = p["inv"]
-        for raw, done in (("meat", "cooked_meat"), ("fish", "cooked_fish")):
-            if inv.get(raw, 0) > 0:
-                inv[raw] -= 1
+        for raw, cooked, dried, cost in (("meat", "cooked_meat", "dried_meat", 2),
+                                         ("fish", "cooked_fish", "dried_fish", 2)):
+            n = inv.get(raw, 0)
+            if n >= max(PRESERVE_AT, cost):              # surplus — preserve it against the lean months
+                inv[raw] = n - cost
                 if inv[raw] <= 0:
                     inv.pop(raw, None)
-                inv[done] = inv.get(done, 0) + 1
+                inv[dried] = inv.get(dried, 0) + 1
+            elif n > 0:                                  # a little — cook a meal
+                inv[raw] = n - 1
+                if inv[raw] <= 0:
+                    inv.pop(raw, None)
+                inv[cooked] = inv.get(cooked, 0) + 1
+
+    def _tick_spoilage(self, dt_days):
+        """Fresh food rots over game-time (raw flesh fastest, then cooked, then produce); only
+        preserved stores keep. Decays each perishable stack — in the pack AND the home larder —
+        proportionally to elapsed time over its shelf life. Cheap: a few people × a few items."""
+        if dt_days <= 0:
+            return
+        for p in self.people:
+            for hold in (p.get("inv"), p.get("store")):
+                if not hold:
+                    continue
+                for item, shelf in PERISHABLE.items():
+                    n = hold.get(item, 0)
+                    if n <= 0:
+                        continue
+                    rate = dt_days / shelf
+                    lost = int(n * rate)
+                    if self.rng.random() < (n * rate - lost):
+                        lost += 1
+                    if lost > 0:
+                        hold[item] = n - lost
+                        if hold[item] <= 0:
+                            hold.pop(item, None)
+
+    def _tick_pests(self):
+        """A fat larder of fresh food draws vermin. Each game-day, a store past the threshold
+        risks a raid that carries off a chunk — the price of hoarding perishables in the open,
+        and a nudge toward DRYING the surplus (preserved goods don't tempt them)."""
+        for p in self.people:
+            store = p.get("store")
+            if not store:
+                continue
+            food = store.get("food", 0)
+            if food <= PEST_STORE_THRESHOLD:
+                continue
+            chance = min(0.85, PEST_RAID_CHANCE * (food / PEST_STORE_THRESHOLD))
+            if self.rng.random() < chance:
+                taken = max(1, int(food * PEST_RAID_LOSS))
+                store["food"] = food - taken
+                if store["food"] <= 0:
+                    store.pop("food", None)
+                self._note("pest", f"vermin raided {p['name']}'s stores, carrying off {taken} food.")
+                mind.remember(p, "vermin have been at my stores — I must dry and stow food better",
+                              0.6, "loss", self.clock)
 
     def _eat_cooked(self, p):
         """Eat a cooked meal from the pack — the most filling, and wholly safe."""
@@ -3389,6 +3467,7 @@ class World:
             self.seed = meta.get("seed", 0); self.clock = meta.get("clock", 0.0)
             self._origin = tuple(meta.get("origin", [W // 2, H // 2]))
             self._last_eco = meta.get("last_eco", self.clock)
+            self._last_spoil = self._last_pest = self.clock     # P5 timers — start fresh from the saved clock
             self.weather = meta.get("weather", "clear")
             self.weather_intensity = meta.get("weather_intensity", 0.0)
             self._weather_until = meta.get("weather_until", 0.0)
@@ -3508,6 +3587,11 @@ if __name__ == "__main__":
                   or "tainted_gut" in p.get("immune", {}))
     print(f"  hunt/fish: {hunts} kills logged; flesh now held (raw+cooked): {flesh}; "
           f"souls who weathered raw-flesh sickness: {tainted}")
+    pests = sum(1 for e in w.log if e["kind"] == "pest")
+    preserved = sum(p["inv"].get(k, 0) + p.get("store", {}).get(k, 0)
+                    for p in w.people for k in ("dried_meat", "dried_fish"))
+    print(f"  spoilage/seasons: season now {w.season()}; pest raids logged: {pests}; "
+          f"preserved (dried) stores held: {preserved}")
     if w.people:
         sample = w.people[0]
         print(f"  survivor sample — {sample['name']}: comfort[h/t/f] "
@@ -3740,6 +3824,28 @@ if __name__ == "__main__":
     hunt_ok = got_meat and cooked and cooked_safe and raw_sick
     print(f"  hunt/cook test: hunts={hunt_act == 'hunt'} got-meat={got_meat} cooks={cooked} "
           f"cooked-safe={cooked_safe} raw-can-sicken={raw_sick} -> {'OK' if hunt_ok else 'FAILED'}")
+
+    # Spoilage / preserving / seasonal / pests test (P5).
+    wp5 = World().generate(seed=5); wp5.people = []
+    pyy, pxx = np.argwhere((wp5.water == WATER_NONE) & (wp5.biome == B["grassland"]))[0]
+    wp5._add_person(int(pxx), int(pyy), name="Keeper")
+    kp = wp5.people[0]; kp["hearth"] = True
+    kp["inv"] = {"meat": 10}; wp5._tick_spoilage(2.0)            # raw flesh rots fast (shelf ~1.2d)
+    spoils = kp["inv"].get("meat", 0) < 10
+    kp["inv"] = {"meat": 6}; wp5._cook_at_home(kp)              # a big haul gets DRIED, not just cooked
+    preserves = kp["inv"].get("dried_meat", 0) >= 1
+    d0 = kp["inv"].get("dried_meat", 0); wp5._tick_spoilage(30.0)
+    dried_keeps = kp["inv"].get("dried_meat", 0) == d0          # preserved goods never spoil
+    seasonal = (mind.SEASON_STOCK_MULT["autumn"] > mind.SEASON_STOCK_MULT["spring"] * 1.5)
+    kp["store"] = {"food": 40}; raided = False                  # a fat larder draws vermin
+    for _ in range(40):
+        kp["store"]["food"] = 40
+        wp5._tick_pests()
+        if kp["store"].get("food", 40) < 40:
+            raided = True; break
+    p5_ok = spoils and preserves and dried_keeps and seasonal and raided
+    print(f"  spoilage/season test: spoils={spoils} preserves={preserves} dried-keeps={dried_keeps} "
+          f"seasonal-stockpile={seasonal} larder-raided={raided} -> {'OK' if p5_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")
