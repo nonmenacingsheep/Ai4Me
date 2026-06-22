@@ -344,6 +344,10 @@ DISEASE = {
     # thin by hunger/thirst can be tipped over — the cost of eating an unknown bush.
     "berry_sickness": dict(incub=0.25, dur=1.6, drain=1.5, hp=0.00004,
                            hint="my belly heaves and cramps — it was those berries"),
+    # P4 — parasites/spoilage from eating RAW meat or fish. The lesson the band learns is to
+    # COOK flesh over the hearth fire (cooked_meat/cooked_fish carry no such risk).
+    "tainted_gut": dict(incub=1.5, dur=5.0, drain=1.4, hp=0.00005,
+                        hint="a sickness churns in my gut — was the meat uncooked?"),
 }
 WATERBORNE = ("cholera", "dysentery", "typhoid_fever")   # only these come from raw water
 WATER_INFECT_CHANCE = 0.012        # chance a single raw drink from a natural source infects
@@ -369,6 +373,25 @@ BERRY_GOOD_BIAS = 3                # mild pull toward a known-good bush — enou
                                    # nearby, but a distinctly CLOSER unknown bush still gets tried (and
                                    # so the poison gamble, and the lesson, stays a live part of foraging)
 BERRY_BIOMES = {"grassland", "forest", "rainforest", "savanna", "swamp"}
+
+# ─── Hunting & fishing (P4) ──────────────────────────────────────────────────
+# A forager hunts game (rabbit/deer) and fishes the waters for MEAT/FISH — a far richer
+# yield than grazing, but raw flesh must be COOKED over the home hearth or it sickens the gut
+# (the same adapt-or-suffer arc as boiling water / learning poison bushes). A crude spear
+# makes the kill far surer and the carcass yield bigger; bare hands rarely bring game down.
+HUNT_VISION = 7                    # how far a hunter spots and pursues game
+HUNT_KILL_SPEAR = 0.34             # kill chance per adjacent strike with a spear
+HUNT_KILL_BARE = 0.12              # bare-handed per strike — poor per try, but a dogged pursuit of
+                                   # many strikes still brings small game down (a spear makes it sure)
+HUNT_MEAT_YIELD = {"rabbit": 2, "deer": 5}      # raw meat a carcass gives (a deer feeds the band)
+FISH_CATCH_ROD = 0.05              # per game-min at the water with a rod
+FISH_CATCH_BARE = 0.013           # tickling fish by hand — slow going
+MEAT_STOCK = 6                     # a forager lays in raw flesh up to this, then cooks/stockpiles
+RAW_FLESH_SICKEN = 0.16            # chance a raw meat/fish meal brings on tainted_gut
+COOKED_HUNGER_RELIEF = 0.55        # a cooked meal is the most filling thing there is
+COOKED_SATIETY = 0.22
+RAW_HUNGER_RELIEF = 0.35           # raw flesh fills you too — but it's a gamble
+RAW_SATIETY = 0.12
 
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
@@ -1363,15 +1386,21 @@ class World:
             p["action"] = action
             if action == "eat":
                 g = float(self.veg_growth[y, x])
-                if edible[ly, lx] and g > 0.12:                  # graze the tile
+                if self._eat_cooked(p):                          # a cooked meal is the finest fare — eat it first
+                    pass
+                elif edible[ly, lx] and g > 0.12:                # else graze the tile (free food underfoot)
                     bite = min(g, PERSON["eat_bite"] * dt_game_min)
                     self.veg_growth[y, x] = g - bite
                     p["hunger"] = max(0.0, p["hunger"] - bite * PERSON["food_value"])
                     self._refill(p, "satiety", bite * PERSON["food_value"] * 0.5)
-                elif p["inv"].get("food", 0) > 0:                # eat from the pack
+                elif p["inv"].get("food", 0) > 0:                # gathered/berried food from the pack
                     p["inv"]["food"] -= 1
+                    if p["inv"]["food"] <= 0:
+                        p["inv"].pop("food", None)
                     p["hunger"] = max(0.0, p["hunger"] - 0.35)
                     self._refill(p, "satiety", PERSON["feed_value"] * 4)
+                else:
+                    self._eat_raw(p)                             # last resort — raw flesh, with its gamble
             elif action == "drink":
                 p["thirst"] = max(0.0, p["thirst"] - PERSON["drink_rate"] * dt_game_min)
                 self._refill(p, "hydration", PERSON["hydrate_rate"] * dt_game_min)
@@ -1409,6 +1438,7 @@ class World:
                 if (x, y) == tuple(p["home"]):
                     if p.get("hearth"):
                         self._boil_at_home(p)            # tend the fire while resting: raw water → safe
+                        self._cook_at_home(p)            # …and cook raw meat/fish into safe, hearty meals
                     self._deposit_home(p)                # bank the day's surplus into the larder
             elif action == "forage_berry":
                 b = self._berry_index.get((x, y))
@@ -1421,6 +1451,24 @@ class World:
                     take = min(g - 0.2, 0.3)
                     self.veg_growth[y, x] = g - take
                     p["inv"]["food"] = p["inv"].get("food", 0) + 1
+            elif action == "hunt":
+                pid = p.pop("_prey", None)               # set by _hunt only on an adjacent strike
+                if pid:
+                    prey = next((a for a in self.animals if a["id"] == pid), None)
+                    if prey is not None and abs(prey["x"] - x) + abs(prey["y"] - y) <= 1:
+                        has_spear = p["inv"].get("crude_spear", 0) > 0
+                        if self.rng.random() < (HUNT_KILL_SPEAR if has_spear else HUNT_KILL_BARE):
+                            self.animals = [a for a in self.animals if a["id"] != pid]
+                            yld = HUNT_MEAT_YIELD.get(prey["sp"], 2) + (1 if has_spear else 0)
+                            p["inv"]["meat"] = p["inv"].get("meat", 0) + yld
+                            self._note("hunt", f"{p['name']} brought down a {prey['sp']}.")
+                            self.version += 1
+            elif action == "fish":
+                if drinkable[ly, lx]:
+                    rate = FISH_CATCH_ROD if p["inv"].get("fishing_rod", 0) else FISH_CATCH_BARE
+                    if self.rng.random() < rate * dt_game_min:
+                        p["inv"]["fish"] = p["inv"].get("fish", 0) + 1
+                        self.version += 1
             elif action == "chop":
                 if tree[ly, lx]:
                     self.veg_growth[y, x] = max(0.0, float(self.veg_growth[y, x]) - BUILD["chop_take"])
@@ -1455,7 +1503,8 @@ class World:
                 self._build_next_block(p)
             # Seeking and wandering move the body; acting-in-place does not.
             if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
-                          "seek_fiber", "seek_leaves", "seek_berry", "haul", "wander", "socialize"):
+                          "seek_fiber", "seek_leaves", "seek_berry", "hunt", "fish",
+                          "haul", "wander", "socialize"):
                 self._move_person(p, movedir)
 
             # Health couples to the physiological RESERVES (never to comfort). Any reserve in
@@ -1829,11 +1878,17 @@ class World:
             self._tinker(p, night)
             return "tinker", None
         if kind == "eat":
-            if p["inv"].get("food", 0) > 0 and p["hunger"] > 0.3:
-                return "eat", None
+            inv = p["inv"]
+            pack_food = (inv.get("food", 0) + inv.get("cooked_meat", 0) + inv.get("cooked_fish", 0)
+                         + inv.get("meat", 0) + inv.get("fish", 0))
+            if pack_food > 0 and p["hunger"] > 0.3:
+                return "eat", None                      # eat from the pack (handler picks the best meal)
             berry = self._berry_seek(p)                 # a ripe bush in local reach beats grazing thin tiles
             if berry:
                 return berry
+            hunt = self._hunt(p, max_d=5)               # easy game right nearby is a meal worth taking
+            if hunt:
+                return hunt
             here_food = bool(edible[ly, lx]) and self.veg_growth[y, x] > 0.12
             if not here_food and self._nearest_local(edible, lx, ly) is None and self._prefer_store(p, "food"):
                 f = self._fetch_from_store(p, "food")   # nothing growing in sight — fall back on the larder
@@ -1844,7 +1899,7 @@ class World:
             return "rest", None
         if kind == "ply":
             # Ply one's trade: produce the surplus that division of labour and barter run on.
-            return self._ply(p, edible, tree, fiber, leaf, lx, ly)
+            return self._ply(p, edible, drinkable, tree, fiber, leaf, lx, ly)
         if kind == "provision":
             # Lay in a food reserve: gather a pack-load, carry it home, bank it in the larder.
             return self._provision(p, edible, lx, ly)
@@ -2217,10 +2272,10 @@ class World:
         self._deposit_home(p)                                  # bank the surplus above the travel reserve
         return "tend", None
 
-    def _ply(self, p, edible, tree, fiber, leaf, lx, ly):
+    def _ply(self, p, edible, drinkable, tree, fiber, leaf, lx, ly):
         """A settled specialist plies its trade in idle hours, building the surplus division of
-        labour runs on: a FORAGER fills the larder, a BUILDER stocks timber, a TOOLMAKER crafts
-        spare gear to pass on. The differing surpluses are what barter and gifting then move."""
+        labour runs on: a FORAGER fills the larder (game, fish, berries, grass), a BUILDER stocks
+        timber, a TOOLMAKER crafts spare gear. The differing surpluses are what barter moves."""
         x, y = p["x"], p["y"]
         inv = p["inv"]
         if p.get("craft"):
@@ -2228,6 +2283,15 @@ class World:
         voc = p.get("vocation", "forager")
         if voc == "forager":
             cap = PERSON["inv_cap"] + (6 if inv.get("forage_sack", 0) else 0)
+            # Game first — a carcass is the richest haul. Then cast for fish if water's at hand.
+            if inv.get("meat", 0) < MEAT_STOCK:
+                hunt = self._hunt(p)
+                if hunt:
+                    return hunt
+            if inv.get("fish", 0) < MEAT_STOCK and (drinkable[ly, lx] or self._nearest_local(drinkable, lx, ly)):
+                fish = self._fish(p, drinkable, lx, ly)
+                if fish:
+                    return fish
             if inv.get("food", 0) < cap:
                 berry = self._berry_seek(p)             # a forager works the bushes too — richer pickings
                 if berry:
@@ -2534,6 +2598,95 @@ class World:
         else:
             self._learn_bush(p, b, bad=False)                  # safe — a bush worth returning to
         self.version += 1
+
+    # ── hunting, fishing & cooking (P4) ──────────────────────────────────────────
+    def _maybe_taint(self, p):
+        """A raw meat/fish meal may bring on tainted_gut (parasites/spoilage). No effect if
+        already ill or still immune. The lesson: cook flesh over the hearth."""
+        if p.get("illness") or self.rng.random() >= RAW_FLESH_SICKEN:
+            return False
+        if self.clock < p.get("immune", {}).get("tainted_gut", 0.0):
+            return False
+        spec = DISEASE["tainted_gut"]
+        p["illness"] = {"d": "tainted_gut", "infected_t": self.clock,
+                        "onset_t": self.clock + spec["incub"] * 1440.0,
+                        "end_t": self.clock + (spec["incub"] + spec["dur"]) * 1440.0,
+                        "known": False}
+        return True
+
+    def _nearest_prey(self, p, max_d=HUNT_VISION):
+        """The nearest huntable animal (rabbit/deer) within `max_d`, or None."""
+        x, y = p["x"], p["y"]
+        best = None; best_d = max_d + 1
+        for a in self.animals:
+            if a["sp"] not in ("rabbit", "deer"):
+                continue
+            d = abs(a["x"] - x) + abs(a["y"] - y)
+            if d < best_d:
+                best, best_d = a, d
+        return best
+
+    def _hunt(self, p, max_d=HUNT_VISION):
+        """Pursue the nearest game within `max_d`; a body action toward it, or a strike when
+        adjacent (the kill is resolved in the action handler). None when there's nothing to chase."""
+        prey = self._nearest_prey(p, max_d)
+        if prey is None:
+            return None
+        dx, dy = prey["x"] - p["x"], prey["y"] - p["y"]
+        if abs(dx) + abs(dy) <= 1:
+            p["_prey"] = prey["id"]                 # stash the quarry for the strike handler
+            return "hunt", None
+        return "hunt", (int(np.sign(dx)), int(np.sign(dy)))
+
+    def _fish(self, p, drinkable, lx, ly):
+        """Fish the water's edge: cast in place when beside water, else step toward the nearest
+        water in sight. Returns a body action, or None if no water is reachable in sight."""
+        if drinkable[ly, lx]:
+            return "fish", None
+        d = self._nearest_local(drinkable, lx, ly)
+        if d:
+            return "fish", d
+        return None
+
+    def _cook_at_home(self, p):
+        """Tend the hearth fire: turn a measure of raw meat/fish into a safe, cooked meal. Runs
+        each rest-tick beside the home hearth, like boiling water (P1b)."""
+        inv = p["inv"]
+        for raw, done in (("meat", "cooked_meat"), ("fish", "cooked_fish")):
+            if inv.get(raw, 0) > 0:
+                inv[raw] -= 1
+                if inv[raw] <= 0:
+                    inv.pop(raw, None)
+                inv[done] = inv.get(done, 0) + 1
+
+    def _eat_cooked(self, p):
+        """Eat a cooked meal from the pack — the most filling, and wholly safe."""
+        inv = p["inv"]
+        for k in ("cooked_meat", "cooked_fish"):
+            if inv.get(k, 0) > 0:
+                inv[k] -= 1
+                if inv[k] <= 0:
+                    inv.pop(k, None)
+                p["hunger"] = max(0.0, p["hunger"] - COOKED_HUNGER_RELIEF)
+                self._refill(p, "satiety", COOKED_SATIETY)
+                return True
+        return False
+
+    def _eat_raw(self, p):
+        """Eat raw meat/fish — filling, but it may bring on tainted_gut. A last resort."""
+        inv = p["inv"]
+        for k in ("meat", "fish"):
+            if inv.get(k, 0) > 0:
+                inv[k] -= 1
+                if inv[k] <= 0:
+                    inv.pop(k, None)
+                p["hunger"] = max(0.0, p["hunger"] - RAW_HUNGER_RELIEF)
+                self._refill(p, "satiety", RAW_SATIETY)
+                if self._maybe_taint(p):
+                    mind.remember(p, "the raw meat sat ill in me — I should cook it next time",
+                                  0.7, "illness", self.clock)
+                return True
+        return False
 
     def _nearest_bush(self, p):
         """The best ripe bush worth foraging within reach: nearest one this soul doesn't KNOW to
@@ -3349,6 +3502,12 @@ if __name__ == "__main__":
                     or "berry_sickness" in p.get("immune", {}))
     print(f"  berries: {len(w.berry_bushes)} bushes on the map; "
           f"band learned {lore} bush(es) ({bad_lore} poison); souls who weathered berry-sickness: {berry_ill}")
+    hunts = sum(1 for e in w.log if e["kind"] == "hunt")
+    flesh = sum(p["inv"].get(k, 0) for p in w.people for k in ("meat", "fish", "cooked_meat", "cooked_fish"))
+    tainted = sum(1 for p in w.people if (p.get("illness") or {}).get("d") == "tainted_gut"
+                  or "tainted_gut" in p.get("immune", {}))
+    print(f"  hunt/fish: {hunts} kills logged; flesh now held (raw+cooked): {flesh}; "
+          f"souls who weathered raw-flesh sickness: {tainted}")
     if w.people:
         sample = w.people[0]
         print(f"  survivor sample — {sample['name']}: comfort[h/t/f] "
@@ -3546,6 +3705,41 @@ if __name__ == "__main__":
     print(f"  berry test: forages={bact == 'forage_berry'} food+={berry_food} learns-good={learned_good} "
           f"re-ripens={not_ripe_now} poison-sickens={got_sick} shuns-known-bad={shuns} "
           f"-> {'OK' if berry_ok else 'FAILED'}")
+
+    # Hunt/fish/cook test (P4): spear a rabbit for meat, cook it at the hearth, and confirm raw
+    # flesh can sicken while a cooked meal can't.
+    whz = World().generate(seed=5); whz.people = []; whz.animals = []
+    hyy, hxx = np.argwhere((whz.water == WATER_NONE) & (whz.biome == B["grassland"]))[0]
+    whz._add_person(int(hxx), int(hyy), name="Hunter")
+    hz = whz.people[0]; hz["inv"] = {"crude_spear": 1}; whz.clock = 1000.0
+    whz._add_animal("rabbit", int(hxx) + 1, int(hyy))     # game one step away
+    hunt_act = None
+    for _ in range(200):                                  # pursue & strike until the kill lands
+        a = whz._hunt(hz)
+        if a is None:
+            break
+        hunt_act = a[0]
+        if a[1] is None:                                  # adjacent strike — resolve it
+            pid = hz.pop("_prey", None)
+            prey = next((an for an in whz.animals if an["id"] == pid), None)
+            if prey and whz.rng.random() < HUNT_KILL_SPEAR:
+                whz.animals = [an for an in whz.animals if an["id"] != pid]
+                hz["inv"]["meat"] = hz["inv"].get("meat", 0) + HUNT_MEAT_YIELD["rabbit"] + 1
+        if hz["inv"].get("meat", 0) > 0:
+            break
+    got_meat = hz["inv"].get("meat", 0) > 0
+    hz["hearth"] = True                                   # cook the catch at the hearth
+    raw_before = hz["inv"].get("meat", 0)
+    whz._cook_at_home(hz)
+    cooked = hz["inv"].get("cooked_meat", 0) >= 1 and hz["inv"].get("meat", 0) == raw_before - 1
+    # A cooked meal never sickens; force-test the raw gamble independently.
+    hz["illness"] = None; hz["immune"] = {}
+    before = whz._eat_cooked(hz); cooked_safe = before and hz.get("illness") is None
+    hz["inv"]["meat"] = 5; hz["illness"] = None; hz["immune"] = {}
+    raw_sick = any((hz.update({"illness": None}) or whz._maybe_taint(hz)) for _ in range(60))
+    hunt_ok = got_meat and cooked and cooked_safe and raw_sick
+    print(f"  hunt/cook test: hunts={hunt_act == 'hunt'} got-meat={got_meat} cooks={cooked} "
+          f"cooked-safe={cooked_safe} raw-can-sicken={raw_sick} -> {'OK' if hunt_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")
