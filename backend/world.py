@@ -315,6 +315,27 @@ POP_CAP = 36                       # ceiling on band size (performance + ecology
 TRAIT_MUTATION = 0.08              # how far a child's nature drifts from the parental mean
 RENOWN_LEGACY = 0.25               # share of a parent's standing that passes to each child
 
+# ─── Illness (survival realism: waterborne disease) ──────────────────────────
+# Raw water from a river or lake can carry sickness. A soul falls ill after an incubation,
+# then suffers — fluid loss accelerates the drain on their reserves and a fever erodes
+# health — and, if they pull through, recovers with a spell of immunity. They KNOW they are
+# sick and feel where it hurts, but get only a vague HINT at the cause. The cure for now is
+# not catching it (later: boiling water); a well-watered soul who keeps drinking can outlast
+# the milder strains, but cholera's dehydration can kill if water isn't close to hand.
+#   incub/dur in game-days; `drain` multiplies hydration/appetite loss while symptomatic;
+#   `hp` is health eroded per game-minute of symptoms.
+DISEASE = {
+    "cholera":       dict(incub=1.0, dur=4.0,  drain=1.8, hp=0.00006,
+                          hint="my guts run like a river — it was foul water, surely"),
+    "dysentery":     dict(incub=2.0, dur=6.0,  drain=1.35, hp=0.00005,
+                          hint="my belly gripes and bleeds — something I drank?"),
+    "typhoid_fever": dict(incub=6.0, dur=12.0, drain=1.15, hp=0.00007,
+                          hint="a slow fever burns in me — was it the water?"),
+}
+WATERBORNE = tuple(DISEASE)
+WATER_INFECT_CHANCE = 0.012        # chance a single raw drink from a natural source infects
+IMMUNITY_DAYS = 90.0               # how long recovery shields against that same disease
+
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
 # map, each gated by the right tool (see crafting.RAW): fiber from grasses, clay
@@ -1251,9 +1272,12 @@ class World:
             # Two layers move every tick: COMFORT (desire) rises on its short clock, the
             # physiological RESERVE drains on its long survival clock. The mind weighs comfort;
             # the body lives or dies by the reserve.
+            ill_drain = self._illness_factor(p)          # >1 while a sickness wracks the body
             for ck, rk, crate, drate in NEED_MODEL:
+                mult = ill_drain if rk in ("hydration", "satiety") else 1.0
                 p[ck] = min(1.0, p[ck] + PERSON[crate] * dt_game_min)
-                p[rk] = max(0.0, p[rk] - PERSON[drate] * dt_game_min)
+                p[rk] = max(0.0, p[rk] - PERSON[drate] * mult * dt_game_min)
+            self._tick_illness(p, dt_game_min)           # incubate, sicken, erode health, recover
             if p.get("renown", 0.0) > 0.0:                # standing fades slowly if not renewed
                 p["renown"] = max(0.0, p["renown"] * (1.0 - RENOWN_DECAY * dt_day))
 
@@ -1288,6 +1312,7 @@ class World:
                 p["thirst"] = max(0.0, p["thirst"] - PERSON["drink_rate"] * dt_game_min)
                 self._refill(p, "hydration", PERSON["hydrate_rate"] * dt_game_min)
                 self._fill_containers(p)                 # top up any flask while at the water
+                self._maybe_infect(p)                    # raw water from the source can carry sickness
             elif action == "drink_pack":
                 # Drink from a carried flask — the whole point of the water-bottle craft:
                 # one stored drink fully slakes a good measure of thirst, anywhere.
@@ -1297,6 +1322,7 @@ class World:
                         del p["inv"]["water"]
                     p["thirst"] = max(0.0, p["thirst"] - 0.45)
                     self._refill(p, "hydration", 0.3)
+                    self._maybe_infect(p)                # the flask holds raw water too — still a risk
             elif action == "rest":
                 # A sheltered person resting at home recovers faster — but only as well as
                 # their home insulates (a leaf lean-to barely helps; a timber hut is snug).
@@ -1377,6 +1403,8 @@ class World:
         for p in dead:
             if p["age"] > PERSON["max_age"]:
                 cause = "old age"
+            elif p.get("illness") and self.clock >= p["illness"]["onset_t"]:
+                cause = p["illness"]["d"].replace("_", " ")   # the sickness took them
             else:                                            # name the reserve that gave out first
                 cause = min((("thirst", p.get("hydration", 1.0)), ("hunger", p.get("satiety", 1.0)),
                              ("exhaustion", p.get("stamina", 1.0))), key=lambda kv: kv[1])[0]
@@ -2205,6 +2233,51 @@ class World:
         target = max(p.get(key, 0.0), cap)                   # don't pull a higher reserve down
         p[key] = min(p.get(key, 0.0) + amount, target)
 
+    # ── illness: waterborne disease (survival realism) ───────────────────────────
+    def _maybe_infect(self, p):
+        """A raw drink may carry sickness. No effect if already ill or still immune to every
+        strain. On infection the disease incubates silently before symptoms strike."""
+        if p.get("illness") or self.rng.random() >= WATER_INFECT_CHANCE:
+            return
+        imm = p.get("immune", {})
+        choices = [d for d in WATERBORNE if self.clock >= imm.get(d, 0.0)]
+        if not choices:
+            return
+        d = str(self.rng.choice(choices))
+        spec = DISEASE[d]
+        p["illness"] = {"d": d, "infected_t": self.clock,
+                        "onset_t": self.clock + spec["incub"] * 1440.0,
+                        "end_t": self.clock + (spec["incub"] + spec["dur"]) * 1440.0,
+                        "known": False}
+
+    def _illness_factor(self, p):
+        """How much a current sickness accelerates fluid/appetite loss (1.0 when healthy or
+        still incubating; >1 once symptoms set in)."""
+        ill = p.get("illness")
+        if ill and self.clock >= ill["onset_t"]:
+            return DISEASE[ill["d"]]["drain"]
+        return 1.0
+
+    def _tick_illness(self, p, dt_game_min):
+        """Advance any sickness: surface it to the soul at onset (they KNOW they're ill and get
+        a vague hint at the cause), erode health while symptomatic, and recover — with a spell
+        of immunity — once it has run its course."""
+        ill = p.get("illness")
+        if not ill:
+            return
+        now = self.clock
+        if now < ill["onset_t"]:
+            return                                           # still incubating, no symptoms yet
+        if not ill.get("known"):
+            ill["known"] = True
+            self._note("illness", f"{p['name']} has fallen ill.")
+            mind.remember(p, f"I've fallen ill — {DISEASE[ill['d']]['hint']}", 0.9, "illness", now)
+        p["hp"] = max(0.0, p["hp"] - DISEASE[ill["d"]]["hp"] * dt_game_min)
+        if now >= ill["end_t"]:                              # weathered it
+            p.setdefault("immune", {})[ill["d"]] = now + IMMUNITY_DAYS * 1440.0
+            p["illness"] = None
+            mind.remember(p, "the sickness has passed — I feel myself again", 0.7, "illness", now)
+
     # ── live-sim material sourcing (clay/sand/flint/ore beyond wood & fiber) ────
     def _fill_containers(self, p):
         """Top a person's carried water up to the capacity of the flasks/skins they hold."""
@@ -2724,7 +2797,8 @@ class World:
         if self.people:
             distress = [p["name"] for p in self.people                       # genuine danger = the body failing, not mere discomfort
                         if p.get("hydration", 1) < 0.35 or p.get("satiety", 1) < 0.35
-                        or p.get("stamina", 1) < 0.35 or p["hp"] < 0.6]
+                        or p.get("stamina", 1) < 0.35 or p["hp"] < 0.6
+                        or (p.get("illness") and p["illness"].get("known"))]
             roster = ", ".join(p["name"] for p in self.people[:8]) + ("…" if len(self.people) > 8 else "")
             built = c["buildings"]
             ppl = (f"People: {len(self.people)} alive ({roster})"

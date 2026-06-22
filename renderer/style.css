@@ -3143,6 +3143,8 @@ body.passthrough .pt-hint {
 .wp-standing b { color: #e9d9a8; text-transform: capitalize; }
 .wp-standing em { margin-left: auto; opacity: 0.6; font-style: normal; font-size: 10px; }
 .wp-kin { margin: 3px 0 2px; font-size: 11px; color: #c9b6d8; }
+.wp-ill { margin: 5px 0; padding: 4px 8px; border-radius: 7px; font-size: 12px;
+  background: rgba(200,90,90,0.16); border: 1px solid rgba(210,100,100,0.32); color: #e9b6b6; }
 .wp-intent { font-style: italic; opacity: 0.85; margin: 4px 0; }
 .wp-say { margin: 4px 0; }
 .wp-craft {
