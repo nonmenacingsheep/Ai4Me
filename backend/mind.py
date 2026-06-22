@@ -148,6 +148,7 @@ def ensure_mind(p: dict, rng=None) -> None:
         else:
             p["traits"] = {t: 0.5 for t in TRAITS}
     p.setdefault("values", {t: 0.0 for t in TRAITS})  # lived drift on traits (identity)
+    p.setdefault("renown", 0.0)         # social standing — earned by visible deeds, fades slowly
     p.setdefault("intention", None)     # {kind, target, u, why} — what they're set on now
     p.setdefault("goal", "tend")        # back-compat label for UI (kind, maybe :target)
     p.setdefault("intent", "")          # human phrasing of the current intention's "why"
@@ -724,6 +725,7 @@ def give(p: dict, other: dict, good: str, clock: float) -> str | None:
     other.setdefault("inv", {})[good] = other["inv"].get(good, 0) + 1
     ra, rb = _rel(p, other, clock), _rel(other, p, clock)
     _adjust(ra, 0.05, 0.18); _adjust(rb, 0.10, 0.25)        # the receiver warms most
+    p["renown"] = p.get("renown", 0.0) + 0.05               # generosity is seen — it builds standing
     remember(p, f"gave {good} to {other['name']}, freely", 0.6, "social", clock)
     remember(other, f"{p['name']} gave me {good} when I had none", 0.75, "social", clock)
     p["last_social_t"] = other["last_social_t"] = clock

@@ -4224,7 +4224,13 @@ function renderPersonPanel(p) {
   if (!body) return;
   const pct = (v) => Math.round((v || 0) * 100);
   const bar = (label, v, col) =>
-    `<div class="wp-bar"><span>${label}</span><div class="wp-track"><i style="width:${pct(v)}%;background:${col}"></i></div><b>${pct(v)}%</b></div>`;
+    `<div class="wp-bar"><span>${label}</span><div class="wp-track"><i style="width:${Math.min(100, pct(v))}%;background:${col}"></i></div><b>${pct(v)}%</b></div>`;
+  const standingLine = (r) => {
+    r = r || 0;
+    const tier = r < 0.05 ? 'unknown' : r < 0.2 ? 'known' : r < 0.5 ? 'respected'
+               : r < 1.0 ? 'esteemed' : 'renowned';
+    return `<div class="wp-standing">Standing <b>${tier}</b><em>renown ${r.toFixed(2)}</em></div>`;
+  };
   const traits = p.traits || {}, values = p.values || {};
   const trait = (k) => {
     const base = traits[k] || 0, drift = values[k] || 0;
@@ -4266,6 +4272,7 @@ function renderPersonPanel(p) {
     bar('nourishment', p.satiety, '#caa15a') +
     bar('hydration', p.hydration, '#4a90a4') +
     bar('vigour', p.stamina, '#8c6abf') +
+    standingLine(p.renown) +
     `<div class="wp-sec">Temperament <em>(born · lived drift)</em></div>` +
     `<div class="wp-traits">${['sociability', 'ambition', 'curiosity', 'caution'].map(trait).join('')}</div>` +
     `<div class="wp-sec">Carrying</div><div class="wp-inv">${escapeHtml(inv)}</div>` +

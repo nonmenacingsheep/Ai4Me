@@ -3139,6 +3139,9 @@ body.passthrough .pt-hint {
 .wp-sub { color: #9fd9bd; font-size: 11px; text-transform: capitalize; margin-bottom: 4px; }
 .wp-sub2 { color: #84b89f; font-size: 10px; margin: 8px 0 3px; }
 .wp-sub2 em { opacity: 0.6; font-style: normal; }
+.wp-standing { display: flex; align-items: center; gap: 7px; margin: 8px 0 2px; font-size: 11px; color: #d9c9a0; }
+.wp-standing b { color: #e9d9a8; text-transform: capitalize; }
+.wp-standing em { margin-left: auto; opacity: 0.6; font-style: normal; font-size: 10px; }
 .wp-intent { font-style: italic; opacity: 0.85; margin: 4px 0; }
 .wp-say { margin: 4px 0; }
 .wp-craft {

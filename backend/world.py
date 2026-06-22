@@ -269,6 +269,16 @@ BLUEPRINTS = {
         "WFFFW",
         "WWWWW",
     ]),
+    # A communal Gathering Hall — not a home but a MONUMENT the band shares: a big, costly,
+    # prestigious build an ambitious soul raises for everyone once their own roof is fine. It
+    # is the first "status project" (Phase 2), and finishing it earns its builder lasting renown.
+    "gathering": dict(name="Gathering Hall", roof=True, insulation=1.0, communal=True, layout=[
+        "WWDWW",
+        "WFFFW",
+        "WFFFW",
+        "WFFFW",
+        "WWWWW",
+    ]),
 }
 
 # The dwelling ladder — ascending comfort. Once a soul has any roof and is kitted out,
@@ -278,6 +288,16 @@ BLUEPRINTS = {
 # works. (The deeper crafting tree — stations, metal, furniture — is a later rung that
 # needs station-proximity; this is the foundation those layers build on.)
 DWELLING_LADDER = ["leaf_shelter", "hut", "cabin"]
+MONUMENT_BP = "gathering"          # the communal status build raised once a soul tops the ladder
+
+# ─── Renown — social standing (Phase 2) ──────────────────────────────────────
+# A soul's STANDING in the band: it grows from socially-visible achievements (raising a fine
+# home, a communal monument, teaching a craft, giving freely) and fades slowly if not renewed,
+# so status must be earned and maintained. Ambition turns standing into a pursued goal — the
+# monument project — so settled, driven souls compete to leave a mark, not just nest.
+RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05)
+RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
+AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
@@ -1205,6 +1225,8 @@ class World:
             for ck, rk, crate, drate in NEED_MODEL:
                 p[ck] = min(1.0, p[ck] + PERSON[crate] * dt_game_min)
                 p[rk] = max(0.0, p[rk] - PERSON[drate] * dt_game_min)
+            if p.get("renown", 0.0) > 0.0:                # standing fades slowly if not renewed
+                p["renown"] = max(0.0, p["renown"] * (1.0 - RENOWN_DECAY * dt_day))
 
             x, y = p["x"], p["y"]
             # Perception is a SMALL window around this person (vision-sized), so people
@@ -1293,7 +1315,7 @@ class World:
                     self._begin_craft(p, "crude_axe")
                 self._advance_craft(p, dt_game_min)
             elif action == "found_site":
-                self._found_site(p, p.pop("next_bp", "leaf_shelter"))
+                self._found_site(p, p.pop("next_bp", "leaf_shelter"), communal=p.pop("next_communal", False))
             elif action == "build_block":
                 self._build_next_block(p)
             # Seeking and wandering move the body; acting-in-place does not.
@@ -1645,6 +1667,17 @@ class World:
             act = self._pursue_building(p, proj["bp"], getters)
             if act:
                 return act
+        # The status project: an ambitious soul whose own home is fine raises a communal
+        # monument for the band — a visible bid for lasting standing (Phase 2). If a half-built
+        # hall was orphaned by its raiser's death, adopt and finish it rather than starting anew.
+        if proj and proj.get("kind") == "monument":
+            if self._person_site(p) is None:
+                orphan = self._orphaned_monument()
+                if orphan is not None:
+                    p["site"] = orphan["id"]
+            act = self._pursue_building(p, proj["bp"], getters, communal=True)
+            if act:
+                return act
 
         # Otherwise lay in stone for the next slice (stone houses, workshops).
         if inv.get("stone", 0) < BUILD["stone_stock"]:
@@ -1652,11 +1685,11 @@ class World:
                               "stone", "mine", "seek_stone")
         return None
 
-    def _pursue_building(self, p, bp_name, getters):
+    def _pursue_building(self, p, bp_name, getters, communal: bool = False):
         """Raise a building from a blueprint tile by tile: found the footprint at home, then
         forage each tile's material and lay it. Returns a body action, or None when there's
         nothing to do this beat (between steps, or just finished). Shared by the first
-        lean-to and every dwelling-ladder upgrade, so the climb reuses proven machinery."""
+        lean-to, every dwelling-ladder upgrade, and the communal monument."""
         x, y = p["x"], p["y"]
         inv = p["inv"]
         hx, hy = p["home"]
@@ -1666,6 +1699,7 @@ class World:
                 return None
             if abs(hx - x) + abs(hy - y) <= 1:
                 p["next_bp"] = bp_name                          # the handler founds this blueprint
+                p["next_communal"] = communal
                 return "found_site", None
             return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         task = self._site_next_task(site)
@@ -1690,6 +1724,15 @@ class World:
                 return s.get("bp")
         return None
 
+    def _orphaned_monument(self):
+        """An in-progress communal monument no living soul is still raising (its builder died),
+        free for another to adopt and finish — so a half-built hall is never abandoned forever."""
+        live_sites = {q.get("site") for q in self.people}
+        for s in self.sites:
+            if s["bp"] == MONUMENT_BP and not s["done"] and s["id"] not in live_sites:
+                return s
+        return None
+
     def _project_for(self, p):
         """The soul's standing life-project once survival & first shelter are met: climb the
         dwelling ladder to a snugger home. Returns a project dict {kind, bp, why} or None
@@ -1702,6 +1745,27 @@ class World:
             i = DWELLING_LADDER.index(cur)
         except ValueError:
             i = len(DWELLING_LADDER) - 1                       # unknown/custom home — treat as topped out
+        # The status project: once a soul has a real home (a hut or better), an AMBITIOUS one
+        # may turn to raising the band's communal monument — choosing lasting standing over a
+        # finer house of their own. It takes precedence over further nesting; less driven souls
+        # keep climbing the dwelling ladder instead.
+        mon = {"kind": "monument", "bp": MONUMENT_BP,
+               "why": "raise a gathering hall — a place for us all, and a name that lasts"}
+        has_real_home = i >= DWELLING_LADDER.index("hut")
+        mine_inprog = any(s["id"] == p.get("site") and s["bp"] == MONUMENT_BP and not s["done"]
+                          for s in self.sites)
+        if mine_inprog:
+            return mon                                         # I'm the one building it — keep at it
+        band_has_hall = any(s["bp"] == MONUMENT_BP and s["done"] for s in self.sites)
+        # Only a hall someone LIVING is still raising counts as taken; one whose builder died is
+        # orphaned and may be adopted (handled in the executor), so it never blocks the band.
+        live_sites = {q.get("site") for q in self.people}
+        someone_building = any(s["bp"] == MONUMENT_BP and not s["done"] and s["id"] in live_sites
+                               for s in self.sites)
+        if (has_real_home and not band_has_hall and not someone_building
+                and mind._trait(p, "ambition") >= AMBITION_MONUMENT):
+            return mon                                         # an ambitious soul undertakes (or adopts) it
+        # Otherwise keep climbing the dwelling ladder to a snugger home.
         if i + 1 < len(DWELLING_LADDER):
             nxt = DWELLING_LADDER[i + 1]
             return {"kind": "dwelling", "bp": nxt,
@@ -1820,10 +1884,11 @@ class World:
                         offs.append((dx, dy))
         return offs
 
-    def _found_site(self, p, name: str = "leaf_shelter"):
+    def _found_site(self, p, name: str = "leaf_shelter", communal: bool = False):
         """Reserve a building footprint near the person's home. Tries the chosen blueprint
         (falling back to the always-cheap leaf shelter) over a few offsets so a tree/edge
-        doesn't block it forever; on failure sets a cooldown before retrying."""
+        doesn't block it forever; on failure sets a cooldown before retrying. A `communal`
+        site (a monument) is NOT the builder's home, so it doesn't move their home anchor."""
         bx, by = p["home"]
         occupied = self._occupied_tiles()
         cands = [name] + (["leaf_shelter"] if name != "leaf_shelter" else [])
@@ -1844,12 +1909,15 @@ class World:
                         "ox": int(ox), "oy": int(oy), "by": p["name"],
                         "insul": float(bp.get("insulation", 1.0)),
                         "tasks": tasks, "done": False, "t": round(self.clock, 1)}
+                site["communal"] = bool(communal)
                 self.sites.append(site)
                 p["site"] = site["id"]
-                home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
-                p["home"] = (int(home[0]), int(home[1]))
+                if not communal:                         # a home moves the builder's anchor; a monument doesn't
+                    home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
+                    p["home"] = (int(home[0]), int(home[1]))
                 self.version += 1
-                self._note("build", f"{p['name']} marked out a {bp['name'].lower()}.")
+                verb = "began a" if communal else "marked out a"
+                self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
                 return
         p["build_cd"] = self.clock + 720.0      # nowhere to build here — try again later
 
@@ -1879,14 +1947,27 @@ class World:
         if self._site_next_task(site) is None:
             self._finish_site(p, site)
 
+    def _earn_renown(self, p, amount: float, why: str) -> None:
+        """Raise a soul's social standing for a visible deed, and lodge it as a proud memory."""
+        p["renown"] = p.get("renown", 0.0) + amount
+        mind.remember(p, why, min(0.95, 0.5 + amount), "renown", self.clock)
+
     def _finish_site(self, p, site):
         site["done"] = True
+        self.version += 1
+        if BLUEPRINTS.get(site["bp"], {}).get("communal"):
+            # A monument, not a home: it doesn't house the builder, but it crowns them — the
+            # band now has a shared landmark and its raiser wins lasting renown.
+            self._note("build", f"{p['name']} finished a {site['name'].lower()} for the band.")
+            self._earn_renown(p, RENOWN_GAIN["monument"],
+                              f"raised a {site['name'].lower()} for us all — a name that will last")
+            return
         p["home_struct"] = site["id"]
         p["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
-        self.version += 1
         self._note("build", f"{p['name']} finished building a {site['name'].lower()}.")
         mind.remember(p, f"raised my own {site['name'].lower()} — a home at last", 0.85,
                       "build", self.clock)
+        self._earn_renown(p, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
 
     def _move_person(self, p, direction):
         """One step (people can't walk onto water or through a solid wall). None → amble."""
@@ -2141,6 +2222,8 @@ class World:
                 learner["learn_cd"] = self.clock + TEACH_BEAT * (0.7 + 0.6 * self.rng.random())
                 self._note("discovery",
                            f"{teacher['name']} taught {learner['name']} to make a {rid.replace('_', ' ')}.")
+                self._earn_renown(teacher, RENOWN_GAIN["teach"],
+                                  f"taught {learner['name']} to make a {rid.replace('_', ' ')}")
                 return
 
     def _adjacent_water(self, x, y) -> bool:
@@ -2440,6 +2523,12 @@ class World:
                    + (f"; struggling: {', '.join(distress[:6])}" if distress else "; all faring well")
                    + (f". They have raised {built} building{'s' if built != 1 else ''}"
                       f" ({len(self.blocks)} tiles laid). " if built or self.blocks else ". "))
+            famous = max(self.people, key=lambda q: q.get("renown", 0.0), default=None)
+            if famous and famous.get("renown", 0.0) > 0.15:
+                halls = sum(1 for s in self.sites if s.get("communal") and s["done"])
+                ppl += (f"Most esteemed among them is {famous['name']} (renown "
+                        f"{famous['renown']:.2f}). " + (f"The band has raised {halls} gathering "
+                        f"hall{'s' if halls != 1 else ''}. " if halls else ""))
             inner = mind.digest(self.people, self.clock)
             if inner:
                 ppl += "Their minds: " + inner + " "
