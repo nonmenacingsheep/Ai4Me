@@ -4258,7 +4258,7 @@ function renderPersonPanel(p) {
   if (title) title.textContent = p.name || 'Soul';
   const age = p.age != null ? `${p.age.toFixed(1)} days` : '—';
   body.innerHTML =
-    `<div class="wp-sub">${escapeHtml(p.action || 'idle')} · age ${age}</div>` +
+    `<div class="wp-sub">${escapeHtml(p.action || 'idle')} · age ${age}${p.vocation ? ' · ' + escapeHtml(p.vocation) : ''}</div>` +
     craftLine +
     (p.intent ? `<div class="wp-intent">“${escapeHtml(p.intent)}”</div>` : '') +
     (p.say ? `<div class="wp-say">💬 ${escapeHtml(p.say)}</div>` : '') +

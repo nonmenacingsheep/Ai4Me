@@ -62,7 +62,24 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "socialize",
-                "befriend", "explore", "avoid", "tend", "tinker")
+                "befriend", "explore", "avoid", "tend", "tinker", "ply")
+
+# Vocations — a soul's calling, emerging from temperament (division of labour). A driven soul
+# becomes the band's BUILDER, a restless curious one its TOOLMAKER, and the steady rest its
+# FORAGERS. Each plies a different trade in idle hours, producing a different surplus — which
+# is what gives the barter economy something to move and gifting something to share.
+VOCATIONS = ("forager", "builder", "toolmaker")
+
+
+def vocation(p: dict) -> str:
+    """The soul's calling, read from its (lived-bent) temperament. Ambition builds, curiosity
+    makes; everyone else forages — the steady backbone that keeps the band fed."""
+    amb, cur = _trait(p, "ambition"), _trait(p, "curiosity")
+    if amb >= 0.55 and amb >= cur:
+        return "builder"
+    if cur >= 0.55 and cur > amb:
+        return "toolmaker"
+    return "forager"
 
 # The vocabulary a tinkering mind brainstorms from when guessing how to make a make-shift
 # craft (raws it can gather plus rope, which every band knows). Offline discovery is honest
@@ -419,6 +436,20 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     foe_id, foe_name, foe_mag = ctx.get("foe_id"), ctx.get("foe_name"), ctx.get("foe_mag", 0.0)
     if foe_id and foe_mag > 0.3:
         out.append(("avoid", foe_id, cau * foe_mag, f"I'll keep clear of {foe_name}"))
+
+    # Vocation — a settled soul plies its trade in the hours survival and projects leave free,
+    # producing the surplus that division of labour runs on (a forager's full larder, a
+    # woodcutter's wood pile, a toolmaker's spare gear). Comfort-gated like any project, and
+    # pitched to fill genuine idle time — it yields to company, building and every real need.
+    voc = ctx.get("vocation")
+    if voc and p.get("home_struct") is not None and not night:
+        comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+        ply_u = {"forager": 0.20 + 0.10 * (1.0 - amb),
+                 "builder": 0.15 + 0.13 * amb,
+                 "toolmaker": 0.15 + 0.16 * cur}.get(voc, 0.18) * comfort
+        why = {"forager": "lay in food while I can", "builder": "stock good timber",
+               "toolmaker": "make spare gear for us all"}.get(voc, "ply my trade")
+        out.append(("ply", None, ply_u, why))
 
     # A low baseline of just tending one's own patch, so an idle mind has somewhere to rest.
     out.append(("tend", None, 0.07, "tend to my own"))

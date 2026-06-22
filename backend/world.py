@@ -298,6 +298,7 @@ MONUMENT_BP = "gathering"          # the communal status build raised once a sou
 RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05)
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
+PLY_WOOD_STOCK = 14                # a woodcutter plying their trade stocks timber up to this
 
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
@@ -1384,6 +1385,15 @@ class World:
                             ev = mind.give(giver, taker, "food", self.clock)
                             if ev:
                                 self._note("social", ev)
+                        # A toolmaker (or anyone) beside a band-mate who lacks a piece of gear
+                        # they carry a SPARE of hands it over — how crafted goods spread when
+                        # they aren't barter goods. This is the toolmaker's social role.
+                        for gid, _h, _r in self._GEAR:
+                            if giver.get("inv", {}).get(gid, 0) >= 2 and taker.get("inv", {}).get(gid, 0) == 0:
+                                ev = mind.give(giver, taker, gid, self.clock)
+                                if ev:
+                                    self._note("social", ev)
+                                break
 
     def _perceive(self, x, y):
         """Build this person's small perception windows (edible/drinkable/tree/stone)
@@ -1498,9 +1508,12 @@ class World:
         needs_gear = any(p.get("inv", {}).get(r, 0) < 1 for r in gear)
         proj = self._project_for(p)          # the soul's standing life-project (climb the dwelling ladder)
         p["project"] = proj                  # stash so the body can pursue it (the mind only weighs it)
+        voc = mind.vocation(p)               # the soul's calling (division of labour)
+        p["vocation"] = voc
         return {
             "needs_gear": needs_gear,
             "project": proj,
+            "vocation": voc,
             "clock": self.clock, "night": night, "season": self.season(),
             "weather": self.weather, "time_str": f"{int(self.time_of_day()):02d}:00",
             "others_exist": len(self.people) > 1,
@@ -1572,6 +1585,9 @@ class World:
                               edible, lx, ly, "food", "eat", "seek_food")
         if kind == "rest":
             return "rest", None
+        if kind == "ply":
+            # Ply one's trade: produce the surplus that division of labour and barter run on.
+            return self._ply(p, edible, tree, fiber, leaf, lx, ly)
         if kind in ("build", "provide"):
             # Both lean on the build/forage machinery; provide also gathers a food surplus
             # to give away (the gift itself happens on contact in the social pass).
@@ -1796,6 +1812,62 @@ class World:
             if "rope" in need and inv.get("rope", 0) < need["rope"]:
                 if inv.get("fiber", 0) >= 3:
                     self._begin_craft(p, "rope")               # spin fiber into rope (also takes time)
+                    return "craft", None
+                return getters["fiber"]()
+            for mat in ("leaves", "fiber"):
+                if need.get(mat, 0) > 0 and mat in getters:
+                    return getters[mat]()
+            break
+        return None
+
+    def _ply(self, p, edible, tree, fiber, leaf, lx, ly):
+        """A settled specialist plies its trade in idle hours, building the surplus division of
+        labour runs on: a FORAGER fills the larder, a BUILDER stocks timber, a TOOLMAKER crafts
+        spare gear to pass on. The differing surpluses are what barter and gifting then move."""
+        x, y = p["x"], p["y"]
+        inv = p["inv"]
+        if p.get("craft"):
+            return "craft", None
+        voc = p.get("vocation", "forager")
+        if voc == "forager":
+            cap = PERSON["inv_cap"] + (6 if inv.get("forage_sack", 0) else 0)
+            if inv.get("food", 0) < cap:
+                here = bool(edible[ly, lx]) and self.veg_growth[y, x] > PERSON["gather_min"]
+                return self._seek(p, x, y, here, edible, lx, ly, "food", "gather", "seek_food")
+            return self._idle(p)
+        if voc == "builder":
+            if inv.get("wood", 0) < PLY_WOOD_STOCK:
+                return self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly, "wood", "chop", "seek_wood")
+            return self._idle(p)
+        if voc == "toolmaker":
+            getters = {
+                "fiber":  lambda: self._seek(p, x, y, bool(fiber[ly, lx]), fiber, lx, ly,
+                                             "fiber", "gather_fiber", "seek_fiber"),
+                "leaves": lambda: self._seek(p, x, y, bool(leaf[ly, lx]), leaf, lx, ly,
+                                             "leaves", "gather_leaves", "seek_leaves"),
+            }
+            act = self._toolmaker_ply(p, getters)
+            if act:
+                return act
+        return self._idle(p)
+
+    def _toolmaker_ply(self, p, getters):
+        """Make a SPARE of each gear the band has worked out (one to keep, one to pass on), the
+        toolmaker's contribution: when met, a spare flows to a band-mate who has none (social
+        pass). Returns a body action or None when fully stocked."""
+        inv = p["inv"]
+        for rid, _have, _raw in self._GEAR:
+            if not self._person_knows(p, rid):
+                continue
+            if inv.get(rid, 0) >= 2:                           # one to use, one spare to give
+                continue
+            if crafting.can_craft(inv, rid, stations=(), tools=None):
+                self._begin_craft(p, rid)
+                return "craft", None
+            need = crafting.missing(inv, rid)
+            if "rope" in need and inv.get("rope", 0) < need["rope"]:
+                if inv.get("fiber", 0) >= 3:
+                    self._begin_craft(p, "rope")
                     return "craft", None
                 return getters["fiber"]()
             for mat in ("leaves", "fiber"):
@@ -2523,6 +2595,13 @@ class World:
                    + (f"; struggling: {', '.join(distress[:6])}" if distress else "; all faring well")
                    + (f". They have raised {built} building{'s' if built != 1 else ''}"
                       f" ({len(self.blocks)} tiles laid). " if built or self.blocks else ". "))
+            vocs = {}
+            for q in self.people:
+                if q.get("home_struct") and q.get("vocation"):
+                    vocs[q["vocation"]] = vocs.get(q["vocation"], 0) + 1
+            if sum(vocs.values()) >= 3:
+                ppl += ("Their trades: "
+                        + ", ".join(f"{n} {v}{'s' if n != 1 else ''}" for v, n in sorted(vocs.items())) + ". ")
             famous = max(self.people, key=lambda q: q.get("renown", 0.0), default=None)
             if famous and famous.get("renown", 0.0) > 0.15:
                 halls = sum(1 for s in self.sites if s.get("communal") and s["done"])
