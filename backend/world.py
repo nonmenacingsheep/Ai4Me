@@ -191,6 +191,14 @@ NEED_MODEL = (
     ("hunger",  "satiety",   "hunger_rate",  "satiety_drain"),
     ("fatigue", "stamina",   "fatigue_rate", "stamina_drain"),
 )
+# The home larder (P2 storage). A settled soul banks the surplus it carries above a travel
+# reserve, then draws on that store when caught hungry/thirsty away from food with nothing in
+# sight — turning a good forage into a buffer against a lean stretch. Kept ABOVE the barter
+# surplus so banking never starves the gift/trade economy of spare food.
+STORE_KEEP = {"food": 5, "safe_water": 3}   # carry up to this; bank only the excess (raw water stays on-person to boil)
+PROVISION_LOAD = 4          # gather this much above the travel reserve before hauling it home to bank
+PROVISION_LEASH = 12        # stockpiling stays near home — never range far from water to lay in food
+
 EDIBLE_PLANTS = {"grass", "oak", "reeds", "palm", "shrub"}   # plants people can forage
 EDIBLE_IDS = [sp for sp, info in PLANTS.items() if info["name"] in EDIBLE_PLANTS]
 NAMES_M = ("Aren", "Bram", "Cael", "Doran", "Eli", "Finn", "Garreth", "Holt",
@@ -1180,6 +1188,8 @@ class World:
             "stamina": float(self.rng.random() * 0.15 + 0.85),
             "hp": 1.0,
             "inv": {},                                   # carried goods, e.g. {"food":3,"wood":2,"axe":1}
+            "store": {},                                 # the larder at home: surplus food/water kept for later
+            "store_access": {},                          # ids granted to draw from this store (→ household/lending)
             "home": (int(x), int(y)),                    # anchor: idle wandering drifts back here
             "home_struct": None,                         # id of their shelter once built
             "known": {},                                 # remembered resource spots {water/food/wood: [x,y]}
@@ -1343,8 +1353,10 @@ class World:
                     mult = 1.0 + (BUILD["rest_sheltered_mult"] - 1.0) * 0.5
                 p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
                 self._refill(p, "stamina", PERSON["restore_rate"] * mult * dt_game_min)
-                if p.get("hearth") and (x, y) == tuple(p["home"]):
-                    self._boil_at_home(p)                # tend the fire while resting: raw water → safe
+                if (x, y) == tuple(p["home"]):
+                    if p.get("hearth"):
+                        self._boil_at_home(p)            # tend the fire while resting: raw water → safe
+                    self._deposit_home(p)                # bank the day's surplus into the larder
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
                 food_cap = PERSON["inv_cap"] + (6 if p["inv"].get("forage_sack", 0) else 0)
@@ -1554,6 +1566,9 @@ class World:
             heir = next((q for q in self.people if q["id"] == dead["partner"]), None)
         if heir is not None and heir.get("home_struct") != home:
             heir["home_struct"], heir["home"], heir["insul"] = home, dead["home"], dead.get("insul", 1.0)
+            hstore = heir.setdefault("store", {})        # the larder passes with the roof
+            for k, v in dead.get("store", {}).items():
+                hstore[k] = hstore.get(k, 0) + v
             self._note("birth", f"{heir['name']} inherited {dead['name']}'s home.")
             mind.remember(heir, f"I inherited {dead['name']}'s home", 0.8, "build", self.clock)
 
@@ -1746,6 +1761,10 @@ class World:
                 return "drink", None
             if p["inv"].get("water", 0) > 0:        # carried RAW water (a flask) — drink anywhere
                 return "drink_pack", None
+            if self._nearest_local(drinkable, lx, ly) is None and self._prefer_store(p, "water"):
+                f = self._fetch_from_store(p, "water")   # no water in sight or nearer spring — try the larder
+                if f:
+                    return f
             return self._seek(p, x, y, False, drinkable, lx, ly, "water", "drink", "seek_water")
         if kind == "tinker":
             # Sit and puzzle out a make-shift craft — slow, gated, motivated by a felt
@@ -1755,13 +1774,20 @@ class World:
         if kind == "eat":
             if p["inv"].get("food", 0) > 0 and p["hunger"] > 0.3:
                 return "eat", None
-            return self._seek(p, x, y, bool(edible[ly, lx]) and self.veg_growth[y, x] > 0.12,
-                              edible, lx, ly, "food", "eat", "seek_food")
+            here_food = bool(edible[ly, lx]) and self.veg_growth[y, x] > 0.12
+            if not here_food and self._nearest_local(edible, lx, ly) is None and self._prefer_store(p, "food"):
+                f = self._fetch_from_store(p, "food")   # nothing growing in sight — fall back on the larder
+                if f:
+                    return f
+            return self._seek(p, x, y, here_food, edible, lx, ly, "food", "eat", "seek_food")
         if kind == "rest":
             return "rest", None
         if kind == "ply":
             # Ply one's trade: produce the surplus that division of labour and barter run on.
             return self._ply(p, edible, tree, fiber, leaf, lx, ly)
+        if kind == "provision":
+            # Lay in a food reserve: gather a pack-load, carry it home, bank it in the larder.
+            return self._provision(p, edible, lx, ly)
         if kind in ("build", "provide"):
             # Both lean on the build/forage machinery; provide also gathers a food surplus
             # to give away (the gift itself happens on contact in the social pass).
@@ -1917,6 +1943,77 @@ class World:
             inv.pop("water", None)
         inv["safe_water"] = inv.get("safe_water", 0) + 1
 
+    # ── the home larder (P2 storage + fetch) ───────────────────────────────────
+    def _can_access_store(self, fetcher, owner) -> bool:
+        """Whether `fetcher` may draw from `owner`'s home store. For now a soul owns its own
+        larder outright; the grant map (`store_access`, keyed by id) is the seam the coming
+        household-sharing and temporary-lending phases hang on — a partner or a soul handed a
+        standing errand will read as accessible here without the call-sites changing."""
+        if fetcher is owner or fetcher["id"] == owner["id"]:
+            return True
+        grant = owner.get("store_access", {}).get(fetcher["id"])
+        if grant is None:
+            return False
+        return grant in (True, "always") or (isinstance(grant, (int, float)) and self.clock < grant)
+
+    def _deposit_home(self, p):
+        """Resting at home, a soul banks the surplus food/water it is carrying above its travel
+        reserve into the larder — so a good forage outlives the day. Only survival consumables
+        are stored (building stock and gear stay on-person where the build logic expects them)."""
+        inv, store = p["inv"], p.setdefault("store", {})
+        for key, keep in STORE_KEEP.items():
+            spare = inv.get(key, 0) - keep
+            if spare > 0:
+                store[key] = store.get(key, 0) + spare
+                inv[key] = keep
+                if inv[key] <= 0:
+                    inv.pop(key, None)
+
+    def _prefer_store(self, p, want):
+        """Decide whether to fall back on the larder rather than forage. Only when the store
+        actually holds it, home is within ranging distance, AND home is no farther than any
+        remembered wild spot — so a needy soul is never marched PAST nearer water/food to the
+        larder (that detour, overriding a closer known spring, quietly cost thirst deaths)."""
+        store = p.get("store", {})
+        if want == "food":
+            stocked = store.get("food", 0) > 0
+        else:
+            stocked = store.get("safe_water", 0) + store.get("water", 0) > 0
+        if not stocked:
+            return False
+        hx, hy = p["home"]
+        dh = abs(hx - p["x"]) + abs(hy - p["y"])
+        if dh > EXPLORE_LEASH:                       # too far to march a needy soul home
+            return False
+        kloc = p.get("known", {}).get("food" if want == "food" else "water")
+        if kloc:
+            dk = abs(kloc[0] - p["x"]) + abs(kloc[1] - p["y"])
+            if dk < dh:                              # a remembered wild spot is nearer — use it
+                return False
+        return True
+
+    def _fetch_from_store(self, p, want):
+        """Caught hungry/thirsty away from home with nothing in sight, head for the larder and
+        draw a unit. `want` is 'food' or 'water'. Returns a body action (haul toward home, or the
+        consume action once home and the unit is in the pack), or None when the store can't help."""
+        store = p.get("store", {})
+        keys = ["food"] if want == "food" else ["safe_water", "water"]   # boiled water first
+        if not any(store.get(k, 0) > 0 for k in keys):
+            return None
+        hx, hy = p["home"]
+        if abs(hx - p["x"]) + abs(hy - p["y"]) > 1:                      # still on the way home
+            return "haul", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
+        for k in keys:                                                   # at the larder — withdraw one
+            if store.get(k, 0) > 0:
+                store[k] -= 1
+                if store[k] <= 0:
+                    store.pop(k, None)
+                p["inv"][k] = p["inv"].get(k, 0) + 1
+                if want == "food":
+                    return "eat", None
+                return ("drink_safe" if k == "safe_water" else "drink_pack"), None
+        return None
+
     def _pursue_building(self, p, bp_name, getters, communal: bool = False):
         """Raise a building from a blueprint tile by tile: found the footprint at home, then
         forage each tile's material and lay it. Returns a body action, or None when there's
@@ -2035,6 +2132,28 @@ class World:
                     return getters[mat]()
             break
         return None
+
+    def _provision(self, p, edible, lx, ly):
+        """Lay in food against lean days: gather until the pack holds a load over the travel
+        reserve, then carry it home and bank the surplus in the larder. Comfort-gated upstream,
+        so a soul only does this when its own needs are quiet — survival always comes first."""
+        x, y = p["x"], p["y"]
+        inv = p["inv"]
+        hx, hy = p["home"]
+        # Stockpiling is a near-home chore: never let laying-in food range a soul far from its
+        # own water. If we've strayed past the leash, head back rather than chase another bush —
+        # the larder isn't worth dying of thirst inland for.
+        if abs(hx - x) + abs(hy - y) > PROVISION_LEASH:
+            return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+        cap = PERSON["inv_cap"] + (6 if inv.get("forage_sack", 0) else 0)
+        load = min(STORE_KEEP["food"] + PROVISION_LOAD, cap)   # carry the reserve plus a load to bank
+        if inv.get("food", 0) < load:
+            here = bool(edible[ly, lx]) and self.veg_growth[y, x] > PERSON["gather_min"]
+            return self._seek(p, x, y, here, edible, lx, ly, "food", "gather", "seek_food")
+        if abs(hx - x) + abs(hy - y) > 1:                      # loaded — bring it home to the larder
+            return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+        self._deposit_home(p)                                  # bank the surplus above the travel reserve
+        return "tend", None
 
     def _ply(self, p, edible, tree, fiber, leaf, lx, ly):
         """A settled specialist plies its trade in idle hours, building the surplus division of

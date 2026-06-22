@@ -61,8 +61,10 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 # and speech — at a slow, human cadence.
 
 # A person's standing intention is one of these kinds (some carry a target person id):
-INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "socialize",
+INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
                 "befriend", "explore", "avoid", "tend", "tinker", "ply")
+
+PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 
 # Vocations — a soul's calling, emerging from temperament (division of labour). A driven soul
 # becomes the band's BUILDER, a restless curious one its TOOLMAKER, and the steady rest its
@@ -439,6 +441,17 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     foe_id, foe_name, foe_mag = ctx.get("foe_id"), ctx.get("foe_name"), ctx.get("foe_mag", 0.0)
     if foe_id and foe_mag > 0.3:
         out.append(("avoid", foe_id, cau * foe_mag, f"I'll keep clear of {foe_name}"))
+
+    # Provisioning — a settled soul lays in a food reserve at home against lean days: survival
+    # FORESIGHT, not just an idle-hours flourish, so every housed soul feels it (not only the
+    # forager). Comfort-gated like any project and keenest when the larder runs low, but always
+    # below survival's danger ramp — a hungry soul eats now and stocks later, never the reverse.
+    if p.get("home_struct") is not None and not night:
+        larder = p.get("store", {}).get("food", 0)
+        if larder < PROVISION_TARGET:
+            comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+            want = 1.0 - larder / PROVISION_TARGET          # keener when the cupboard's bare
+            out.append(("provision", None, (0.17 + 0.13 * want) * comfort, "lay in food against lean days"))
 
     # Vocation — a settled soul plies its trade in the hours survival and projects leave free,
     # producing the surplus that division of labour runs on (a forager's full larder, a

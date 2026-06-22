@@ -4262,6 +4262,8 @@ function renderPersonPanel(p) {
     `<div class="wp-refl">“${escapeHtml(typeof r === 'string' ? r : (r.text || ''))}”</div>`).join('') : '';
   const inv = Object.entries(p.inv || {}).filter(([, n]) => n)
     .map(([k, n]) => `${n}× ${k.replace(/_/g, ' ')}`).join(', ') || 'nothing';
+  const store = Object.entries(p.store || {}).filter(([, n]) => n)
+    .map(([k, n]) => `${n}× ${k.replace(/_/g, ' ')}`).join(', ');
   const craftLine = p.crafting
     ? `<div class="wp-craft">⚙ crafting <b>${(p.crafting.out || p.crafting.rid).replace(/_/g, ' ')}</b> — ${pct(p.crafting.pct)}%` +
       `${p.crafting.left_min != null ? ` (${Math.round(p.crafting.left_min)} game-min left)` : ''}</div>` : '';
@@ -4290,6 +4292,7 @@ function renderPersonPanel(p) {
     `<div class="wp-sec">Temperament <em>(born · lived drift)</em></div>` +
     `<div class="wp-traits">${['sociability', 'ambition', 'curiosity', 'caution'].map(trait).join('')}</div>` +
     `<div class="wp-sec">Carrying</div><div class="wp-inv">${escapeHtml(inv)}</div>` +
+    (store ? `<div class="wp-sec">Larder at home</div><div class="wp-inv">${escapeHtml(store)}</div>` : '') +
     (() => {
       const SURV = { leaf_flask: 'leaf flask', forage_sack: 'forage sack', sleeping_mat: 'sleeping mat', campfire: 'campfire' };
       const knows = (p.recipes || []).filter(r => SURV[r]).map(r => SURV[r]);
