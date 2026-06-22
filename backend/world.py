@@ -104,6 +104,15 @@ B = {name: i for i, name in enumerate(BIOMES)}
 
 # ─── Water layer ─────────────────────────────────────────────────────────────
 WATER_NONE, WATER_RIVER, WATER_LAKE, WATER_OCEAN, WATER_SHALLOW = 0, 1, 2, 3, 4
+# Water a person can WADE through (rivers & shingle shallows are fordable; lakes & ocean are
+# barriers to be walked around). Fording leaves a soul WET for a spell (groundwork for a chill
+# mechanic later). Deep water still bounds the world the band can reach on foot.
+FORDABLE_WATER = (WATER_NONE, WATER_RIVER, WATER_SHALLOW)
+WET_DURATION = 90.0                 # game-minutes a soul stays wet after wading
+SEEN_FORGET = 720.0                 # game-minutes a remembered sighting of someone stays worth chasing
+# The eight step directions, used by the obstacle-aware walker to slide around barriers
+# instead of freezing nose-to-the-water (the old greedy single-step just stopped dead).
+_STEP_DIRS = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
 
 # ─── Vegetation species ──────────────────────────────────────────────────────
 # Each plant defines where it thrives: the biomes it tolerates, its temperature and
@@ -1746,7 +1755,7 @@ class World:
         """Step direction toward the nearest other living person (for a social/trade goal),
         or None if alone or already beside someone. Stops adjacent so the social pass can
         run an encounter rather than walking onto them."""
-        best, bd = None, 1e9
+        best, bd = None, PERSON["vision"] * 3 + 1       # only head toward company actually within reach
         for q in self.people:
             if q is p:
                 continue
@@ -1809,6 +1818,16 @@ class World:
             d = abs(q["x"] - p["x"]) + abs(q["y"] - p["y"])
             if q.get("inv", {}).get("food", 0) <= 1 and d < nd and d <= PERSON["vision"] * 3:
                 needy_id, needy_name, nd = q["id"], q["name"], d
+        # Whereabouts memory: a soul KNOWS where someone is only by seeing them. Record every
+        # person in sight now, so a later wish to find them can be navigated from a real last-known
+        # spot rather than by magically tracking their position (feeds the non-omniscient seek).
+        seen = p.setdefault("seen", {})
+        vis = PERSON["vision"]
+        for q in self.people:
+            if q is p:
+                continue
+            if abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= vis:
+                seen[q["id"]] = [q["x"], q["y"], self.clock]
         nearby = ", ".join(q["name"] for q in self.people
                            if q is not p and abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= PERSON["vision"] * 2)
         unsolved = self._person_unsolved(p)        # what THIS soul hasn't worked out yet
@@ -1959,14 +1978,31 @@ class World:
         return self._idle(p)
 
     def _seek_toward(self, p, target_id):
-        """Step toward a specific person by id (or None if gone/adjacent)."""
+        """Head toward a specific person WITHOUT omniscience. Straight to them if they're in
+        sight; else to where we last saw them; else to their home (folk know where folk live);
+        else give up. So a soul looks where it has reason to, finds them or doesn't, and moves on
+        rather than tracking them like a homing missile."""
         t = next((q for q in self.people if q["id"] == target_id), None)
         if t is None:
+            p.get("seen", {}).pop(target_id, None)
             return None
-        d = abs(t["x"] - p["x"]) + abs(t["y"] - p["y"])
-        if d <= 1:
-            return None
-        return (int(np.sign(t["x"] - p["x"])), int(np.sign(t["y"] - p["y"])))
+        x, y = p["x"], p["y"]
+        seen = p.setdefault("seen", {})
+        if abs(t["x"] - x) + abs(t["y"] - y) <= PERSON["vision"]:        # in sight — close in
+            seen[target_id] = [t["x"], t["y"], self.clock]
+            if abs(t["x"] - x) + abs(t["y"] - y) <= 1:
+                return None
+            return (int(np.sign(t["x"] - x)), int(np.sign(t["y"] - y)))
+        loc = seen.get(target_id)
+        if loc and self.clock - loc[2] <= SEEN_FORGET:                  # go where we last saw them
+            if abs(loc[0] - x) + abs(loc[1] - y) <= 1:                  # got there, they've moved on
+                seen.pop(target_id, None)                               # the trail's cold — give up
+                return None
+            return (int(np.sign(loc[0] - x)), int(np.sign(loc[1] - y)))
+        hx, hy = t.get("home", (x, y))                                  # try their home, then give up
+        if abs(hx - x) + abs(hy - y) > 1:
+            return (int(np.sign(hx - x)), int(np.sign(hy - y)))
+        return None
 
     def _idle(self, p):
         """Drift home if strayed, else amble — the resting state of a mind between aims."""
@@ -2531,16 +2567,40 @@ class World:
                       "build", self.clock)
         self._earn_renown(p, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
 
+    def _passable(self, nx, ny) -> bool:
+        """A tile a person may step onto: in bounds, not deep water (rivers/shallows are fordable),
+        and not a solid wall."""
+        return (self._in(nx, ny) and self.water[ny, nx] in FORDABLE_WATER
+                and self.blocks.get((nx, ny)) not in SOLID_BLOCKS)
+
+    def _step_to(self, p, nx, ny):
+        """Commit a step, wetting the soul if the tile is water it had to wade through."""
+        if self.water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
+            p["wet_until"] = self.clock + WET_DURATION
+        p["x"], p["y"] = nx, ny
+
     def _move_person(self, p, direction):
-        """One step (people can't walk onto water or through a solid wall). None → amble."""
-        if direction and (direction[0] or direction[1]):
-            sx, sy = int(np.sign(direction[0])), int(np.sign(direction[1]))
-        else:
-            sx, sy = int(self.rng.integers(-1, 2)), int(self.rng.integers(-1, 2))
-        nx, ny = p["x"] + sx, p["y"] + sy
-        if (self._in(nx, ny) and self.water[ny, nx] == WATER_NONE
-                and self.blocks.get((nx, ny)) not in SOLID_BLOCKS):
-            p["x"], p["y"] = nx, ny
+        """One step toward `direction`, sliding AROUND barriers instead of freezing against them:
+        try the heading, then the nearest sideways alternatives (so a soul rounds a lake or a wall
+        rather than standing nose-to-the-water forever). None → amble to a random open tile."""
+        x, y = p["x"], p["y"]
+        if not direction or (direction[0] == 0 and direction[1] == 0):
+            opts = [(dx, dy) for dx, dy in _STEP_DIRS if self._passable(x + dx, y + dy)]
+            if opts:
+                dx, dy = opts[int(self.rng.integers(len(opts)))]
+                self._step_to(p, x + dx, y + dy)
+            return
+        sx, sy = int(np.sign(direction[0])), int(np.sign(direction[1]))
+        # Candidates ordered by how closely they keep to the heading; only those that don't move
+        # AWAY from the goal (dot >= 0), so a blocked soul detours sideways but never backtracks
+        # into a jitter. First passable one wins.
+        order = sorted(_STEP_DIRS, key=lambda d: -(d[0] * sx + d[1] * sy))
+        for dx, dy in order:
+            if dx * sx + dy * sy < 0:
+                break                                    # the rest only lead away — give up this beat
+            if self._passable(x + dx, y + dy):
+                self._step_to(p, x + dx, y + dy)
+                return
 
     # ── physiological reserves (the body layer beneath comfort) ──────────────────
     def _ensure_body(self, p):

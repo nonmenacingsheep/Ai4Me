@@ -126,7 +126,10 @@ function fillSelect(el, items, selected) {
   }
 }
 
+let lastSettings = null;        // most recent {current, options} — reused by the World AI modal
 function populateSettings(data) {
+  lastSettings = data;
+  if (waiPending) { waiPending = false; populateWorldAI(data); }
   const cur = data.current || {};
   const opt = data.options || {};
 
@@ -300,6 +303,73 @@ document.getElementById('settings-save').addEventListener('click', () => {
   }
   applyVoiceState(pendingTts);
   closeSettings();
+});
+
+/* ═══ World AI settings (god-menu) — the world minds' own model/context ═══ */
+let waiPending = false;
+const waiModal = document.getElementById('wai-modal');
+
+// Pull a model's parameter size (billions) from its name, e.g. "llama3:8b" → 8, "qwen2:3.8b" → 3.8.
+// Returns null when the size isn't encoded (cloud models, or unlabelled locals).
+function modelParams(name) {
+  const m = /(\d+(?:\.\d+)?)\s*b\b/i.exec(name || '');
+  return m ? parseFloat(m[1]) : null;
+}
+
+function openWorldAI() {
+  // Refresh settings first so the model list + current values are live, then populate on reply.
+  if (connected && ws?.readyState === WebSocket.OPEN) {
+    waiPending = true;
+    ws.send(JSON.stringify({ type: 'get_settings' }));
+  } else if (lastSettings) {
+    populateWorldAI(lastSettings);
+  }
+  waiModal?.classList.add('open');
+}
+function closeWorldAI() { waiModal?.classList.remove('open'); }
+
+function populateWorldAI(data) {
+  const cur = data?.current || {};
+  const opt = data?.options || {};
+  const sel = document.getElementById('wai-model');
+  const minLocal = +cur.min_local_params || 0;
+  const cloud = new Set(opt.cloud_models || []);   // cloud list if provided; else infer by no size tag
+  sel.innerHTML = '';
+  const blank = document.createElement('option');
+  blank.value = ''; blank.textContent = 'Use main model';
+  sel.appendChild(blank);
+  for (const m of (opt.models || [])) {
+    const p = modelParams(m);
+    const isLocal = !cloud.has(m) && p !== null;     // a sized, non-cloud name reads as a local model
+    if (isLocal && minLocal > 0 && p < minLocal) continue;   // below the floor — don't offer it
+    const o = document.createElement('option');
+    o.value = m; o.textContent = shortModel(m) + (p ? ` · ${p}B` : '');
+    if (m === (cur.world_model || '')) o.selected = true;
+    sel.appendChild(o);
+  }
+  const ctx = document.getElementById('wai-ctx');
+  ctx.value = cur.world_num_ctx ?? 4096;
+  document.getElementById('wai-ctx-val').textContent = ctx.value + ' tokens';
+  document.getElementById('wai-minlocal').value = cur.min_local_params ?? 7;
+}
+
+document.getElementById('wai-ctx')?.addEventListener('input', (e) => {
+  document.getElementById('wai-ctx-val').textContent = e.target.value + ' tokens';
+});
+document.getElementById('wai-open')?.addEventListener('click', openWorldAI);
+document.getElementById('wai-close')?.addEventListener('click', closeWorldAI);
+document.getElementById('wai-cancel')?.addEventListener('click', closeWorldAI);
+waiModal?.addEventListener('click', (e) => { if (e.target === waiModal) closeWorldAI(); });
+document.getElementById('wai-save')?.addEventListener('click', () => {
+  const payload = {
+    world_model: document.getElementById('wai-model').value,
+    world_num_ctx: parseInt(document.getElementById('wai-ctx').value, 10),
+    min_local_params: parseFloat(document.getElementById('wai-minlocal').value) || 0,
+  };
+  if (connected && ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'set_settings', settings: payload }));
+  }
+  closeWorldAI();
 });
 
 /* ═══ Folders she can read (scoped, opt-in; lives in the composer + menu) ═══
@@ -3558,6 +3628,15 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && passthrough && !settingsModal.classList.contains('open')) {
     exitPassthrough();
   }
+  // Space pauses/resumes the world — but only while viewing it, and never while typing.
+  if (e.code === 'Space' && activeView === 'world') {
+    const t = e.target;
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (!typing) {
+      e.preventDefault();
+      toggleWorldPause();
+    }
+  }
 });
 
 /* ─── Boot ─────────────────────────────────────────────────────────── */
@@ -4073,10 +4152,29 @@ function renderWorld() {
 }
 
 function setActiveSpeed(speed) {
+  WORLD._speed = speed;
+  if (speed > 0) WORLD._lastSpeed = speed;        // remember the running speed to resume to
   const wrap = document.getElementById('whud-speed');
   if (!wrap) return;
   wrap.querySelectorAll('button[data-speed]').forEach(b =>
     b.classList.toggle('active', +b.dataset.speed === Math.round(speed)));
+  wrap.classList.toggle('paused', speed <= 0);
+}
+
+// Push a new world speed to the backend (0 = pause), optimistically reflecting it in the HUD.
+async function applyWorldSpeed(speed) {
+  setActiveSpeed(speed);
+  try {
+    await fetch('/api/world/speed', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speed }),
+    });
+  } catch (_) {}
+}
+
+// Space toggles pause/resume (resuming to the last running speed).
+function toggleWorldPause() {
+  applyWorldSpeed(WORLD._speed > 0 ? 0 : (WORLD._lastSpeed || 1));
 }
 
 function updateWorldHud() {
@@ -4582,14 +4680,7 @@ function bindWorld() {
   document.getElementById('whud-speed')?.addEventListener('click', async (ev) => {
     const btn = ev.target.closest('button[data-speed]');
     if (!btn) return;
-    const speed = +btn.dataset.speed;
-    setActiveSpeed(speed);                       // optimistic
-    try {
-      await fetch('/api/world/speed', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ speed }),
-      });
-    } catch (_) {}
+    applyWorldSpeed(+btn.dataset.speed);
   });
   cv?.addEventListener('pointerleave', () => {
     const co = document.getElementById('whud-coords'); if (co) co.textContent = '';

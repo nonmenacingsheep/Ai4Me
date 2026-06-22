@@ -505,6 +505,9 @@ class AithaBrain:
         self.search_count = 0
         self.tools_enabled = WEB_SEARCH
         self.num_ctx = DEFAULT_NUM_CTX
+        # The World minds may run on their own model/context (set from settings); "" = use the main.
+        self.world_model = ""
+        self.world_num_ctx = DEFAULT_NUM_CTX
 
     async def _guard(self, token_gen):
         """Wrap a token stream: validate the opening for assistant-leaks before
@@ -1156,16 +1159,18 @@ class AithaBrain:
         except Exception:
             return ""
 
-    async def _stream_cloud(self, system: str, messages: list):
+    async def _stream_cloud(self, system: str, messages: list, model: str | None = None):
         """Stream tokens from any OpenAI-compatible cloud provider (DeepSeek, OpenAI,
-        OpenRouter, Groq…). Routes by the selected model's configured key."""
-        route = _route(self.model)
+        OpenRouter, Groq…). Routes by the selected model's configured key. `model` overrides
+        the default for one call (used by the World minds on their own model)."""
+        mdl = model or self.model
+        route = _route(mdl)
         if not route:
             yield "...I can't reach that part of my mind — no API key is set for that model yet."
             return
         base, api_key = route
         payload = {
-            "model": self.model,
+            "model": mdl,
             "messages": [{"role": "system", "content": system}] + messages,
             "stream": True,
             "temperature": 0.9,          # 1.3 melts into gibberish; 0.9 stays coherent + lively
@@ -1250,40 +1255,49 @@ class AithaBrain:
                         break
 
     async def warm_up(self):
-        """Load the model into VRAM at startup so the first real message is fast."""
-        if _is_cloud(self.model):
-            return  # cloud model — nothing to warm
-        try:
-            payload = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": False,
-                "keep_alive": KEEP_ALIVE,
-                "options": {"num_ctx": self.num_ctx, "num_predict": 1},
-            }
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-            print(f"[brain] model {self.model} warm (num_ctx={self.num_ctx})")
-        except Exception as e:
-            print(f"[brain] warm-up failed: {e}")
+        """Load the model(s) into VRAM at startup so the first real message is fast. Warms the
+        main model and, if the World runs on a DIFFERENT local model, that one too."""
+        to_warm = [(self.model, self.num_ctx)]
+        if self.world_model and self.world_model != self.model:
+            to_warm.append((self.world_model, self.world_num_ctx))
+        for mdl, ctx in to_warm:
+            if _is_cloud(mdl):
+                continue  # cloud model — nothing to warm
+            try:
+                payload = {
+                    "model": mdl,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                    "keep_alive": KEEP_ALIVE,
+                    "options": {"num_ctx": ctx, "num_predict": 1},
+                }
+                async with httpx.AsyncClient(timeout=300.0) as client:
+                    await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+                print(f"[brain] model {mdl} warm (num_ctx={ctx})")
+            except Exception as e:
+                print(f"[brain] warm-up failed for {mdl}: {e}")
 
-    async def _complete(self, system: str, user: str, max_tokens: int = 256) -> str:
-        """Non-streaming single completion — used for fact extraction and summaries.
-        Routes to DeepSeek or Ollama depending on the active model."""
+    async def _complete(self, system: str, user: str, max_tokens: int = 256,
+                        model: str | None = None, num_ctx: int | None = None) -> str:
+        """Non-streaming single completion — used for fact extraction, summaries and the World
+        minds. Routes to DeepSeek or Ollama by the active model. `model`/`num_ctx` override the
+        defaults for one call (the World can deliberate on its own model without disturbing chat)."""
+        mdl = model or self.model
+        ctx = num_ctx or self.num_ctx
         messages = [{"role": "user", "content": user}]
         # DeepSeek path: accumulate from the streaming helper.
-        if _is_cloud(self.model):
+        if _is_cloud(mdl):
             out = ""
-            async for t in self._stream_cloud(system, messages):
+            async for t in self._stream_cloud(system, messages, model=mdl):
                 out += t
             return out.strip()
         # Ollama path.
         payload = {
-            "model": self.model,
+            "model": mdl,
             "messages": [{"role": "system", "content": system}] + messages,
             "stream": False,
             "keep_alive": KEEP_ALIVE,
-            "options": {"num_ctx": self.num_ctx, "num_predict": max_tokens},
+            "options": {"num_ctx": ctx, "num_predict": max_tokens},
         }
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)

@@ -205,6 +205,26 @@ async def apply_settings(new: dict) -> dict:
             brain.num_ctx = ctx
         except (TypeError, ValueError):
             pass
+    if "world_model" in new:                       # the World minds' own model ("" = use main)
+        wm = (new["world_model"] or "").strip()
+        if wm != settings.get("world_model", ""):
+            changed_model = True
+        settings["world_model"] = wm
+        brain.world_model = wm
+    if "world_num_ctx" in new:
+        try:
+            wctx = max(2048, min(32768, int(new["world_num_ctx"])))
+            if wctx != settings.get("world_num_ctx"):
+                changed_model = True
+            settings["world_num_ctx"] = wctx
+            brain.world_num_ctx = wctx
+        except (TypeError, ValueError):
+            pass
+    if "min_local_params" in new:
+        try:
+            settings["min_local_params"] = max(0.0, float(new["min_local_params"]))
+        except (TypeError, ValueError):
+            pass
     if "tts_enabled" in new:
         settings["tts_enabled"] = bool(new["tts_enabled"])
         tts.set_enabled(settings["tts_enabled"])
@@ -621,8 +641,13 @@ async def world_engine_loop():
                 continue
             t0 = time.time()
             w = await asyncio.to_thread(world_store.get_world)
-            _WORLD_SPEED = getattr(w, "speed", 1.0) or 1.0   # world is the source of truth
+            raw_speed = getattr(w, "speed", 1.0)             # world is the source of truth (0 = paused)
+            _WORLD_SPEED = raw_speed if raw_speed and raw_speed > 0 else 0.0
             now = time.time()
+            if not raw_speed or raw_speed <= 0:               # PAUSED — hold the world perfectly still
+                last = now                                    # so unpausing doesn't lurch the clock forward
+                continue
+            speed = raw_speed
             dt = min((now - last) * speed, 30.0)  # cap a long stall (e.g. machine slept)
             last = now
             await asyncio.to_thread(w.step, dt)
@@ -688,14 +713,20 @@ async def _mind_think_one():
     mind_store.deliberate(p, ctx, w.rng)
     p["think_cd"] = clock + 1.0                            # mark voiced even if the LLM fails
 
+    # The World minds may run on their own model/context (set in the god-menu AI Settings);
+    # an empty world_model falls back to the main chat model.
+    wm = brain.world_model or None
+    wc = brain.world_num_ctx or None
     try:
         do_reflect = p.get("think_n", 0) and p["think_n"] % REFLECT_EVERY == 0
         if do_reflect:
             sysm, usr = mind_store.reflect_messages(p, clock)
-            raw = await asyncio.wait_for(brain._complete(sysm, usr, max_tokens=180), MIND_THINK_BUDGET)
+            raw = await asyncio.wait_for(
+                brain._complete(sysm, usr, max_tokens=180, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
             mind_store.apply_reflections(_live(w, pid) or p, brain._parse_json_object(raw), clock)
         sysm, usr = mind_store.deliberate_messages(p, ctx)
-        raw = await asyncio.wait_for(brain._complete(sysm, usr, max_tokens=150), MIND_THINK_BUDGET)
+        raw = await asyncio.wait_for(
+            brain._complete(sysm, usr, max_tokens=150, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
         data = brain._parse_json_object(raw)
         target = _live(w, pid)
         if target is not None and data:
@@ -706,7 +737,8 @@ async def _mind_think_one():
         # teaching) and is written into the Ledger of Making; a wrong hunch is logged too.
         if target is not None and ctx.get("unsolved") and (target.get("intention") or {}).get("kind") == "tinker":
             dsys, dusr = mind_store.discover_messages(target, ctx)
-            draw = await asyncio.wait_for(brain._complete(dsys, dusr, max_tokens=120), MIND_THINK_BUDGET)
+            draw = await asyncio.wait_for(
+                brain._complete(dsys, dusr, max_tokens=120, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
             rid = w.apply_llm_discovery(target, brain._parse_json_object(draw))
             if rid:
                 w.version += 1
@@ -782,6 +814,8 @@ async def lifespan(app: FastAPI):
     brain = AithaBrain(model=settings["model"])
     brain.num_ctx = settings["num_ctx"]
     brain.vision_model = settings.get("vision_model", "")
+    brain.world_model = settings.get("world_model", "")
+    brain.world_num_ctx = int(settings.get("world_num_ctx", brain.num_ctx) or brain.num_ctx)
     settings["file_roots"] = files_store.set_roots(settings.get("file_roots", []))
     brain_set_name(settings.get("char_name", "Aitha"))
     tts.enabled = settings["tts_enabled"]
@@ -1101,7 +1135,8 @@ async def api_world_speed(req: Request):
         return {"ok": False}
     body = await req.json()
     speed = float(body.get("speed", 1.0))
-    speed = min(WORLD_SPEEDS[-1], max(WORLD_SPEEDS[0], speed))
+    # 0 = PAUSE (hold the world still); otherwise clamp to the fast-forward range.
+    speed = 0.0 if speed <= 0 else min(WORLD_SPEEDS[-1], max(WORLD_SPEEDS[0], speed))
     _WORLD_SPEED = speed
     w = await asyncio.to_thread(world_store.get_world)
     w.speed = speed

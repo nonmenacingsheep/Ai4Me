@@ -127,6 +127,14 @@ def defaults() -> dict:
         # Separate "eyes": a vision model that describes images for her. "" = none.
         "vision_model": os.getenv("AITHA_VISION_MODEL", ""),
         "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "4096")),
+        # The World minds (the god-sim people) can run on their OWN model, separate from the
+        # main chat — handy to give the world a cheap/fast local model while chat uses a big one.
+        # "" = use the main model. Their prompts are small (one soul's drives), so a modest
+        # context is plenty; min_local_params is the smallest local model (in billions of
+        # parameters) considered competent enough to drive the world.
+        "world_model": os.getenv("AITHA_WORLD_MODEL", ""),
+        "world_num_ctx": int(os.getenv("AITHA_WORLD_NUM_CTX", "4096")),
+        "min_local_params": float(os.getenv("AITHA_MIN_LOCAL_PARAMS", "7")),
         "tts_enabled": os.getenv("TTS_ENABLED", "1").lower() not in ("0", "false", "no"),
         "tts_voice": os.getenv("TTS_VOICE", "af_heart"),
         "tts_device": os.getenv("TTS_OUTPUT_DEVICE", "CABLE Input (VB-Audio Virtual Cable)"),
@@ -234,8 +242,15 @@ _options_cache: dict | None = None
 
 def build_options() -> dict:
     """Compute the dropdown option lists. Blocking — call off the event loop."""
+    cloud = []
+    try:
+        from brain import cloud_models
+        cloud = cloud_models()
+    except Exception:
+        pass
     return {
         "models": list_models(),
+        "cloud_models": cloud,             # so the UI can tell cloud from local (size-filtering, etc.)
         "vision_models": list_vision_models(),
         "voices": KOKORO_VOICES,
         "devices": list_output_devices(),
