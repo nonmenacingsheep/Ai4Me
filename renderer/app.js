@@ -3670,6 +3670,22 @@ const WANIMAL_RGB = { rabbit: [232, 230, 224], deer: [201, 160, 106], wolf: [86,
 // rabbit as 1). People share the large size. New large creatures should be added at 2.
 const WANIMAL_SPAN = { rabbit: 1, deer: 2, wolf: 2 };
 const WPERSON_SPAN = 2;
+// Float a small icon over each soul showing its current body action — the read-at-a-glance
+// counterpart to the ⚙ crafting tell. Keyed by p.action (set in world.py _person_decide).
+// seek_* variants share the icon of the thing being sought so travel reads as the goal.
+const WACTION_ICON = {
+  drink: '💧', drink_pack: '💧', drink_safe: '💧',
+  eat: '🍖', seek_food: '🍖', gather: '🍖',
+  rest: '😴', tinker: '💡',
+  build_block: '🔨', haul: '🔨', found_site: '🔨', tend: '🔨',
+  hunt: '🏹', fish: '🎣',
+  forage_berry: '🫐', seek_berry: '🫐',
+  gather_leaves: '🍃', seek_leaves: '🍃', gather_fiber: '🍃', seek_fiber: '🍃',
+  chop: '🪓', seek_wood: '🪓',
+  mine: '⛏️', seek_stone: '⛏️', clay: '⛏️', sand: '⛏️', flint: '⛏️',
+  socialize: '💬', befriend: '💬',
+  // 'wander' intentionally has no icon — idle wandering shouldn't clutter the view.
+};
 // Trees drawn as ~2×2-tile canopy sprites (per the requested sizing) when zoomed in,
 // sampled from the crisp detail window's veg layer. Darker than the terrain tint so
 // they read as foliage above the ground.
@@ -4123,6 +4139,17 @@ function renderWorld() {
       ctx.strokeStyle = '#7ed79b'; ctx.lineWidth = 2.4;
       ctx.arc(gx, gy, gr + 3, -Math.PI / 2, -Math.PI / 2 + 6.283 * pct); ctx.stroke();
       ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    } else if (z >= 4) {
+      // Not mid-craft: float an action icon (or 🤒 when visibly ailing) over the head.
+      const ill = p.illness && p.illness.known;
+      const ic = ill ? '🤒' : WACTION_ICON[p.action];
+      if (ic) {
+        const gx = bx + bw / 2, gy = by - 8, gr = Math.max(5, Math.min(11, z * 0.5));
+        ctx.font = `${gr * 1.7}px system-ui, sans-serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(ic, gx, gy);
+        ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      }
     }
     // A spoken line floats above the head for a short while after they say it (only when
     // zoomed in enough to read it). say_t is in game-minutes; ~25 of those ≈ a minute live.
