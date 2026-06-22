@@ -3654,7 +3654,7 @@ function setWorld(s) {
     biomes: s.biomes, plants: s.plants || {}, animals: s.animals || [],
     people: s.people || [], structures: s.structures || [],
     blocks: s.blocks || [], roofs: s.roofs || [], sites: s.sites || [],
-    ore: s.ore || [], blockNames: s.block_names || {},
+    ore: s.ore || [], berries: s.berries || [], blockNames: s.block_names || {},
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -3951,6 +3951,20 @@ function renderWorld() {
       ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
     }
   }
+  // Berry bushes: a little cluster of berries on the shrub once zoomed in. Ripe ones show
+  // bright fruit; a picked (un-ripe) bush is just bare foliage. Poison status is NOT shown —
+  // the bushes don't advertise it, and neither do the souls who haven't learned yet.
+  if (z >= 3) {
+    for (const b of (d.berries || [])) {
+      const sx = (b.x - cam.camX) * z, sy = (b.y - cam.camY) * z;
+      if (!onScreen(sx, sy, 1)) continue;
+      const cx = sx + z / 2, cy = sy + z / 2, r = Math.max(1, z * 0.16);
+      ctx.fillStyle = b.ripe ? '#9c2bd6' : '#3a5a3f';     // ripe berries vs bare bush
+      for (const [ddx, ddy] of [[-1, -0.4], [1, -0.4], [0, 0.7]]) {
+        ctx.beginPath(); ctx.arc(cx + ddx * r, cy + ddy * r, r, 0, 6.283); ctx.fill();
+      }
+    }
+  }
   // Placed building tiles: floors first (so walls/doors sit on top), then the shell.
   const drawBlock = (bx, by, code) => {
     const sx = (bx - cam.camX) * z, sy = (by - cam.camY) * z;
@@ -4185,6 +4199,8 @@ function worldInspect(x, y) {
     ((d.roofs || []).some(r => r[0] === x && r[1] === y) ? ' (roofed)' : '');
   const ore = (d.ore || []).find(o => o.x === x && o.y === y);
   if (ore) buildLine += `<br>⛏️ ${ore.kind.replace('_', ' ')} deposit`;
+  const bush = (d.berries || []).find(b => b.x === x && b.y === y);
+  if (bush) buildLine += `<br>🫐 berry bush${bush.ripe ? ' (ripe)' : ' (picked)'}`;
   const site = (d.sites || []).find(s => !s.done && x >= s.ox && y >= s.oy && x < s.ox + 6 && y < s.oy + 6);
   if (site) buildLine += `<br>🏗️ ${site.name} under construction — ${site.built}/${site.total} tiles (by ${site.by})`;
   ro.innerHTML = `<strong>(${x}, ${y})</strong> · ${biome}<br>` +

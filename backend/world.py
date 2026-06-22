@@ -339,11 +339,36 @@ DISEASE = {
                           hint="my belly gripes and bleeds — something I drank?"),
     "typhoid_fever": dict(incub=6.0, dur=12.0, drain=1.15, hp=0.00007,
                           hint="a slow fever burns in me — was it the water?"),
+    # P3 — a fast, sharp food-poisoning from the wrong berries (NOT waterborne; learned by
+    # which bush made you ill). Short and rarely fatal on its own, but a body already worn
+    # thin by hunger/thirst can be tipped over — the cost of eating an unknown bush.
+    "berry_sickness": dict(incub=0.25, dur=1.6, drain=1.5, hp=0.00004,
+                           hint="my belly heaves and cramps — it was those berries"),
 }
-WATERBORNE = tuple(DISEASE)
+WATERBORNE = ("cholera", "dysentery", "typhoid_fever")   # only these come from raw water
 WATER_INFECT_CHANCE = 0.012        # chance a single raw drink from a natural source infects
 IMMUNITY_DAYS = 90.0               # how long recovery shields against that same disease
 HEARTH_COST = {"wood": 3, "stone": 2, "leaves": 1}   # the campfire a soul raises to boil water by
+
+# ─── Berry bushes (P3 gathering overhaul) ────────────────────────────────────
+# Scattered bushes bear berries — a richer forage than grazing — but some are POISONOUS,
+# and which is which is not written on them: a soul finds out by eating, then remembers
+# that bush (lore) and shuns it. A picked bush re-ripens over a few days, so foraging is a
+# renewable round rather than a one-off strip. Sparse node list (like ore) so the vast map
+# costs nothing. Lore is the mitigation for the poison hazard, exactly as boiling is for water.
+BERRY_BUSH_PER = 2500              # ~one bush per this many land tiles — common enough that a
+                                   # settled band meets them often (so the poison/lore loop bites)
+BERRY_POISON_FRAC = 0.28           # share of bushes that are poisonous
+BERRY_REGROW_DAYS = 3.0            # a picked bush re-ripens over this
+BERRY_POISON_CHANCE = 0.55         # chance eating an unknown poison bush actually sickens you
+BERRY_HUNGER_RELIEF = 0.40         # comfort hunger a handful of berries slakes
+BERRY_SATIETY = 0.10               # reserve nourishment a handful restores
+BERRY_SEEK_RANGE = 18              # how far a hungry soul will divert to a worthwhile bush (kept tight
+                                   # so chasing berries never strands a soul far from water)
+BERRY_GOOD_BIAS = 3                # mild pull toward a known-good bush — enough to prefer a trusted one
+                                   # nearby, but a distinctly CLOSER unknown bush still gets tried (and
+                                   # so the poison gamble, and the lesson, stays a live part of foraging)
+BERRY_BIOMES = {"grassland", "forest", "rainforest", "savanna", "swamp"}
 
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
@@ -437,6 +462,8 @@ class World:
         self.sites: list[dict] = []      # buildings under construction (blueprint + per-tile tasks)
         self.ore_nodes: list[dict] = []  # scattered metal/coal deposits to mine
         self._ore_index: dict[tuple[int, int], dict] = {}  # (x,y)->node, rebuilt on load/seed
+        self.berry_bushes: list[dict] = []  # scattered berry bushes (some poisonous), P3
+        self._berry_index: dict[tuple[int, int], dict] = {}  # (x,y)->bush, rebuilt on load/seed
         self.log: list[dict] = []        # recent god actions / notable events
         # Craft knowledge. Everyone is born knowing the basics (STARTER_RECIPES); the make-
         # shift survival crafts (water flask, etc.) must be DISCOVERED by an individual and
@@ -515,6 +542,7 @@ class World:
         self._seed_grove(self._origin)          # a copse so the band has wood within reach
         self._seed_initial_wildlife(count=340, center=self._origin, radius=600)
         self._seed_ore_nodes()
+        self._seed_berry_bushes()
         self._seed_initial_people(count=7, center=self._origin)
 
         self.clock = 8 * 60.0            # start at 08:00 on day 0
@@ -562,6 +590,30 @@ class World:
 
     def _rebuild_ore_index(self):
         self._ore_index = {(n["x"], n["y"]): n for n in self.ore_nodes}
+
+    def _seed_berry_bushes(self):
+        """Scatter berry bushes across the temperate/forest land, a fraction of them poisonous.
+        Like ore, a small sparse list so the map stays cheap; the band discovers bushes (and
+        which ones bite back) by ranging out and eating. Bushes start ripe (ripe_t=0)."""
+        self.berry_bushes = []
+        biome_ids = [B[name] for name in BERRY_BIOMES if name in B]
+        land = np.argwhere(np.isin(self.biome, biome_ids) & (self.water == WATER_NONE))
+        if not len(land):
+            self._rebuild_berry_index()
+            return
+        n = max(12, (W * H) // BERRY_BUSH_PER)
+        picks = self.rng.choice(len(land), size=min(n, len(land)), replace=False)
+        for idx in picks:
+            by, bx = land[idx]
+            poison = bool(self.rng.random() < BERRY_POISON_FRAC)
+            self.berry_bushes.append({"x": int(bx), "y": int(by), "poison": poison, "ripe_t": 0.0})
+        self._rebuild_berry_index()
+
+    def _rebuild_berry_index(self):
+        self._berry_index = {(b["x"], b["y"]): b for b in self.berry_bushes}
+
+    def _bush_ripe(self, b) -> bool:
+        return self.clock >= b.get("ripe_t", 0.0)
 
     def _choose_origin(self):
         """Pick a hospitable founding spot near both water AND woodland, so the band can
@@ -1193,6 +1245,7 @@ class World:
             "home": (int(x), int(y)),                    # anchor: idle wandering drifts back here
             "home_struct": None,                         # id of their shelter once built
             "known": {},                                 # remembered resource spots {water/food/wood: [x,y]}
+            "berry_lore": {},                            # learned bushes "x,y" -> "good"/"bad" (P3)
             "heading": None,                             # persistent roaming direction while searching
             "action": "wander",                          # current body behaviour (for the renderer)
         })
@@ -1357,6 +1410,10 @@ class World:
                     if p.get("hearth"):
                         self._boil_at_home(p)            # tend the fire while resting: raw water → safe
                     self._deposit_home(p)                # bank the day's surplus into the larder
+            elif action == "forage_berry":
+                b = self._berry_index.get((x, y))
+                if b is not None and self._bush_ripe(b):
+                    self._forage_bush(p, b)
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
                 food_cap = PERSON["inv_cap"] + (6 if p["inv"].get("forage_sack", 0) else 0)
@@ -1398,7 +1455,7 @@ class World:
                 self._build_next_block(p)
             # Seeking and wandering move the body; acting-in-place does not.
             if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
-                          "seek_fiber", "seek_leaves", "haul", "wander", "socialize"):
+                          "seek_fiber", "seek_leaves", "seek_berry", "haul", "wander", "socialize"):
                 self._move_person(p, movedir)
 
             # Health couples to the physiological RESERVES (never to comfort). Any reserve in
@@ -1774,6 +1831,9 @@ class World:
         if kind == "eat":
             if p["inv"].get("food", 0) > 0 and p["hunger"] > 0.3:
                 return "eat", None
+            berry = self._berry_seek(p)                 # a ripe bush in local reach beats grazing thin tiles
+            if berry:
+                return berry
             here_food = bool(edible[ly, lx]) and self.veg_growth[y, x] > 0.12
             if not here_food and self._nearest_local(edible, lx, ly) is None and self._prefer_store(p, "food"):
                 f = self._fetch_from_store(p, "food")   # nothing growing in sight — fall back on the larder
@@ -2140,14 +2200,16 @@ class World:
         x, y = p["x"], p["y"]
         inv = p["inv"]
         hx, hy = p["home"]
-        # Stockpiling is a near-home chore: never let laying-in food range a soul far from its
-        # own water. If we've strayed past the leash, head back rather than chase another bush —
-        # the larder isn't worth dying of thirst inland for.
+        # Stockpiling stays a near-home chore: never let laying-in food range a soul far from its
+        # own water. If we've strayed past the leash, head back rather than chase another bush.
         if abs(hx - x) + abs(hy - y) > PROVISION_LEASH:
             return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         cap = PERSON["inv_cap"] + (6 if inv.get("forage_sack", 0) else 0)
         load = min(STORE_KEEP["food"] + PROVISION_LOAD, cap)   # carry the reserve plus a load to bank
         if inv.get("food", 0) < load:
+            berry = self._berry_seek(p)                # a ripe bush near home is the best larder-filler
+            if berry:
+                return berry
             here = bool(edible[ly, lx]) and self.veg_growth[y, x] > PERSON["gather_min"]
             return self._seek(p, x, y, here, edible, lx, ly, "food", "gather", "seek_food")
         if abs(hx - x) + abs(hy - y) > 1:                      # loaded — bring it home to the larder
@@ -2167,6 +2229,9 @@ class World:
         if voc == "forager":
             cap = PERSON["inv_cap"] + (6 if inv.get("forage_sack", 0) else 0)
             if inv.get("food", 0) < cap:
+                berry = self._berry_seek(p)             # a forager works the bushes too — richer pickings
+                if berry:
+                    return berry
                 here = bool(edible[ly, lx]) and self.veg_growth[y, x] > PERSON["gather_min"]
                 return self._seek(p, x, y, here, edible, lx, ly, "food", "gather", "seek_food")
             return self._idle(p)
@@ -2430,6 +2495,75 @@ class World:
                         "onset_t": self.clock + spec["incub"] * 1440.0,
                         "end_t": self.clock + (spec["incub"] + spec["dur"]) * 1440.0,
                         "known": False}
+
+    def _maybe_poison(self, p):
+        """Eating a poisonous bush may bring on a sharp berry-sickness (unless already ill or
+        still immune from a past bout). Reuses the same disease machinery as foul water."""
+        if p.get("illness") or self.rng.random() >= BERRY_POISON_CHANCE:
+            return False
+        if self.clock < p.get("immune", {}).get("berry_sickness", 0.0):
+            return False
+        spec = DISEASE["berry_sickness"]
+        p["illness"] = {"d": "berry_sickness", "infected_t": self.clock,
+                        "onset_t": self.clock + spec["incub"] * 1440.0,
+                        "end_t": self.clock + (spec["incub"] + spec["dur"]) * 1440.0,
+                        "known": False}
+        return True
+
+    # ── berry foraging & bush lore (P3) ──────────────────────────────────────────
+    def _learn_bush(self, p, b, bad: bool):
+        """Record what a bush turned out to be, so the soul shuns a bad one and returns to a
+        good one. A bush that ever sickened them is remembered as bad for good."""
+        lore = p.setdefault("berry_lore", {})
+        key = f"{b['x']},{b['y']}"
+        if bad or lore.get(key) != "bad":                 # 'bad' is sticky — never downgraded to good
+            lore[key] = "bad" if bad else "good"
+
+    def _forage_bush(self, p, b):
+        """Pick a ripe bush: slake hunger, pocket a handful, set it re-ripening, and learn what
+        it was — a safe bush becomes trusted, a poisonous one that bites becomes a bush to shun."""
+        b["ripe_t"] = self.clock + BERRY_REGROW_DAYS * 1440.0   # picked — re-ripens over days
+        p["hunger"] = max(0.0, p["hunger"] - BERRY_HUNGER_RELIEF)
+        self._refill(p, "satiety", BERRY_SATIETY)
+        p["inv"]["food"] = p["inv"].get("food", 0) + 1          # a handful for the pack/larder too
+        if b["poison"]:
+            if self._maybe_poison(p):                          # unlucky — it bites back
+                self._learn_bush(p, b, bad=True)               # now a bush they'll shun
+                mind.remember(p, "those berries turned my stomach — I'll shun that bush",
+                              0.7, "illness", self.clock)
+        else:
+            self._learn_bush(p, b, bad=False)                  # safe — a bush worth returning to
+        self.version += 1
+
+    def _nearest_bush(self, p):
+        """The best ripe bush worth foraging within reach: nearest one this soul doesn't KNOW to
+        be poisonous (a known-good bush is preferred, an unknown one is a gamble worth taking).
+        Returns the bush dict or None."""
+        lore = p.get("berry_lore", {})
+        x, y = p["x"], p["y"]
+        best = None; best_score = None
+        for b in self.berry_bushes:
+            d = abs(b["x"] - x) + abs(b["y"] - y)
+            if d > BERRY_SEEK_RANGE or not self._bush_ripe(b):
+                continue
+            tag = lore.get(f"{b['x']},{b['y']}")
+            if tag == "bad":
+                continue                                  # known poison — shun it
+            score = d - (BERRY_GOOD_BIAS if tag == "good" else 0)   # mild bias toward a trusted bush
+            if best_score is None or score < best_score:
+                best, best_score = b, score
+        return best
+
+    def _berry_seek(self, p):
+        """If a worthwhile berry bush is in reach, a body action toward it (or foraging it when
+        underfoot); else None so the soul falls back on grazing/seeking as before."""
+        b = self._nearest_bush(p)
+        if b is None:
+            return None
+        dx, dy = b["x"] - p["x"], b["y"] - p["y"]
+        if dx == 0 and dy == 0:
+            return "forage_berry", None
+        return "seek_berry", (int(np.sign(dx)), int(np.sign(dy)))
 
     def _illness_factor(self, p):
         """How much a current sickness accelerates fluid/appetite loss (1.0 when healthy or
@@ -2881,6 +3015,7 @@ class World:
             "roofs": self._roofs_payload(),
             "sites": self._sites_payload(),
             "ore": [{"x": n["x"], "y": n["y"], "kind": n["kind"]} for n in self.ore_nodes],
+            "berries": [{"x": b["x"], "y": b["y"], "ripe": self._bush_ripe(b)} for b in self.berry_bushes],
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -3062,6 +3197,7 @@ class World:
                 "blocks": {f"{x},{y}": int(c) for (x, y), c in self.blocks.items()},
                 "roofs": [[x, y] for (x, y) in self.roofs],
                 "sites": self.sites, "ore_nodes": self.ore_nodes,
+                "berry_bushes": self.berry_bushes,
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -3114,6 +3250,11 @@ class World:
             self.roofs = {(int(x), int(y)) for x, y in (meta.get("roofs") or [])}
             self.sites = meta.get("sites", [])
             self.ore_nodes = meta.get("ore_nodes", [])
+            self.berry_bushes = meta.get("berry_bushes", [])
+            if self.berry_bushes:
+                self._rebuild_berry_index()
+            else:
+                self._seed_berry_bushes()      # a save predating berries — populate the map now
             self._rebuild_ore_index()
             self.log = meta.get("log", [])
             self.known_recipes = set(meta.get("known_recipes") or crafting.STARTER_RECIPES)
@@ -3202,6 +3343,12 @@ if __name__ == "__main__":
     deaths = [e["text"] for e in w.log if e["kind"] == "death"]
     print(f"  survival: {len(w.people)}/7 of the founding band alive; "
           f"deaths logged: {deaths if deaths else 'none'}")
+    lore = sum(len(p.get("berry_lore", {})) for p in w.people)
+    bad_lore = sum(1 for p in w.people for v in p.get("berry_lore", {}).values() if v == "bad")
+    berry_ill = sum(1 for p in w.people if (p.get("illness") or {}).get("d") == "berry_sickness"
+                    or "berry_sickness" in p.get("immune", {}))
+    print(f"  berries: {len(w.berry_bushes)} bushes on the map; "
+          f"band learned {lore} bush(es) ({bad_lore} poison); souls who weathered berry-sickness: {berry_ill}")
     if w.people:
         sample = w.people[0]
         print(f"  survivor sample — {sample['name']}: comfort[h/t/f] "
@@ -3366,6 +3513,39 @@ if __name__ == "__main__":
     bottle_ok = learned and has_flask and filled and act == "drink_pack"
     print(f"  water-bottle test: discovered={learned} crafted={has_flask} filled={filled} "
           f"drinks-from-pack-away-from-water={act == 'drink_pack'} -> {'OK' if bottle_ok else 'FAILED'}")
+
+    # Berry test (P3): forage a safe bush for food + lore; learn a poison bush and then shun it.
+    wbz = World().generate(seed=5); wbz.people = []
+    byb, bxb = np.argwhere((wbz.water == WATER_NONE) & (wbz.biome == B["grassland"]))[0]
+    wbz._add_person(int(bxb), int(byb), name="Berryer")
+    bz = wbz.people[0]; wbz.clock = 1000.0
+    good = {"x": int(bxb), "y": int(byb), "poison": False, "ripe_t": 0.0}
+    wbz.berry_bushes = [good]; wbz._rebuild_berry_index()
+    bz["hunger"], bz["thirst"], bz["fatigue"] = 0.6, 0.05, 0.05
+    bz["inv"] = {}; bz["intention"] = None; bz["delib_cd"] = 0
+    e, d, t, s, fi, le, lx, ly, _, _ = wbz._perceive(bz["x"], bz["y"])
+    bact, _ = wbz._person_decide(bz, e, d, t, s, fi, le, False, lx, ly)
+    wbz._forage_bush(bz, good)                              # execute the pick
+    berry_food = bz["inv"].get("food", 0) >= 1
+    learned_good = bz["berry_lore"].get(f"{bxb},{byb}") == "good"
+    not_ripe_now = not wbz._bush_ripe(good)                 # picked → must re-ripen
+    # A known poison bush: force the sickness, confirm it's logged bad and then shunned.
+    poison = {"x": int(bxb) + 1, "y": int(byb), "poison": True, "ripe_t": 0.0}
+    wbz.berry_bushes = [poison]; wbz._rebuild_berry_index()
+    bz["illness"] = None; bz["immune"] = {}
+    import random as _r
+    got_sick = False
+    for _ in range(40):                                    # poison is probabilistic — force a bout
+        bz["illness"] = None
+        if wbz._maybe_poison(bz):
+            got_sick = True; break
+    wbz._learn_bush(bz, poison, bad=True)
+    shuns = wbz._nearest_bush(bz) is None                   # the only bush is known-bad → ignored
+    berry_ok = (bact == "forage_berry" and berry_food and learned_good and not_ripe_now
+                and got_sick and shuns)
+    print(f"  berry test: forages={bact == 'forage_berry'} food+={berry_food} learns-good={learned_good} "
+          f"re-ripens={not_ripe_now} poison-sickens={got_sick} shuns-known-bad={shuns} "
+          f"-> {'OK' if berry_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")
