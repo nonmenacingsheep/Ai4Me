@@ -97,18 +97,35 @@ def canon_material(name: str) -> str | None:
 # aggregate, culture) comes from. Values (below) nudge these over a life from experience.
 TRAITS = ("sociability", "ambition", "curiosity", "caution")
 
-# Survival drives stay quiet when a need is low (so meaning can win) but ramp HARD once a
-# need crosses into danger, so no one daydreams themselves to death. Below ~0.4 it's a
-# gentle power curve; above it a steep linear ramp quickly out-scores every other pull.
-NEED_GAIN = 1.6
-DANGER_FROM = 0.32          # need level past which survival urgency ramps steeply
-DANGER_SLOPE = 2.0          # prudent: top needs up well before they turn deadly
+# A survival drive now reads TWO signals (the body/comfort split): the COMFORT/desire (how
+# much the soul wants relief — rises early, drives ordinary behaviour) and the physiological
+# RESERVE (how much the body can still take — the true survival clock). Urgency = a strong
+# but BOUNDED desire term + a STEEP danger term that only ignites as the reserve runs out.
+# So a comfortable-but-thirsty soul is firmly pulled toward water (desire), while a soul whose
+# body is actually failing is dragged there no matter what else it wanted (danger override).
+DESIRE_GAIN = 0.80          # CONCAVE (<1): desire peaks EARLY & strong, so a moderately thirsty
+                            # soul already feels a firm pull (comfort 0.7 → desire ~0.75) and tops
+                            # up proactively rather than tolerating near-empty comfort. (A convex
+                            # >1 curve peaks late — souls would rest through rising thirst and only
+                            # scramble once comfort pinned, stranding the inland-settled ones.)
+# Two reserve terms shape survival. A gentle ALWAYS-ON tilt (proportional to how drawn-down the
+# reserve is) is the discriminator: among three needs all sitting at peak desire, it nudges the
+# soul to service the MOST-depleted reserve first, so they round-robin their upkeep and none
+# quietly craters while another is tended. A STEEP ramp below ~half-full is the true override —
+# overwhelming as the body actually nears failure. In steady state both stay small (routine
+# relief keeps reserves high), so meaning and projects still get their turn.
+RESERVE_TILT = 0.40         # gentle, always-on pull toward the lowest reserve (the discriminator)
+DANGER_RESERVE = 0.50       # reserve level below which the steep danger ramp begins
+DANGER_SLOPE = 2.5          # steepness of that ramp — overwhelming as the reserve nears empty
 
 
-def need_urgency(n: float) -> float:
-    """Urgency of relieving a need at level `n` — the survival drive's value, also used by
-    the body's emergency-interrupt so the two agree on when survival must take over."""
-    return n ** NEED_GAIN + max(0.0, n - DANGER_FROM) * DANGER_SLOPE
+def need_urgency(comfort: float, reserve: float = 1.0) -> float:
+    """Urgency of relieving a need — the survival drive's value, also used by the body's
+    emergency-interrupt so the two agree on when survival must take over. `comfort` is the
+    0..1 desire; `reserve` is the 0..1 physiological store (1 = full, 0 = the body failing)."""
+    desire = comfort ** DESIRE_GAIN
+    danger = (1.0 - reserve) * RESERVE_TILT + max(0.0, DANGER_RESERVE - reserve) * DANGER_SLOPE
+    return desire + danger
 HYSTERESIS = 0.12            # an intention must be beaten by this margin to be dropped
 SOCIAL_FORGET = 1440.0      # a day alone fully "lonelies" a sociable soul
 VALUE_CAP = 0.25            # how far lived experience can bend a trait
@@ -328,13 +345,13 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     clock = ctx.get("clock", 0.0)
     out: list[tuple[str, str | None, float, str]] = []
 
-    # Survival — quiet until a need bites, then overwhelming (steep danger ramp).
-    out.append(("drink", None, need_urgency(p.get("thirst", 0)), "my throat is parched"))
-    hunger_u = need_urgency(p.get("hunger", 0))
+    # Survival — desire pulls early, the body's danger ramp overrides everything as a reserve fails.
+    out.append(("drink", None, need_urgency(p.get("thirst", 0), p.get("hydration", 1.0)), "my throat is parched"))
+    hunger_u = need_urgency(p.get("hunger", 0), p.get("satiety", 1.0))
     if p.get("hunger", 0) < 0.3 and inv.get("food", 0) > 0:
         hunger_u *= 0.5                                  # a fed person with food in the pack isn't driven to eat
     out.append(("eat", None, hunger_u, "hunger gnaws at me"))
-    fatigue_u = need_urgency(p.get("fatigue", 0))
+    fatigue_u = need_urgency(p.get("fatigue", 0), p.get("stamina", 1.0))
     night = ctx.get("night")
     if night:
         # People sleep at night. Fatigue rises fast (~a full day's worth daily), so a nightly

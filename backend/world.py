@@ -159,16 +159,37 @@ MATE_RADIUS = 6                 # a mate within this range is close enough to br
 # (1 game-year == DAYS_PER_YEAR == 60 game-days).
 PERSON = dict(
     vision=8, speed=1, max_age=70 * DAYS_PER_YEAR,
-    # Survival spans are calibrated in game-DAYS (1 day = 1440 game-min): a healthy
-    # person lasts ~3 days without water and ~3 weeks without food. A need rises to
-    # 1.0 over that span (thirst ~2.3 days, hunger ~21 days), after which starve_dmg
-    # erodes hp over a further ~0.9 day → sated→dead ≈ 3 days (thirst) / ~22 (hunger).
-    hunger_rate=0.000033, thirst_rate=0.0003, fatigue_rate=0.00069,
-    t_hunger=0.50, t_thirst=0.45, t_rest=0.70,        # need thresholds to act on
-    eat_bite=0.05, food_value=2.5,                     # graze speed / hunger restored per unit
-    drink_rate=0.05, rest_rate=0.04,                   # thirst/fatigue relieved per min
+    # ── Two layers per need (game-DAYS; 1 day = 1440 game-min) ───────────────────────
+    # Each need has a COMFORT signal (desire — what the mind weighs, rises EARLY) and a
+    # physiological RESERVE (the true survival clock — hydration/satiety/stamina, 1=full
+    # 0=failing). Comfort peaks long before the reserve runs out, so a soul actively seeks
+    # relief well inside the safety margin: a healthy person feels very thirsty within half
+    # a day but can endure ~3 days without water; very hungry within ~1.5 days but can last
+    # ~3 weeks without food. Death/damage keys off the RESERVE, never off comfort.
+    #
+    # Comfort rise rates — desire saturates to 1.0 over its (short) comfort span:
+    thirst_rate=0.00139, hunger_rate=0.00046, fatigue_rate=0.00069,   # spans ≈ 0.5d / 1.5d / 1.0d
+    # Reserve drain rates — the slow physiological clock (drains to 0 over the survival span):
+    hydration_drain=0.000231, satiety_drain=0.0000331, stamina_drain=0.000231,  # ≈ 3d / 21d / 3d
+    t_hunger=0.50, t_thirst=0.45, t_rest=0.70,        # comfort thresholds to act on
+    eat_bite=0.05, food_value=2.5,                     # graze speed / hunger-comfort restored per unit
+    drink_rate=0.05, rest_rate=0.04,                   # thirst/fatigue comfort relieved per min
+    # How much a relief action restores of the underlying reserve (per min while acting):
+    hydrate_rate=0.02, feed_value=0.06, restore_rate=0.018,
     inv_cap=8, gather_min=0.30,                         # carry capacity / tile richness to gather
-    starve_dmg=0.0008, heal=0.0006,                    # hp lost when a need maxes / regained when sated
+    # Health (hp) couples to the reserves: it erodes when any reserve falls into the danger
+    # zone, and can only heal — and only up to a "vitality" ceiling — when the body is well
+    # supplied. Vitality = min(satiety, stamina): chronic hunger or exhaustion drags the whole
+    # body (and its hp ceiling) down, the malnutrition/sickness coupling.
+    hp_danger=0.30, hp_safe=0.45,                      # reserve below danger erodes hp; above safe lets it heal
+    starve_dmg=0.0026, heal=0.0009,                    # hp lost per unit of reserve-deficit / regained when sound
+)
+# Per-need wiring (comfort key, reserve key, comfort-rise rate, reserve-drain rate) so the
+# body loop stays DRY across the three needs.
+NEED_MODEL = (
+    ("thirst",  "hydration", "thirst_rate",  "hydration_drain"),
+    ("hunger",  "satiety",   "hunger_rate",  "satiety_drain"),
+    ("fatigue", "stamina",   "fatigue_rate", "stamina_drain"),
 )
 EDIBLE_PLANTS = {"grass", "oak", "reeds", "palm", "shrub"}   # plants people can forage
 EDIBLE_IDS = [sp for sp, info in PLANTS.items() if info["name"] in EDIBLE_PLANTS]
@@ -1093,9 +1114,12 @@ class World:
             "id": "p_" + uuid.uuid4().hex[:8], "name": name, "sex": sex,
             "x": int(x), "y": int(y),
             "age": float(age if age is not None else self.rng.integers(1200, 2700)),  # ~20–45 yrs
-            "hunger": float(self.rng.random() * 0.2 + 0.1),
+            "hunger": float(self.rng.random() * 0.2 + 0.1),     # comfort/desire (drives behaviour)
             "thirst": float(self.rng.random() * 0.2 + 0.1),
             "fatigue": float(self.rng.random() * 0.2),
+            "satiety": float(self.rng.random() * 0.15 + 0.85),   # reserve (true survival store, 1=full)
+            "hydration": float(self.rng.random() * 0.15 + 0.85),
+            "stamina": float(self.rng.random() * 0.15 + 0.85),
             "hp": 1.0,
             "inv": {},                                   # carried goods, e.g. {"food":3,"wood":2,"axe":1}
             "home": (int(x), int(y)),                    # anchor: idle wandering drifts back here
@@ -1170,13 +1194,17 @@ class World:
         dead = []
         for p in self.people:
             mind.ensure_mind(p, self.rng)                # idempotent; covers any path that skipped it
+            self._ensure_body(p)                          # default the physiological reserves (legacy saves)
             if self.clock >= p.get("cryst_cd", 0):       # identity forms slowly, from a life lived
                 mind.crystallize_values(p)
                 p["cryst_cd"] = self.clock + 1440.0      # once a game-day
             p["age"] += dt_day
-            p["hunger"] = min(1.0, p["hunger"] + PERSON["hunger_rate"] * dt_game_min)
-            p["thirst"] = min(1.0, p["thirst"] + PERSON["thirst_rate"] * dt_game_min)
-            p["fatigue"] = min(1.0, p["fatigue"] + PERSON["fatigue_rate"] * dt_game_min)
+            # Two layers move every tick: COMFORT (desire) rises on its short clock, the
+            # physiological RESERVE drains on its long survival clock. The mind weighs comfort;
+            # the body lives or dies by the reserve.
+            for ck, rk, crate, drate in NEED_MODEL:
+                p[ck] = min(1.0, p[ck] + PERSON[crate] * dt_game_min)
+                p[rk] = max(0.0, p[rk] - PERSON[drate] * dt_game_min)
 
             x, y = p["x"], p["y"]
             # Perception is a SMALL window around this person (vision-sized), so people
@@ -1200,11 +1228,14 @@ class World:
                     bite = min(g, PERSON["eat_bite"] * dt_game_min)
                     self.veg_growth[y, x] = g - bite
                     p["hunger"] = max(0.0, p["hunger"] - bite * PERSON["food_value"])
+                    self._refill(p, "satiety", bite * PERSON["food_value"] * 0.5)
                 elif p["inv"].get("food", 0) > 0:                # eat from the pack
                     p["inv"]["food"] -= 1
                     p["hunger"] = max(0.0, p["hunger"] - 0.35)
+                    self._refill(p, "satiety", PERSON["feed_value"] * 4)
             elif action == "drink":
                 p["thirst"] = max(0.0, p["thirst"] - PERSON["drink_rate"] * dt_game_min)
+                self._refill(p, "hydration", PERSON["hydrate_rate"] * dt_game_min)
                 self._fill_containers(p)                 # top up any flask while at the water
             elif action == "drink_pack":
                 # Drink from a carried flask — the whole point of the water-bottle craft:
@@ -1214,6 +1245,7 @@ class World:
                     if p["inv"]["water"] <= 0:
                         del p["inv"]["water"]
                     p["thirst"] = max(0.0, p["thirst"] - 0.45)
+                    self._refill(p, "hydration", 0.3)
             elif action == "rest":
                 # A sheltered person resting at home recovers faster — but only as well as
                 # their home insulates (a leaf lean-to barely helps; a timber hut is snug).
@@ -1224,6 +1256,7 @@ class World:
                 elif p["inv"].get("sleeping_mat", 0) > 0:    # a discovered mat helps anywhere
                     mult = 1.0 + (BUILD["rest_sheltered_mult"] - 1.0) * 0.5
                 p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
+                self._refill(p, "stamina", PERSON["restore_rate"] * mult * dt_game_min)
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
                 food_cap = PERSON["inv_cap"] + (6 if p["inv"].get("forage_sack", 0) else 0)
@@ -1268,11 +1301,18 @@ class World:
                           "seek_fiber", "seek_leaves", "haul", "wander", "socialize"):
                 self._move_person(p, movedir)
 
-            # Health: a maxed need erodes the body; being well-supplied heals it.
-            if p["hunger"] >= 1.0 or p["thirst"] >= 1.0:
-                p["hp"] -= PERSON["starve_dmg"] * dt_game_min
-            elif p["hunger"] < 0.5 and p["thirst"] < 0.5:
-                p["hp"] = min(1.0, p["hp"] + PERSON["heal"] * dt_game_min)
+            # Health couples to the physiological RESERVES (never to comfort). Any reserve in
+            # the danger zone erodes hp — the deeper, and the more reserves at once, the faster.
+            # A sound body heals, but only up to its VITALITY ceiling (min of satiety & stamina),
+            # so a chronically hungry or exhausted soul's hp is dragged down and slowly declines
+            # even when it isn't outright starving — the malnutrition/exhaustion coupling.
+            res = (p["hydration"], p["satiety"], p["stamina"])
+            deficit = sum(max(0.0, PERSON["hp_danger"] - r) for r in res)
+            vitality = min(p["satiety"], p["stamina"])
+            if deficit > 0:
+                p["hp"] = max(0.0, p["hp"] - PERSON["starve_dmg"] * deficit * dt_game_min)
+            elif min(res) > PERSON["hp_safe"]:
+                p["hp"] = min(vitality, p["hp"] + PERSON["heal"] * dt_game_min)
 
             if p["hp"] <= 0 or p["age"] > PERSON["max_age"]:
                 dead.append(p)
@@ -1282,7 +1322,11 @@ class World:
         self._tick_minds_social()
 
         for p in dead:
-            cause = "old age" if p["age"] > PERSON["max_age"] else "hunger and thirst"
+            if p["age"] > PERSON["max_age"]:
+                cause = "old age"
+            else:                                            # name the reserve that gave out first
+                cause = min((("thirst", p.get("hydration", 1.0)), ("hunger", p.get("satiety", 1.0)),
+                             ("exhaustion", p.get("stamina", 1.0))), key=lambda kv: kv[1])[0]
             self._note("death", f"{p['name']} died of {cause}.")
             # Those who knew the dead carry it: a heavy, durable memory.
             for q in self.people:
@@ -1468,9 +1512,10 @@ class World:
         # must still break off to drink when thirst turns dangerous — neglecting one need
         # while tending another is how the founding band quietly died.)
         relieves = {"drink": "thirst", "eat": "hunger", "rest": "fatigue"}
-        worst, worst_u = max((("thirst", mind.need_urgency(p["thirst"])),
-                              ("hunger", mind.need_urgency(p["hunger"])),
-                              ("fatigue", mind.need_urgency(p["fatigue"]))), key=lambda kv: kv[1])
+        worst, worst_u = max((("thirst", mind.need_urgency(p["thirst"], p.get("hydration", 1.0))),
+                              ("hunger", mind.need_urgency(p["hunger"], p.get("satiety", 1.0))),
+                              ("fatigue", mind.need_urgency(p["fatigue"], p.get("stamina", 1.0)))),
+                             key=lambda kv: kv[1])
         spike = inten and relieves.get(inten.get("kind")) != worst \
             and worst_u > inten.get("u", 1.0) + mind.HYSTERESIS
         if (inten is None) or (self.clock >= p.get("delib_cd", 0)) or spike:
@@ -1853,6 +1898,33 @@ class World:
         if (self._in(nx, ny) and self.water[ny, nx] == WATER_NONE
                 and self.blocks.get((nx, ny)) not in SOLID_BLOCKS):
             p["x"], p["y"] = nx, ny
+
+    # ── physiological reserves (the body layer beneath comfort) ──────────────────
+    def _ensure_body(self, p):
+        """Default the physiological reserves for any person dict that predates them (legacy
+        saves, or a god-spawned soul that skipped _add_person). Seed each reserve from its
+        comfort signal so a thirsty old-save soul starts plausibly low, not brimming full."""
+        if "hydration" in p:
+            return
+        p["hydration"] = max(0.15, 1.0 - 0.5 * p.get("thirst", 0.2))
+        p["satiety"] = max(0.15, 1.0 - 0.5 * p.get("hunger", 0.2))
+        p["stamina"] = max(0.15, 1.0 - 0.5 * p.get("fatigue", 0.2))
+        p.setdefault("hp", 1.0)
+
+    @staticmethod
+    def _refill(p, key, amount):
+        """Restore a reserve by `amount`, but never above its VITALITY ceiling: an exhausted
+        body can't fully rehydrate or refeed (stamina caps hydration/satiety) and a malnourished
+        one can't fully rest off its fatigue (satiety caps stamina). The ceiling only limits the
+        top-up — it never yanks an already-higher reserve down."""
+        # Cap floor stays ABOVE the danger line (DANGER_RESERVE) so the coupling can sap a
+        # depleted body's recovery without trapping a reserve in permanent danger (a spiral).
+        if key == "stamina":
+            cap = 0.55 + 0.45 * p.get("satiety", 1.0)
+        else:                                                # hydration / satiety
+            cap = 0.55 + 0.45 * p.get("stamina", 1.0)
+        target = max(p.get(key, 0.0), cap)                   # don't pull a higher reserve down
+        p[key] = min(p.get(key, 0.0) + amount, target)
 
     # ── live-sim material sourcing (clay/sand/flint/ore beyond wood & fiber) ────
     def _fill_containers(self, p):
@@ -2359,7 +2431,9 @@ class World:
         water = W * H - land
         recent = "; ".join(e["text"] for e in self.log[-4:]) or "nothing lately"
         if self.people:
-            distress = [p["name"] for p in self.people if p["hunger"] > 0.8 or p["thirst"] > 0.8 or p["hp"] < 0.5]
+            distress = [p["name"] for p in self.people                       # genuine danger = the body failing, not mere discomfort
+                        if p.get("hydration", 1) < 0.35 or p.get("satiety", 1) < 0.35
+                        or p.get("stamina", 1) < 0.35 or p["hp"] < 0.6]
             roster = ", ".join(p["name"] for p in self.people[:8]) + ("…" if len(self.people) > 8 else "")
             built = c["buildings"]
             ppl = (f"People: {len(self.people)} alive ({roster})"
@@ -2561,8 +2635,10 @@ if __name__ == "__main__":
           f"deaths logged: {deaths if deaths else 'none'}")
     if w.people:
         sample = w.people[0]
-        print(f"  survivor sample — {sample['name']}: hunger {sample['hunger']:.2f} "
-              f"thirst {sample['thirst']:.2f} fatigue {sample['fatigue']:.2f} hp {sample['hp']:.2f} "
+        print(f"  survivor sample — {sample['name']}: comfort[h/t/f] "
+              f"{sample['hunger']:.2f}/{sample['thirst']:.2f}/{sample['fatigue']:.2f} "
+              f"reserve[sat/hyd/stm] {sample.get('satiety',1):.2f}/{sample.get('hydration',1):.2f}/"
+              f"{sample.get('stamina',1):.2f} hp {sample['hp']:.2f} "
               f"inv {sample['inv']} doing '{sample['action']}'")
     axes = sum(1 for p in w.people if p['inv'].get('axe'))
     sheltered = sum(1 for p in w.people if p.get('home_struct'))
@@ -2581,7 +2657,9 @@ if __name__ == "__main__":
     for _ in range(6000):
         if not wd.people:
             break
-        wd.people[0]["hunger"] = 1.0; wd.people[0]["thirst"] = 1.0
+        # Death keys off the physiological RESERVES, so hold those at empty (comfort alone
+        # no longer kills — that's the whole point of the body/comfort split).
+        wd.people[0]["hydration"] = 0.0; wd.people[0]["satiety"] = 0.0; wd.people[0]["stamina"] = 0.0
         wd._tick_people(0.4)
     print(f"  death test: a body in unrelieved crisis {'died as expected' if not wd.people else 'SURVIVED (unexpected)'}")
     print(f"\nsimulated {steps} steps in {sim_s:.2f}s "

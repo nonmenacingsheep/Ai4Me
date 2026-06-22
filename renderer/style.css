@@ -3137,6 +3137,8 @@ body.passthrough .pt-hint {
 .wperson-close svg { width: 18px; height: 18px; }
 .wperson-body { overflow-y: auto; padding: 12px 14px; font-size: 12px; line-height: 1.5; }
 .wp-sub { color: #9fd9bd; font-size: 11px; text-transform: capitalize; margin-bottom: 4px; }
+.wp-sub2 { color: #84b89f; font-size: 10px; margin: 8px 0 3px; }
+.wp-sub2 em { opacity: 0.6; font-style: normal; }
 .wp-intent { font-style: italic; opacity: 0.85; margin: 4px 0; }
 .wp-say { margin: 4px 0; }
 .wp-craft {
@@ -3149,7 +3151,7 @@ body.passthrough .pt-hint {
 }
 .wp-sec em { text-transform: none; letter-spacing: 0; opacity: 0.7; font-size: 10px; }
 .wp-bar { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
-.wp-bar > span { width: 52px; color: #a9d9c2; font-size: 11px; }
+.wp-bar > span { width: 78px; color: #a9d9c2; font-size: 11px; }
 .wp-bar > b { width: 34px; text-align: right; font-size: 11px; }
 .wp-track { flex: 1; height: 7px; border-radius: 4px; background: rgba(255,255,255,0.08); overflow: hidden; }
 .wp-track > i { display: block; height: 100%; border-radius: 4px; }

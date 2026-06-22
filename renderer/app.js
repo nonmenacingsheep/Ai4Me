@@ -4173,8 +4173,8 @@ function worldInspect(x, y) {
     return word ? ` · ${word}` : '';
   };
   const folkLine = folk.map(p =>
-    `<br><strong>${p.name}</strong> — ${p.action}${character(p)} · hunger ${pct(p.hunger)}% thirst ${pct(p.thirst)}% ` +
-    `rest ${pct(1 - (p.fatigue || 0))}% · health ${pct(p.hp)}%${invStr(p.inv)}` +
+    `<br><strong>${p.name}</strong> — ${p.action}${character(p)} · nourishment ${pct(p.satiety ?? 1)}% ` +
+    `hydration ${pct(p.hydration ?? 1)}% vigour ${pct(p.stamina ?? 1)}% · health ${pct(p.hp)}%${invStr(p.inv)}` +
     (p.intent ? `<br><em>${escapeHtml(p.intent)}</em>` : '') +
     (p.say ? `<br>💬 “${escapeHtml(p.say)}”` : '') + knows(p)).join('');
   const builds = (d.structures || []).filter(st => st.x === x && st.y === y);
@@ -4258,9 +4258,14 @@ function renderPersonPanel(p) {
     (p.say ? `<div class="wp-say">💬 ${escapeHtml(p.say)}</div>` : '') +
     `<div class="wp-sec">Body</div>` +
     bar('health', p.hp, '#7ed79b') +
+    `<div class="wp-sub2">Comfort <em>— how much they want relief (drives behaviour)</em></div>` +
     bar('hunger', p.hunger, '#e0a13c') +
     bar('thirst', p.thirst, '#56b0c4') +
     bar('fatigue', p.fatigue, '#b07cd8') +
+    `<div class="wp-sub2">Reserves <em>— the body's true store (full = days of margin)</em></div>` +
+    bar('nourishment', p.satiety, '#caa15a') +
+    bar('hydration', p.hydration, '#4a90a4') +
+    bar('vigour', p.stamina, '#8c6abf') +
     `<div class="wp-sec">Temperament <em>(born · lived drift)</em></div>` +
     `<div class="wp-traits">${['sociability', 'ambition', 'curiosity', 'caution'].map(trait).join('')}</div>` +
     `<div class="wp-sec">Carrying</div><div class="wp-inv">${escapeHtml(inv)}</div>` +
