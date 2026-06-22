@@ -300,6 +300,21 @@ RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 PLY_WOOD_STOCK = 14                # a woodcutter plying their trade stocks timber up to this
 
+# ─── Generations & lineage (Phase 4) ─────────────────────────────────────────
+# A band that breeds true: bonded adults have children who inherit a blend of their parents'
+# nature (but NOT their knowledge — culture must be taught afresh each generation, so it can
+# grow or be lost), grow from dependent childhood to a calling of their own, and inherit home
+# and a share of a parent's standing. This is where character becomes lineage and lineage,
+# slowly, becomes culture. Ages are in game-days (DAYS_PER_YEAR == 60).
+ADULT_AGE = 16 * DAYS_PER_YEAR     # childhood ends ~16 yrs: full capability + a vocation
+BREED_MIN_AGE = 18 * DAYS_PER_YEAR
+BREED_MAX_AGE = 45 * DAYS_PER_YEAR
+BREED_COOLDOWN_DAYS = 14.0         # game-days between a mother's children (births must outpace attrition)
+BOND_WARMTH = 0.30                 # mutual sentiment at which two adults pair off
+POP_CAP = 36                       # ceiling on band size (performance + ecology)
+TRAIT_MUTATION = 0.08              # how far a child's nature drifts from the parental mean
+RENOWN_LEGACY = 0.25               # share of a parent's standing that passes to each child
+
 # ─── Live-sim material sourcing (Phase 3.5) ──────────────────────────────────
 # The raws the crafting registry (crafting.py) consumes are drawn from the living
 # map, each gated by the right tool (see crafting.RAW): fiber from grasses, clay
@@ -1150,6 +1165,7 @@ class World:
             "action": "wander",                          # current body behaviour (for the renderer)
         })
         mind.ensure_mind(self.people[-1], self.rng)      # attach mind + roll temperament
+        return self.people[-1]
 
     def _add_structure(self, kind: str, x: int, y: int, by: str = "?") -> str:
         sid = "s_" + uuid.uuid4().hex[:8]
@@ -1201,8 +1217,20 @@ class World:
             jx = int(np.clip(bx + self.rng.integers(-spread, spread + 1), 0, W - 1))
             jy = int(np.clip(by + self.rng.integers(-spread, spread + 1), 0, H - 1))
             placed.append(self._nearest_waterside(jx, jy, max_r=14))
+        start = len(self.people)
         for px, py in placed:
             self._add_person(px, py)
+        # Found some COUPLES so families — and a next generation — can begin from day one: pair
+        # opposite-sex founders, settle each pair on a shared homesite, and start them bonded.
+        founders = self.people[start:]
+        males = [p for p in founders if p["sex"] == 0]
+        females = [p for p in founders if p["sex"] == 1]
+        for m, f in zip(males, females):
+            if self.rng.random() < 0.75:
+                m["partner"], f["partner"] = f["id"], m["id"]
+                f["home"], f["x"], f["y"] = m["home"], m["x"], m["y"]   # she joins his homesite
+                mind._rel(m, f, 0.0).update(trust=0.85, sentiment=0.65)
+                mind._rel(f, m, 0.0).update(trust=0.85, sentiment=0.65)
 
     # ── people: the body loop (cheap, rule-based, no LLM) ───────────────────────
     def _tick_people(self, dt_game_min: float):
@@ -1340,9 +1368,11 @@ class World:
             if p["hp"] <= 0 or p["age"] > PERSON["max_age"]:
                 dead.append(p)
 
-        # Social pass: people in sight of one another notice, gossip, and trade. Cheap —
-        # the population is tiny — and it's where reputation and the barter economy emerge.
+        # Social pass: people in sight of one another notice, gossip, trade — and adults pair
+        # off. Then the band may bear children. This is where reputation, the barter economy
+        # and now lineage all emerge.
         self._tick_minds_social()
+        self._tick_reproduction()
 
         for p in dead:
             if p["age"] > PERSON["max_age"]:
@@ -1351,6 +1381,7 @@ class World:
                 cause = min((("thirst", p.get("hydration", 1.0)), ("hunger", p.get("satiety", 1.0)),
                              ("exhaustion", p.get("stamina", 1.0))), key=lambda kv: kv[1])[0]
             self._note("death", f"{p['name']} died of {cause}.")
+            self._bequeath(p)                                # home + a share of standing pass to kin
             # Those who knew the dead carry it: a heavy, durable memory.
             for q in self.people:
                 if q is p:
@@ -1374,6 +1405,8 @@ class World:
                     self._note("social", ev)
                 # Knowledge spreads soul to soul: a trusted neighbour passes on a craft.
                 self._maybe_teach(a, b)
+                # Two warm, unattached adults may pair off — the start of a family line.
+                self._maybe_bond(a, b)
                 # Generosity: whoever has resolved to *provide* gives, if they're beside
                 # the other and carry a surplus — a one-way gift, the warmest social act.
                 if mind._manhattan(a, b) <= 1:
@@ -1394,6 +1427,96 @@ class World:
                                 if ev:
                                     self._note("social", ev)
                                 break
+
+    # ── generations: bonding, birth, inheritance (Phase 4) ───────────────────────
+    def _maybe_bond(self, a, b):
+        """Two unattached adults of opposite sex who have grown warm and trusting pair off into
+        a lifelong bond — the seed of a family. Bonds are mutual and exclusive."""
+        if a.get("partner") or b.get("partner") or a["sex"] == b["sex"]:
+            return
+        if a["age"] < BREED_MIN_AGE or b["age"] < BREED_MIN_AGE:
+            return
+        if not (a.get("home_struct") and b.get("home_struct")):
+            return
+        ra, rb = a.get("rel", {}).get(b["id"], {}), b.get("rel", {}).get(a["id"], {})
+        if (ra.get("sentiment", 0) >= BOND_WARMTH and rb.get("sentiment", 0) >= BOND_WARMTH
+                and ra.get("trust", 0) >= 0.5 and rb.get("trust", 0) >= 0.5):
+            a["partner"], b["partner"] = b["id"], a["id"]
+            self._note("social", f"{a['name']} and {b['name']} became partners.")
+            for one, two in ((a, b), (b, a)):
+                mind.remember(one, f"{two['name']} and I became partners", 0.9, "social", self.clock)
+
+    def _tick_reproduction(self):
+        """Bonded, mature, well-fed and sheltered partners who are together may bear a child —
+        gated by a mother's cooldown, the partners' nourishment (a resource check) and a band
+        population ceiling, so the line grows slowly and only when the band can support it."""
+        by_id = {p["id"]: p for p in self.people}
+        # Cohabitation: a partner without a roof moves into the other's home, so a couple shares
+        # one hearth (and is together when a child might come). Cheap, runs every social tick.
+        for p in self.people:
+            partner = by_id.get(p.get("partner"))
+            if partner and not p.get("home_struct") and partner.get("home_struct"):
+                p["home_struct"], p["home"] = partner["home_struct"], partner["home"]
+                p["insul"] = partner.get("insul", 1.0)
+        if len(self.people) >= POP_CAP:
+            return
+        for m in self.people:
+            if m["sex"] != 1 or not (BREED_MIN_AGE <= m["age"] <= BREED_MAX_AGE):
+                continue
+            if self.clock < m.get("breed_cd", 0) or not m.get("home_struct"):
+                continue
+            f = by_id.get(m.get("partner"))
+            if f is None or not (BREED_MIN_AGE <= f["age"] <= BREED_MAX_AGE):
+                continue
+            if mind._manhattan(m, f) > mind.SOCIAL_RADIUS:
+                continue                                     # the partners must be together
+            if m.get("satiety", 1) < 0.6 or f.get("satiety", 1) < 0.6:
+                continue                                     # only a well-fed pair (resource gate)
+            self._birth(m, f)
+            if len(self.people) >= POP_CAP:
+                break
+
+    def _birth(self, mother, father):
+        """A child is born into the family home. Its NATURE is a blend of its parents' (plus a
+        little drift), but its KNOWLEDGE is blank beyond the universal starters — culture is not
+        inherited, it must be taught afresh, so a band's crafts can grow or be lost across lives."""
+        hx, hy = mother["home"]
+        child = self._add_person(int(hx), int(hy), age=0.0)
+        mt, ft = mother.get("traits", {}), father.get("traits", {})
+        child["traits"] = {t: round(float(np.clip((mt.get(t, 0.5) + ft.get(t, 0.5)) / 2
+                           + self.rng.normal(0.0, TRAIT_MUTATION), 0.1, 0.9)), 2) for t in mind.TRAITS}
+        child["home_struct"] = mother.get("home_struct")     # sheltered in the family home
+        child["insul"] = mother.get("insul", 1.0)
+        child["parents"] = [mother["id"], father["id"]]
+        child["lineage"] = mother.get("lineage") or father.get("lineage") or father["name"]
+        for parent in (mother, father):
+            parent.setdefault("children", []).append(child["id"])
+            mind._rel(parent, child, self.clock).update(trust=0.95, sentiment=0.7)
+            mind._rel(child, parent, self.clock).update(trust=0.95, sentiment=0.7)
+        mother["breed_cd"] = self.clock + BREED_COOLDOWN_DAYS * 1440.0
+        self.version += 1
+        self._note("birth", f"{mother['name']} and {father['name']} had a child — {child['name']}.")
+        mind.remember(mother, f"my child {child['name']} was born", 0.95, "birth", self.clock)
+        mind.remember(father, f"my child {child['name']} was born", 0.9, "birth", self.clock)
+
+    def _bequeath(self, dead):
+        """When a soul dies, a share of their standing passes to each child (the renown of a
+        line endures), and their home passes to an heir who needs one — a child still without a
+        roof, else the surviving partner — so a raised home outlives its builder."""
+        for q in self.people:
+            if q is not dead and dead["id"] in q.get("parents", []):
+                q["renown"] = q.get("renown", 0.0) + RENOWN_LEGACY * dead.get("renown", 0.0)
+        home = dead.get("home_struct")
+        if not home:
+            return
+        kids = [q for q in self.people if q is not dead and dead["id"] in q.get("parents", [])]
+        heir = next((q for q in kids if q.get("home_struct") in (None, home)), None)
+        if heir is None and dead.get("partner"):
+            heir = next((q for q in self.people if q["id"] == dead["partner"]), None)
+        if heir is not None and heir.get("home_struct") != home:
+            heir["home_struct"], heir["home"], heir["insul"] = home, dead["home"], dead.get("insul", 1.0)
+            self._note("birth", f"{heir['name']} inherited {dead['name']}'s home.")
+            mind.remember(heir, f"I inherited {dead['name']}'s home", 0.8, "build", self.clock)
 
     def _perceive(self, x, y):
         """Build this person's small perception windows (edible/drinkable/tree/stone)
@@ -1506,9 +1629,12 @@ class World:
         unsolved = self._person_unsolved(p)        # what THIS soul hasn't worked out yet
         gear = [r for r in ("leaf_flask", "forage_sack", "sleeping_mat") if self._person_knows(p, r)]
         needs_gear = any(p.get("inv", {}).get(r, 0) < 1 for r in gear)
-        proj = self._project_for(p)          # the soul's standing life-project (climb the dwelling ladder)
+        # Children don't build, take a calling, or pursue projects — they grow, forage, play and
+        # learn (survival + belonging + curiosity) until they come of age.
+        is_child = p["age"] < ADULT_AGE
+        proj = None if is_child else self._project_for(p)   # standing life-project (dwelling ladder, monument)
         p["project"] = proj                  # stash so the body can pursue it (the mind only weighs it)
-        voc = mind.vocation(p)               # the soul's calling (division of labour)
+        voc = None if is_child else mind.vocation(p)        # the soul's calling (division of labour)
         p["vocation"] = voc
         return {
             "needs_gear": needs_gear,
@@ -2554,6 +2680,16 @@ class World:
                     d["crafting"] = {"rid": c["rid"], "out": c["out"],
                                      "pct": round(max(0.0, 1.0 - c["left"] / c["total"]), 3),
                                      "left_min": round(c["left"], 1)}
+                # Resolve kin to names for the inspector's family panel, and the life stage.
+                nm = {q["id"]: q["name"] for q in self.people}
+                d["stage"] = "child" if p["age"] < ADULT_AGE else ("elder" if p["age"] > 0.8 * PERSON["max_age"] else "adult")
+                d["age_years"] = round(p["age"] / DAYS_PER_YEAR, 1)
+                d["kin"] = {
+                    "partner": nm.get(p.get("partner")),
+                    "parents": [nm[i] for i in p.get("parents", []) if i in nm],
+                    "children": [nm[i] for i in p.get("children", []) if i in nm],
+                    "lineage": p.get("lineage"),
+                }
                 return d
         return None
 
@@ -2595,6 +2731,9 @@ class World:
                    + (f"; struggling: {', '.join(distress[:6])}" if distress else "; all faring well")
                    + (f". They have raised {built} building{'s' if built != 1 else ''}"
                       f" ({len(self.blocks)} tiles laid). " if built or self.blocks else ". "))
+            kids = sum(1 for q in self.people if q["age"] < ADULT_AGE)
+            if kids:
+                ppl += f"{kids} of them are children. "
             vocs = {}
             for q in self.people:
                 if q.get("home_struct") and q.get("vocation"):

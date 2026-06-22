@@ -4231,6 +4231,16 @@ function renderPersonPanel(p) {
                : r < 1.0 ? 'esteemed' : 'renowned';
     return `<div class="wp-standing">Standing <b>${tier}</b><em>renown ${r.toFixed(2)}</em></div>`;
   };
+  const kinLine = (k) => {
+    if (!k) return '';
+    const bits = [];
+    if (k.partner) bits.push(`partnered with ${escapeHtml(k.partner)}`);
+    if (k.parents && k.parents.length) bits.push(`child of ${k.parents.map(escapeHtml).join(' & ')}`);
+    if (k.children && k.children.length) bits.push(`${k.children.length} child${k.children.length > 1 ? 'ren' : ''}: ${k.children.map(escapeHtml).join(', ')}`);
+    if (!bits.length) return '';
+    const line = bits.join(' · ') + (k.lineage ? ` · of the ${escapeHtml(k.lineage)} line` : '');
+    return `<div class="wp-kin">${line}</div>`;
+  };
   const traits = p.traits || {}, values = p.values || {};
   const trait = (k) => {
     const base = traits[k] || 0, drift = values[k] || 0;
@@ -4258,7 +4268,8 @@ function renderPersonPanel(p) {
   if (title) title.textContent = p.name || 'Soul';
   const age = p.age != null ? `${p.age.toFixed(1)} days` : '—';
   body.innerHTML =
-    `<div class="wp-sub">${escapeHtml(p.action || 'idle')} · age ${age}${p.vocation ? ' · ' + escapeHtml(p.vocation) : ''}</div>` +
+    `<div class="wp-sub">${escapeHtml(p.action || 'idle')} · ${p.stage ? escapeHtml(p.stage) + ' ' : ''}age ${age}${p.vocation ? ' · ' + escapeHtml(p.vocation) : ''}</div>` +
+    kinLine(p.kin) +
     craftLine +
     (p.intent ? `<div class="wp-intent">“${escapeHtml(p.intent)}”</div>` : '') +
     (p.say ? `<div class="wp-say">💬 ${escapeHtml(p.say)}</div>` : '') +
