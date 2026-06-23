@@ -349,6 +349,12 @@ MONUMENT_BP = "gathering"          # the communal status build raised once a sou
 RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05)
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
+# Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
+# CO_OP_MIN builders are on hand (it takes several to raise a beam), so a lone soul can't grind it
+# out alone and the band's ambitious converge into a crew (up to CO_OP_CREW_MAX) to raise it.
+CO_OP_MIN = 2                      # builders that must be present at a communal site to lay a tile
+CO_OP_CREW_MAX = 4                 # most builders that will join one communal build
+CO_OP_RANGE = 6                    # how near the site a crew-mate counts as "on hand"
 PLY_WOOD_STOCK = 14                # a woodcutter plying their trade stocks timber up to this
 
 # ─── Generations & lineage (Phase 4) ─────────────────────────────────────────
@@ -2271,9 +2277,11 @@ class World:
         # hall was orphaned by its raiser's death, adopt and finish it rather than starting anew.
         if proj and proj.get("kind") == "monument":
             if self._person_site(p) is None:
-                orphan = self._orphaned_monument()
-                if orphan is not None:
-                    p["site"] = orphan["id"]
+                # Join an in-progress communal build (the crew), or adopt an orphaned one, before
+                # founding a fresh hall — so the band raises ONE monument together, not many alone.
+                join = self._communal_build_to_join(p) or self._orphaned_monument()
+                if join is not None:
+                    p["site"] = join["id"]
             act = self._pursue_building(p, proj["bp"], getters, communal=True)
             if act:
                 return act
@@ -2478,6 +2486,35 @@ class World:
                 return s
         return None
 
+    def _communal_in_progress(self) -> bool:
+        """Is any communal monument currently being raised (unfinished)?"""
+        return any((s["bp"] == MONUMENT_BP or s.get("communal")) and not s["done"] for s in self.sites)
+
+    def _site_crew(self, site_id) -> list:
+        """The living builders currently assigned to a site."""
+        return [q for q in self.people if q.get("site") == site_id]
+
+    def _communal_build_to_join(self, p):
+        """An in-progress communal build whose crew isn't yet full and is nearest to `p` — so an
+        ambitious soul joins the group effort rather than each starting their own hall."""
+        best, bd = None, 1e9
+        for s in self.sites:
+            if s["done"] or not (s["bp"] == MONUMENT_BP or s.get("communal")):
+                continue
+            if len(self._site_crew(s["id"])) >= CO_OP_CREW_MAX:
+                continue
+            d = abs(s["ox"] - p["x"]) + abs(s["oy"] - p["y"])
+            if d < bd:
+                best, bd = s, d
+        return best
+
+    def _site_crew_present(self, site) -> int:
+        """How many of the site's crew are ON HAND (near the footprint) — the bodies available to
+        lay a heavy communal tile this beat."""
+        ox, oy = site["ox"], site["oy"]
+        return sum(1 for q in self._site_crew(site["id"])
+                   if abs(q["x"] - ox) + abs(q["y"] - oy) <= CO_OP_RANGE)
+
     def _project_for(self, p):
         """The soul's standing life-project once survival & first shelter are met: climb the
         dwelling ladder to a snugger home. Returns a project dict {kind, bp, why} or None
@@ -2502,14 +2539,17 @@ class World:
         if mine_inprog:
             return mon                                         # I'm the one building it — keep at it
         band_has_hall = any(s["bp"] == MONUMENT_BP and s["done"] for s in self.sites)
-        # Only a hall someone LIVING is still raising counts as taken; one whose builder died is
-        # orphaned and may be adopted (handled in the executor), so it never blocks the band.
-        live_sites = {q.get("site") for q in self.people}
-        someone_building = any(s["bp"] == MONUMENT_BP and not s["done"] and s["id"] in live_sites
-                               for s in self.sites)
-        if (has_real_home and not band_has_hall and not someone_building
-                and mind._trait(p, "ambition") >= AMBITION_MONUMENT):
-            return mon                                         # an ambitious soul undertakes (or adopts) it
+        # A communal build is a GROUP effort: an ambitious soul undertakes one, OR joins an
+        # in-progress one whose crew isn't full — so the band's builders converge to raise it
+        # together (a lone soul can't lay its heavy tiles; see _build_next_block). Only begun when
+        # the band actually has a crew's worth of ambitious builders, so no one commits to a hall
+        # they could never raise alone.
+        ambitious_housed = sum(1 for q in self.people if q.get("home_struct")
+                               and mind._trait(q, "ambition") >= AMBITION_MONUMENT)
+        if (has_real_home and not band_has_hall and ambitious_housed >= CO_OP_MIN
+                and mind._trait(p, "ambition") >= AMBITION_MONUMENT
+                and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
+            return mon
         # Otherwise keep climbing the dwelling ladder to a snugger home.
         if i + 1 < len(DWELLING_LADDER):
             nxt = DWELLING_LADDER[i + 1]
@@ -2795,6 +2835,11 @@ class World:
             self._finish_site(p, site)
             return
         if max(abs(task["x"] - p["x"]), abs(task["y"] - p["y"])) > 2:
+            return
+        # Cooperative big-builds: a communal monument's tiles are too heavy for one — they're laid
+        # only when a crew of CO_OP_MIN is on hand. A lone builder waits at the site (the join logic
+        # draws others in), so raising the hall is a genuine group effort, not a solo grind.
+        if site.get("communal") and self._site_crew_present(site) < CO_OP_MIN:
             return
         item, qty = task["cost"]
         if p["inv"].get(item, 0) < qty:
@@ -4151,6 +4196,29 @@ if __name__ == "__main__":
     tool_gate_ok = tmk_can and builder_blocked and gifted_ok
     print(f"  tool-gating test: toolmaker-only={tmk_can} builder-can't-make={builder_blocked} "
           f"axe-gifted-to-builder={gifted_ok} -> {'OK' if tool_gate_ok else 'FAILED'}")
+
+    # COOPERATIVE BIG-BUILDS — a communal monument's tiles need a crew (CO_OP_MIN) on hand: a
+    # lone builder can't lay them; a second crew-mate present unblocks the work.
+    wcb = World().generate(seed=7); wcb.people = []
+    cby, cbx = np.argwhere((wcb.water == WATER_NONE) & (wcb.biome == B["grassland"]))[
+        len(np.argwhere((wcb.water == WATER_NONE) & (wcb.biome == B["grassland"]))) // 2]
+    wcb._add_person(int(cbx), int(cby), name="Mason1"); ma = wcb.people[0]
+    ma["home"] = (int(cbx), int(cby)); ma["inv"] = {"wood": 50, "fiber": 20}
+    wcb._found_site(ma, MONUMENT_BP, communal=True)
+    csite = wcb._person_site(ma)
+    coop_ok = False
+    if csite:
+        tsk = wcb._site_next_task(csite); ma["x"], ma["y"] = tsk["x"], tsk["y"]
+        n0 = len(wcb.blocks)
+        wcb._build_next_block(ma)                          # alone — crew 1 < CO_OP_MIN → blocked
+        solo_blocked = len(wcb.blocks) == n0
+        wcb._add_person(int(tsk["x"]), int(tsk["y"]), name="Mason2"); mb = wcb.people[1]
+        mb["site"] = csite["id"]; mb["inv"] = {"wood": 50}
+        wcb._build_next_block(ma)                          # crew 2 ≥ CO_OP_MIN → tile lays
+        crew_builds = any(t["done"] for t in csite["tasks"])
+        coop_ok = solo_blocked and crew_builds
+    print(f"  co-op build test: lone-builder-blocked={solo_blocked if csite else '?'} "
+          f"crew-of-two-builds={crew_builds if csite else '?'} -> {'OK' if coop_ok else 'FAILED'}")
 
     # STAKES — exposure & predation give a roof and the band real survival worth.
     wx = World().generate(seed=7); wx.people = []
