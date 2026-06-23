@@ -150,6 +150,9 @@ def need_urgency(comfort: float, reserve: float = 1.0) -> float:
     danger = (1.0 - reserve) * RESERVE_TILT + max(0.0, DANGER_RESERVE - reserve) * DANGER_SLOPE
     return desire + danger
 HYSTERESIS = 0.12            # an intention must be beaten by this margin to be dropped
+BUILD_MOMENTUM = 0.35       # sunk-cost pull: a fully-underway build adds this much to its drive,
+                            # so a half-raised home is FINISHED rather than abandoned mid-wall for
+                            # some lesser whim (the user's "houses never get done" complaint)
 SOCIAL_FORGET = 1440.0      # a day alone fully "lonelies" a sociable soul
 VALUE_CAP = 0.25            # how far lived experience can bend a trait
 
@@ -397,10 +400,13 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         out.append(("flee", None, (0.5 + 0.55 * danger) * (0.7 + 0.6 * cau),
                     "a wolf is near — get to safety"))
 
-    # Shelter & ambition — a home of one's own is half survival, half pride.
+    # Shelter & ambition — a home of one's own is half survival, half pride. A build already
+    # underway adds sunk-cost MOMENTUM so it gets finished rather than dropped mid-wall.
+    momentum = BUILD_MOMENTUM * _clamp01(ctx.get("build_progress", 0.0))
     if p.get("home_struct") is None:
         # A roofless soul out in foul weather feels the lack keenly — hurry the shelter up.
-        out.append(("build", None, 0.5 + 0.18 * amb + 0.25 * exposed, "I must raise a roof of my own"))
+        out.append(("build", None, 0.5 + 0.18 * amb + 0.25 * exposed + momentum,
+                    "I must raise a roof of my own"))
     elif ctx.get("needs_gear"):
         # A roof is up but the band has worked out make-shift gear this soul still lacks
         # (a water flask, say) — worth the effort to fashion it.
@@ -423,7 +429,7 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
             # crisis — a soul must never march off to forage timber while quietly dying of
             # thirst inland, out of reach of a passing sip.
             comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
-            u = (0.22 + 0.22 * amb + 0.12 * cur) * comfort
+            u = (0.22 + 0.22 * amb + 0.12 * cur) * comfort + momentum
             out.append(("build", None, u, proj.get("why") or "I'll make my home finer"))
         else:
             out.append(("build", None, 0.10 * amb, "I could make my home finer"))
@@ -912,6 +918,15 @@ if __name__ == "__main__":
     bu_wet = next(u for kd, _, u, _ in wet if kd == "build")
     assert bu_wet > bu_dry, (bu_dry, bu_wet)
     print("fear/exposure OK -> wolf=flee, exposure lifts the roofless build", round(bu_dry, 2), "->", round(bu_wet, 2))
+
+    # BUILD MOMENTUM — a half-raised project pulls harder than an unstarted one, so it gets
+    # finished instead of abandoned mid-wall. A settled soul mid-build should out-pull socializing.
+    bm = mk("Tove", 0); bm["home_struct"] = "s"; bm["traits"]["ambition"] = 0.5
+    proj_ctx = {**base, "project": {"why": "raise a snug hut"}}
+    fresh = next(u for kd, _, u, _ in drives(bm, {**proj_ctx, "build_progress": 0.0}) if kd == "build")
+    underway = next(u for kd, _, u, _ in drives(bm, {**proj_ctx, "build_progress": 0.9}) if kd == "build")
+    assert underway > fresh + 0.2, (fresh, underway)
+    print("momentum OK -> mid-build pull", round(fresh, 2), "->", round(underway, 2))
 
     # identity crystallizes from what you do: a habitual builder grows ambitious
     builder = mk("Tam", 0)

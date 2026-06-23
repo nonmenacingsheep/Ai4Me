@@ -112,6 +112,12 @@ WET_DURATION = 90.0                 # game-minutes a soul stays wet after wading
 SEEN_FORGET = 720.0                 # game-minutes a remembered sighting of someone stays worth chasing
 KNAP_CHOPS = 6                      # hand-chops of wood before a soul works out the axe (knaps a sharp edge)
 GATHER_WORK = 2.5                   # game-minutes of hand-work per armful of leaves/fiber (so it's SEEN, not instant)
+# Real labour takes real time: chopping a log, prying out stone and laying a building tile each
+# take game-minutes of dwell (like gathering), so a soul is SEEN working rather than filling its
+# pack or raising a wall in a blink. An axe roughly halves the felling work (see _chop_work).
+CHOP_WORK  = 4.0                    # game-min to fell an armful of wood by hand (an axe cuts this down)
+MINE_WORK  = 5.0                    # game-min to pry loose a measure of stone
+BUILD_WORK = 4.0                    # game-min of labour to lay one building tile
 # The eight step directions, used by the obstacle-aware walker to slide around barriers
 # instead of freezing nose-to-the-water (the old greedy single-step just stopped dead).
 _STEP_DIRS = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
@@ -1610,12 +1616,14 @@ class World:
                         p["inv"]["fish"] = p["inv"].get("fish", 0) + 1
                         self.version += 1
             elif action == "chop":
-                if tree[ly, lx]:
+                # Felling wood is slow, dwelt-on labour; an axe roughly halves the work.
+                has_axe = p["inv"].get("axe", 0) > 0
+                chop_work = CHOP_WORK * (0.5 if has_axe else 1.0)
+                if tree[ly, lx] and self._work_ready(p, "chop", dt_game_min, chop_work):
                     self.veg_growth[y, x] = max(0.0, float(self.veg_growth[y, x]) - BUILD["chop_take"])
                     if self.veg_growth[y, x] <= 0.05:        # felled — the tile clears
                         self.veg_sp[y, x] = VEG_NONE
                         self.veg_growth[y, x] = 0.0
-                    has_axe = p["inv"].get("axe", 0) > 0
                     gain = BUILD["chop_yield"] + (BUILD["axe_bonus"] if has_axe else 0)
                     p["inv"]["wood"] = p["inv"].get("wood", 0) + gain
                     # Hacking wood by hand is hard, slow work — and out of that struggle a soul
@@ -1628,7 +1636,7 @@ class World:
                                 rationale="a sharpened stone bites far deeper than bare hands — an axe!"):
                             self._note("discovery", f"{p['name']} worked out how to make a crude axe.")
             elif action == "mine":
-                if stone[ly, lx]:
+                if stone[ly, lx] and self._work_ready(p, "mine", dt_game_min, MINE_WORK):
                     p["inv"]["stone"] = p["inv"].get("stone", 0) + BUILD["mine_yield"]
             elif action == "gather_fiber":
                 g = float(self.veg_growth[y, x])
@@ -1653,7 +1661,10 @@ class World:
             elif action == "found_site":
                 self._found_site(p, p.pop("next_bp", "leaf_shelter"), communal=p.pop("next_communal", False))
             elif action == "build_block":
-                self._build_next_block(p)
+                # Laying a tile is real labour — dwell on it. (The cabin self-test calls
+                # _build_next_block directly, bypassing this timer, so it stays one-per-call.)
+                if self._work_ready(p, "build", dt_game_min, BUILD_WORK):
+                    self._build_next_block(p)
             # Seeking and wandering move the body; acting-in-place does not.
             if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
                           "seek_fiber", "seek_leaves", "seek_berry", "hunt", "fish",
@@ -1981,6 +1992,11 @@ class World:
         is_child = p["age"] < ADULT_AGE
         proj = None if is_child else self._project_for(p)   # standing life-project (dwelling ladder, monument)
         p["project"] = proj                  # stash so the body can pursue it (the mind only weighs it)
+        # How far along the soul's current build is (0..1) — sunk-cost momentum so a half-raised
+        # structure pulls harder and gets FINISHED rather than abandoned for some other whim.
+        site = None if is_child else self._person_site(p)
+        build_progress = (sum(1 for t in site["tasks"] if t["done"]) / len(site["tasks"])
+                          if site and site.get("tasks") else 0.0)
         voc = None if is_child else mind.vocation(p)        # the soul's calling (division of labour)
         p["vocation"] = voc
         needs_hearth = (not is_child and p.get("home_struct") is not None
@@ -2007,6 +2023,7 @@ class World:
             # caught out in foul weather without a roof (exposed). Both cached this tick.
             "danger": p.get("_danger", 0.0),
             "exposed": p.get("_exposed", 0.0),
+            "build_progress": build_progress,
         }
 
     def _person_decide(self, p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly):
@@ -2731,18 +2748,25 @@ class World:
                       "build", self.clock)
         self._earn_renown(p, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
 
-    def _gather_ready(self, p, key, dt) -> bool:
-        """Spread a hand-gather over visible game-time: True (and resets) only once GATHER_WORK
-        minutes of work have accrued at the task, so a soul is SEEN working an armful loose rather
-        than filling its pack in a blink. Keyed per material so switching tasks banks no stale work."""
+    def _work_ready(self, p, key, dt, work: float) -> bool:
+        """Spread a piece of manual labour over visible game-time: returns True (and resets the
+        timer) only once `work` game-minutes have accrued at this task. Keyed by `key`, so
+        switching to a different job banks no stale progress (one timer slot per soul, since a
+        soul does one thing at a time). Powers timed gathering, chopping, mining and building —
+        so a soul is SEEN working rather than completing in a blink."""
         gw = p.get("gwork")
         if not gw or gw.get("k") != key:
             gw = {"k": key, "t": 0.0}
             p["gwork"] = gw
         gw["t"] += dt
-        if gw["t"] >= GATHER_WORK:
+        if gw["t"] >= work:
             gw["t"] = 0.0
             return True
+        return False
+
+    def _gather_ready(self, p, key, dt) -> bool:
+        """Thin wrapper: an armful of leaves/fiber takes GATHER_WORK game-min of hand-work."""
+        return self._work_ready(p, key, dt, GATHER_WORK)
         return False
 
     def _passable(self, nx, ny) -> bool:
