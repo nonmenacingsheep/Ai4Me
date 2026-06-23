@@ -4476,8 +4476,21 @@ function worldOnTick(msg) {
     census: msg.census, version: msg.version,
   });
   WORLD._lastTickWall = performance.now();   // for the delivery-lag indicator
-  if (activeView === 'world') { updateWorldHud(); startWorldAnim(); }
+  if (activeView === 'world') { updateWorldHud(); startWorldAnim(); maybeRefreshFoliage(); }
   if (WORLD._personId != null) refreshPersonPanel(false);   // keep the open inspector live
+}
+
+// The crisp veg/foliage layer is only re-fetched when the camera moves, so gathered/chopped
+// flora and felled trees never visibly cleared while watching a still view. Re-pull the current
+// detail window on a gentle throttle so depletion (and building-cleared ground) shows live.
+let _wFoliageRefreshT = 0;
+function maybeRefreshFoliage() {
+  if (!WORLD.data || !WORLD.data.detail) return;          // only when zoomed into detail
+  const now = performance.now();
+  if (now - _wFoliageRefreshT < 2500) return;
+  _wFoliageRefreshT = now;
+  _wDetailKey = '';                                        // force refreshWorldDetail to re-fetch
+  refreshWorldDetail();
 }
 
 // Terrain/flora was reshaped (a god acted) — pull a fresh snapshot, debounced.

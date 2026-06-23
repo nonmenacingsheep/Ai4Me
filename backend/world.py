@@ -481,6 +481,9 @@ FIBER_IDS = [sp for sp, info in PLANTS.items() if info["name"] in FIBER_PLANTS]
 # person can lug a big bundle. They build the quick leaf shelter (but insulate poorly).
 LEAF_PLANTS = {"oak", "pine", "palm", "shrub"}
 LEAF_IDS = [sp for sp, info in PLANTS.items() if info["name"] in LEAF_PLANTS]
+WOOD_IDS = [sp for sp, info in PLANTS.items() if info["name"] in WOOD_PLANTS]
+WATER_BUILD_BUFFER = 2      # tiles a soul keeps between a new building and water (flood-shy, but
+                            # close enough that the walk to drink doesn't kill them — 3 was too far)
 LEAF_GATHER = 3                          # leaves gained per pull (vs. 1 for fiber)
 LEAF_CAP = 24                            # a person can carry a big bundle of leaves
 ORE_KINDS = ("copper_ore", "tin_ore", "iron_ore", "gold_ore", "coal")
@@ -2553,16 +2556,41 @@ class World:
         centre of the settled homes — once GRANARY_MIN_HOUSED souls have roofs, the moment a band
         is established enough to keep a commons. Returns the store dict to deposit into / draw from."""
         g = self.granary
+        if g.get("x") is not None:
+            self._relocate_granary_if_stranded()         # self-heal a stranded/under-water granary
         if g.get("x") is None:
             housed = [q for q in self.people if q.get("home_struct")]
             if len(housed) >= GRANARY_MIN_HOUSED:
-                g["x"] = int(sum(q["home"][0] for q in housed) / len(housed))
-                g["y"] = int(sum(q["home"][1] for q in housed) / len(housed))
-                self._add_structure("granary", g["x"], g["y"], by="the band")
+                cx = int(sum(q["home"][0] for q in housed) / len(housed))
+                cy = int(sum(q["home"][1] for q in housed) / len(housed))
+                gx, gy = self._dry_spot_near(cx, cy)     # the centroid can fall in a lake — nudge to dry land
+                g["x"], g["y"] = gx, gy
+                self._add_structure("granary", gx, gy, by="the band")
                 self._note("build", "The band raised a common granary — a shared store against lean days.")
             else:
                 return None
         return g["store"]
+
+    def _dry_spot_near(self, cx, cy):
+        """The nearest buildable tile to (cx,cy): on land, set back from water (flood-shy) and
+        not already built on. Spirals outward; falls back to merely-dry, then to the point itself,
+        so a granary/structure never lands in the water even when the home centroid does."""
+        occ = self._occupied_tiles()
+
+        def ok(x, y, buffered):
+            if not self._in(x, y) or self.water[y, x] != WATER_NONE or (x, y) in occ:
+                return False
+            return not (buffered and self._water_within(x, y, WATER_BUILD_BUFFER))
+
+        for buffered in (True, False):                   # prefer a flood-shy spot, else any dry land
+            for r in range(0, 24):
+                for dx in range(-r, r + 1):
+                    for dy in range(-r, r + 1):
+                        if max(abs(dx), abs(dy)) != r:
+                            continue
+                        if ok(cx + dx, cy + dy, buffered):
+                            return cx + dx, cy + dy
+        return cx, cy
 
     def _deposit_home(self, p):
         """Resting at home, a soul banks the surplus food/water it is carrying above its travel
@@ -2941,16 +2969,101 @@ class World:
                 return t
         return None
 
-    def _blueprint_tasks(self, name, ox, oy, occupied=None):
+    def _water_within(self, x, y, r: int) -> bool:
+        """Is there any water within r tiles of (x,y)? Used to keep buildings back from the
+        shore (flood-shy siting)."""
+        y0, y1 = max(0, y - r), min(H, y + r + 1)
+        x0, x1 = max(0, x - r), min(W, x + r + 1)
+        return bool(np.any(self.water[y0:y1, x0:x1] != WATER_NONE))
+
+    def _tile_unbuildable(self, tx, ty, occupied, avoid: int):
+        """Why a tile can't take a building tile (a short, human reason), or None if it can — so
+        the same check both rejects a footprint AND lets a soul SAY why it won't build there."""
+        if not self._in(tx, ty):
+            return "off the edge of the world"
+        if self.water[ty, tx] != WATER_NONE:
+            return "in the water"
+        if (tx, ty) in occupied:
+            return "right where something already stands"
+        if avoid:
+            if self._water_within(tx, ty, avoid):
+                return "too close to the water"
+            if self.veg_sp[ty, tx] in WOOD_IDS and self.veg_growth[ty, tx] > 0.2:
+                return "in among the trees"
+        return None
+
+    def _build_reason(self, name, ox, oy, avoid: int, occupied=None):
+        """The reason a blueprint won't fit at (ox,oy) — the first tile that fails — or None if
+        it fits. Lets a soul reason aloud about a spot instead of silently giving up."""
+        bp = BLUEPRINTS.get(name)
+        if not bp:
+            return "a building I don't know how to raise"
+        occupied = occupied if occupied is not None else self._occupied_tiles()
+        for dy, row in enumerate(bp["layout"]):
+            for dx, ch in enumerate(row):
+                if ch != GLYPH_CORE and BLOCK_CHARS.get(ch, BLOCK_EMPTY) == BLOCK_EMPTY:
+                    continue
+                why = self._tile_unbuildable(ox + dx, oy + dy, occupied, avoid)
+                if why:
+                    return why
+        return None
+
+    def _tile_waterlocked(self, x, y) -> bool:
+        """Is a land tile cut off by water on every side — somewhere the band can't actually walk
+        to? (A structure stranded like this needs moving.)"""
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                if self._in(nx, ny) and self.water[ny, nx] == WATER_NONE:
+                    return False
+        return True
+
+    def _relocate_granary_if_stranded(self):
+        """Self-heal a granary that ended up unreachable — standing IN the water, or on a scrap of
+        land walled off by it. The band reasons 'we can't get to it' and hauls it to dry ground
+        near the homes. Fixes worlds saved before flood-shy siting, and keeps it honest after."""
+        g = self.granary
+        if g.get("x") is None:
+            return
+        x, y = int(g["x"]), int(g["y"])
+        if self._in(x, y) and self.water[y, x] == WATER_NONE and not self._tile_waterlocked(x, y):
+            return                                       # reachable dry ground — all is well
+        housed = [q for q in self.people if q.get("home_struct")]
+        if housed:
+            cx = int(sum(q["home"][0] for q in housed) / len(housed))
+            cy = int(sum(q["home"][1] for q in housed) / len(housed))
+        else:
+            cx, cy = x, y
+        nx, ny = self._dry_spot_near(cx, cy)
+        if (nx, ny) == (x, y):
+            return
+        g["x"], g["y"] = nx, ny
+        for s in self.structures:
+            if s.get("kind") == "granary":
+                s["x"], s["y"] = nx, ny
+                break
+        self.version += 1
+        self._note("build", "The granary stood where no one could reach it — the band hauled it to dry ground.")
+
+    def _blueprint_tasks(self, name, ox, oy, occupied=None, avoid: int = 0):
         """Turn a blueprint at origin (ox,oy) into placement tasks + the home core tile, or
         (None, None) if the footprint doesn't fit (off-map, over water, or OVERLAPPING an
         existing building/site — which is why shelters used to grow inside one another). Each
         task carries its own material cost so blueprints can mix wood, thatch and leaves.
-        Blocks are laid first, then roof tiles. A 'C' core lays no block but is roofed/home."""
+        Blocks are laid first, then roof tiles. A 'C' core lays no block but is roofed/home.
+        When `avoid` > 0 (autonomous siting) the footprint must also keep that many tiles from
+        water (flood-shy) and never sit on a standing tree — so the band stops building on the
+        shore and over the woods. (God placement passes avoid=0 — the god may build anywhere.)"""
         bp = BLUEPRINTS.get(name)
         if not bp:
             return None, None
         occupied = occupied if occupied is not None else self._occupied_tiles()
+
+        def bad(tx, ty) -> bool:
+            return self._tile_unbuildable(tx, ty, occupied, avoid) is not None
+
         layout = bp["layout"]
         roof_cost = bp.get("roof_cost", ROOF_COST)
         blocks, roof, core = [], [], None
@@ -2958,8 +3071,7 @@ class World:
             for dx, ch in enumerate(row):
                 tx, ty = ox + dx, oy + dy
                 if ch == GLYPH_CORE:
-                    if not self._in(tx, ty) or self.water[ty, tx] != WATER_NONE \
-                            or (tx, ty) in occupied:
+                    if bad(tx, ty):
                         return None, None
                     roof.append({"x": tx, "y": ty, "code": int(BLOCK_FLOOR), "layer": "roof",
                                  "cost": list(roof_cost), "done": False})
@@ -2968,8 +3080,7 @@ class World:
                 code = BLOCK_CHARS.get(ch, BLOCK_EMPTY)
                 if code == BLOCK_EMPTY:
                     continue
-                if not self._in(tx, ty) or self.water[ty, tx] != WATER_NONE \
-                        or (tx, ty) in occupied:
+                if bad(tx, ty):
                     return None, None
                 blocks.append({"x": tx, "y": ty, "code": int(code), "layer": "block",
                                "cost": list(BLOCK_COST[code]), "done": False})
@@ -2995,7 +3106,7 @@ class World:
         """Footprint origins to try, spiralling outward from home so a site lands as close
         as it can but steps away ring by ring when the near ground is taken."""
         offs = [(0, 0)]
-        for r in range(1, 7):
+        for r in range(1, 10):
             for dx in range(-r, r + 1):
                 for dy in range(-r, r + 1):
                     if max(abs(dx), abs(dy)) == r:
@@ -3015,12 +3126,10 @@ class World:
             bw, bh = len(bp["layout"][0]), len(bp["layout"])
             for off in self._site_offsets():
                 ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
-                # Non-overlapping footprint only (so shelters no longer grow inside one
-                # another). We deliberately DON'T force homes far apart: the band settles
-                # tight on the waterside, and pushing a home inland to make room is what
-                # kills people on the commute to drink. The spiral finds the nearest free
-                # spot, which stays by the bank.
-                tasks, core = self._blueprint_tasks(cand, ox, oy, occupied)
+                # Non-overlapping footprint, set back from the water (flood-shy) and off the
+                # trees — the spiral finds the nearest spot that satisfies all three, so homes
+                # cluster a short walk inland from the bank rather than right on the shore.
+                tasks, core = self._blueprint_tasks(cand, ox, oy, occupied, avoid=WATER_BUILD_BUFFER)
                 if not tasks:
                     continue
                 site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
@@ -3037,6 +3146,13 @@ class World:
                 verb = "began a" if communal else "marked out a"
                 self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
                 return
+        # Nowhere fit the footprint — reason about WHY (it'd be in the water / among the trees /
+        # no room) so the soul thinks it through rather than silently giving up, then waits.
+        bw0, bh0 = len(BLUEPRINTS[name]["layout"][0]), len(BLUEPRINTS[name]["layout"])
+        why = self._build_reason(name, bx - bw0 // 2, by - bh0 // 2, WATER_BUILD_BUFFER, occupied) \
+            or "there's just no room here"
+        mind.remember(p, f"I can't raise it here — it'd be {why}.", 0.4, "build", self.clock)
+        mind.speak(p, f"Not here — {why}.", self.clock)
         p["build_cd"] = self.clock + 720.0      # nowhere to build here — try again later
 
     def _build_next_block(self, p):
@@ -3073,10 +3189,12 @@ class World:
 
     def _clear_ground(self, x, y, radius: int = 1):
         """Strip the vegetation under a placed tile and the ring around it — a building stands on
-        cleared, trodden ground, not in a thicket. Cheap, bounded box edit on the veg layer."""
+        cleared, trodden ground, not in a thicket. Clears BOTH the growth and the species, so a
+        tree or shrub the tile sat on actually vanishes (not just shrinks). Cheap box edit."""
         y0, y1 = max(0, y - radius), min(H, y + radius + 1)
         x0, x1 = max(0, x - radius), min(W, x + radius + 1)
         self.veg_growth[y0:y1, x0:x1] = 0.0
+        self.veg_sp[y0:y1, x0:x1] = VEG_NONE
 
     def _earn_renown(self, p, amount: float, why: str) -> None:
         """Raise a soul's social standing for a visible deed, and lodge it as a proud memory."""
@@ -4297,6 +4415,7 @@ class World:
             if not self.stone_nodes:                      # older saves predate boulders — scatter them now
                 self._seed_stone_nodes()
             self.granary = meta.get("granary") or {"store": {}, "x": None, "y": None}
+            self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:
                 self._rebuild_berry_index()
@@ -4951,6 +5070,62 @@ if __name__ == "__main__":
     polish_ok = cleared_ok and stone_ok and stock_ok and craft_home_ok
     print(f"  polish test: ground-cleared={cleared_ok}, stone-nodes={len(wpo.stone_nodes)}>0={stone_ok}, "
           f"stockpiles={stock_ok}, craft-routes-home={craft_home_ok} -> {'OK' if polish_ok else 'FAILED'}")
+
+    # SITING — autonomous builds keep a buffer from water (flood-shy) and off the trees, while the
+    # god (avoid=0) may still build anywhere; and _clear_ground wipes the species, not just growth.
+    wsi = World().generate(seed=5)
+    land = np.argwhere(wsi.water == WATER_NONE)
+    # A real shoreline tile: land with water within a tile. Centre the footprint on it so the
+    # build sits right by the bank — a flood-shy soul refuses it.
+    _lbp = BLUEPRINTS["leaf_shelter"]; _lbw, _lbh = len(_lbp["layout"][0]), len(_lbp["layout"])
+    shore = None
+    for idx in range(0, len(land), max(1, len(land) // 8000)):
+        ly0, lx0 = land[idx]
+        if wsi._water_within(int(lx0), int(ly0), 1):
+            shore = (int(lx0), int(ly0)); break
+    near_rej = shore and wsi._blueprint_tasks("leaf_shelter", shore[0] - _lbw // 2, shore[1] - _lbh // 2,
+                                              avoid=WATER_BUILD_BUFFER)[0] is None
+    dry = None
+    for idx in range(0, len(land), max(1, len(land) // 6000)):
+        ly2, lx2 = land[idx]
+        if not wsi._water_within(int(lx2), int(ly2), WATER_BUILD_BUFFER + 3) \
+                and wsi.veg_sp[ly2, lx2] not in WOOD_IDS:
+            dry = (int(lx2), int(ly2)); break
+    dry_ok = dry and wsi._blueprint_tasks("leaf_shelter", dry[0], dry[1], avoid=WATER_BUILD_BUFFER)[0] is not None
+    # Now blanket that spot with trees: autonomous siting refuses it, the god still may.
+    for yy in range(dry[1] - 1, dry[1] + 4):
+        for xx in range(dry[0] - 1, dry[0] + 4):
+            if wsi._in(xx, yy):
+                wsi.veg_sp[yy, xx] = WOOD_IDS[0]; wsi.veg_growth[yy, xx] = 0.9
+    tree_rej = wsi._blueprint_tasks("leaf_shelter", dry[0], dry[1], avoid=WATER_BUILD_BUFFER)[0] is None
+    god_anywhere = wsi._blueprint_tasks("leaf_shelter", dry[0], dry[1], avoid=0)[0] is not None
+    wsi._clear_ground(dry[0], dry[1])
+    sp_cleared = int(wsi.veg_sp[dry[1], dry[0]]) == VEG_NONE
+    # A soul can SAY why a near-water spot won't do (reasoning about placement).
+    reason_water = wsi._build_reason("leaf_shelter", shore[0] - _lbw // 2, shore[1] - _lbh // 2,
+                                     WATER_BUILD_BUFFER) if shore else None
+    reason_ok = reason_water is not None
+    # Self-heal: a granary stranded in the water is hauled to dry ground (and its marker moves).
+    wet_xy = None
+    if shore:
+        for dyy, dxx in ((0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (-1, -1), (1, -1), (-1, 1)):
+            ny, nx = shore[1] + dyy, shore[0] + dxx
+            if wsi._in(nx, ny) and wsi.water[ny, nx] != WATER_NONE:
+                wet_xy = (nx, ny); break
+    relocated = False
+    if wet_xy:
+        wsi.granary = {"store": {"food": 3}, "x": wet_xy[0], "y": wet_xy[1]}
+        wsi.structures = [{"id": "s_g", "kind": "granary", "x": wet_xy[0], "y": wet_xy[1], "by": "band", "t": 0}]
+        wsi._relocate_granary_if_stranded()
+        gxn, gyn = wsi.granary["x"], wsi.granary["y"]
+        relocated = (wsi.water[gyn, gxn] == WATER_NONE and (gxn, gyn) != wet_xy
+                     and any(s["kind"] == "granary" and (s["x"], s["y"]) == (gxn, gyn) for s in wsi.structures))
+    siting_ok = bool(near_rej and dry_ok and tree_rej and god_anywhere and sp_cleared
+                     and reason_ok and relocated)
+    print(f"  siting test: near-water-refused={bool(near_rej)}, inland-ok={bool(dry_ok)}, "
+          f"tree-refused={tree_rej}, god-anywhere={god_anywhere}, species-cleared={sp_cleared}, "
+          f"reason=\"{reason_water}\", granary-relocated={relocated} "
+          f"-> {'OK' if siting_ok else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the
