@@ -62,7 +62,7 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
-                "befriend", "explore", "avoid", "tend", "tinker", "ply")
+                "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee")
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 # Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
@@ -382,11 +382,25 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         # rest is non-negotiable — only a pressing thirst/hunger (whose danger ramp out-scores
         # this) should wake them. Without this they socialize through the night and waste away.
         fatigue_u = max(fatigue_u, 0.75)
-    out.append(("rest", None, fatigue_u, "weariness drags at me"))
+    # Exposure — caught out in the cold/wet, a soul is pulled to get under cover (rest at home).
+    exposed = _clamp01(ctx.get("exposed", 0.0))
+    if exposed > 0.1:
+        fatigue_u = max(fatigue_u, 0.4 + 0.45 * exposed)
+    out.append(("rest", None, fatigue_u, "I should get out of this weather" if exposed > 0.3
+                else "weariness drags at me"))
+
+    # Fear — a prowling predator nearby overrides ordinary wants: get to safety, the home or the
+    # band (a roof and company are protection). Keenest in cautious souls; scales with how close
+    # the danger is. Pitched to out-score everyday projects/socializing but yield to acute survival.
+    danger = _clamp01(ctx.get("danger", 0.0))
+    if danger > 0.05:
+        out.append(("flee", None, (0.5 + 0.55 * danger) * (0.7 + 0.6 * cau),
+                    "a wolf is near — get to safety"))
 
     # Shelter & ambition — a home of one's own is half survival, half pride.
     if p.get("home_struct") is None:
-        out.append(("build", None, 0.5 + 0.18 * amb, "I must raise a roof of my own"))
+        # A roofless soul out in foul weather feels the lack keenly — hurry the shelter up.
+        out.append(("build", None, 0.5 + 0.18 * amb + 0.25 * exposed, "I must raise a roof of my own"))
     elif ctx.get("needs_gear"):
         # A roof is up but the band has worked out make-shift gear this soul still lacks
         # (a water flask, say) — worth the effort to fashion it.
@@ -669,10 +683,19 @@ def deliberate_messages(p: dict, ctx: dict) -> tuple[str, str]:
     rel_lines = _rel_phrase(p)
     vals = _values_phrase(p)
     inv = ", ".join(f"{k}×{v}" for k, v in (p.get("inv") or {}).items() if v) or "nothing"
+    danger = _clamp01(ctx.get("danger", 0.0))
+    exposed = _clamp01(ctx.get("exposed", 0.0))
+    peril = ""
+    if danger > 0.4:
+        peril += " A WOLF is prowling close — I am not safe out here."
+    elif danger > 0.1:
+        peril += " I sense a wolf somewhere near."
+    if exposed > 0.4:
+        peril += " The weather is harsh and I have no roof over me — I'm chilled to the bone."
     user = (
         f"It is {ctx.get('time_str','day')}, {ctx.get('season','')}, weather {ctx.get('weather','')}.\n"
         f"My body: {needs}. I carry: {inv}. Home: {'built' if p.get('home_struct') else 'none yet'}.\n"
-        f"Nearby: {ctx.get('nearby','no one')}.\n"
+        f"Nearby: {ctx.get('nearby','no one')}.{peril}\n"
         f"What pulls at me (and how strongly): {pulls}.\n"
         + (f"Who I am becoming: {vals}.\n" if vals else "")
         + "What I remember:\n- " + ("\n- ".join(mems) if mems else "not much yet") + "\n"
@@ -877,6 +900,18 @@ if __name__ == "__main__":
     k = deliberate(settled, ctx_soc)["kind"]
     assert k in ("socialize", "befriend"), settled["intention"]
     print("arbiter OK -> thirsty=drink, homeless=build, lonely=", k)
+
+    # FEAR & EXPOSURE — a wolf prowling close makes even a comfortable, housed soul flee; and a
+    # roofless soul out in foul weather hurries its shelter (exposure boosts the first-home build).
+    afraid = mk("Veyan", 0); afraid["home_struct"] = "s"
+    assert deliberate(afraid, {**base, "danger": 0.9})["kind"] == "flee", afraid["intention"]
+    cold = mk("Wyn", 0)                          # no roof yet, caught in a storm
+    dry = drives(cold, {**base, "exposed": 0.0})
+    wet = drives(cold, {**base, "exposed": 0.9})
+    bu_dry = next(u for kd, _, u, _ in dry if kd == "build")
+    bu_wet = next(u for kd, _, u, _ in wet if kd == "build")
+    assert bu_wet > bu_dry, (bu_dry, bu_wet)
+    print("fear/exposure OK -> wolf=flee, exposure lifts the roofless build", round(bu_dry, 2), "->", round(bu_wet, 2))
 
     # identity crystallizes from what you do: a habitual builder grows ambitious
     builder = mk("Tam", 0)

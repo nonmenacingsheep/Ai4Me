@@ -235,6 +235,24 @@ BUILD = dict(
 )
 STRUCT_KINDS = ("shelter",)
 
+# ─── Stakes: exposure & predation ────────────────────────────────────────────
+# A roof and the band are only worth something if the open is genuinely dangerous.
+# EXPOSURE: caught out at night or in foul weather with no proper roof chills the body —
+# it can't rest well and a bitter storm chips its health. A snug hut (insul 1.0) shields
+# fully; a draughty leaf lean-to (0.12) barely; a portable sleeping mat not at all (it
+# keeps no weather off). This is what gives a finished, well-insulated home survival worth.
+EXPOSURE_FATIGUE = 0.0014     # extra fatigue/game-min when exposed, scaled by severity
+EXPOSURE_HP      = 0.0011     # hp/game-min lost once exposure is SEVERE (cold storm, no roof)
+EXPOSURE_SEVERE  = 0.5        # effective-exposure above which the cold starts to wound
+# PREDATION: hungry wolves stalk people caught alone in the open. The band scares them off
+# (others nearby) and a roof is safety — a lone soul far from shelter at night is in danger.
+WOLF_MENACE_VISION = 7        # tiles a hungry wolf will close on a vulnerable person
+WOLF_BAND_SAFETY   = 4        # others within this range of the target deter the wolf (the band protects)
+WOLF_GUARDS_SAFE   = 2        # this many companions nearby and the wolf won't risk it
+WOLF_BITE          = 0.17     # hp a wolf bite costs its victim
+WOLF_BITE_GAIN     = 6.0      # energy a wolf gains from a person (well under a deer — people aren't easy prey)
+FLEE_TRIGGER       = 0.55     # cached danger at/above which the BODY reflexively flees, overriding its aim
+
 # ─── Tile building (Phase 3.5) — top-down "blocks" ───────────────────────────
 # People raise REAL buildings the Minecraft way: a building is a footprint of
 # individual placed tiles — walls, a door, a floor, and a thatch roof — laid one
@@ -1155,6 +1173,87 @@ class World:
             adj = np.roll(np.roll(wet, dy, 0), dx, 1)
             moist[adj] = np.maximum(moist[adj], 0.6)
 
+    def _danger_at(self, p, wolf_pos) -> float:
+        """Wolf-threat to this soul right now (0..1): keen when a wolf is close, eased by each
+        companion within band range, and zero under a real roof. Cheap — scans only wolves."""
+        if not wolf_pos or self._shelter_factor(p) > 0.5:
+            return 0.0
+        px, py = p["x"], p["y"]
+        near = WOLF_MENACE_VISION + 1
+        for (wx, wy) in wolf_pos:
+            d = abs(wx - px) + abs(wy - py)
+            if d < near:
+                near = d
+        if near > WOLF_MENACE_VISION:
+            return 0.0
+        guards = sum(1 for q in self.people if q is not p
+                     and abs(q["x"] - px) + abs(q["y"] - py) <= WOLF_BAND_SAFETY)
+        return (1.0 - near / (WOLF_MENACE_VISION + 1)) / (1 + guards)
+
+    def _exposure_threat(self, night: bool) -> float:
+        """How punishing it is to be OUTDOORS right now (0..1), from night cold + weather +
+        season. A clear summer day is harmless; a winter night storm is brutal."""
+        t = 0.0
+        if night:
+            t += 0.45
+        w = self.weather
+        t += {"rain": 0.30, "storm": 0.65, "snow": 0.70, "cloudy": 0.05}.get(w, 0.0)
+        if self.season() == "winter":
+            t += 0.25
+        if w != "clear":                                 # foul weather bites harder the heavier it is
+            t *= 0.7 + 0.3 * float(getattr(self, "weather_intensity", 1.0))
+        return min(1.0, t)
+
+    def _shelter_factor(self, p) -> float:
+        """How well a soul is shielded from the open right now (0..1). Only a roof over one's
+        OWN home tile shields — its strength is the home's insulation. A portable mat does
+        not (it keeps no weather off), so a real, well-built roof is what actually protects."""
+        if p.get("home_struct") and (p["x"], p["y"]) == tuple(p["home"]):
+            return max(0.0, min(1.0, p.get("insul", 1.0)))
+        return 0.0
+
+    def _wolves_menace_people(self, dt_game_min: float, night: bool) -> list:
+        """Hungry wolves stalk lone people caught in the open: close in and, if they reach one
+        who is unsheltered and unguarded, bite (real hp damage, occasionally lethal). The band
+        deters them and a roof is safety, so danger is a reason to stay near others and to
+        finish a home. Returns any people freshly killed (so the tick resolves their death)."""
+        if not self.people:
+            return []
+        wolves = [a for a in self.animals
+                  if a["sp"] == "wolf" and self.clock >= a.get("feed_next", 0)]
+        if not wolves:
+            return []
+        killed = []
+        bold = 1.3 if night else 0.7                     # wolves are bolder after dark
+        for a in wolves:
+            best, bd = None, WOLF_MENACE_VISION + 1
+            for p in self.people:
+                d = abs(p["x"] - a["x"]) + abs(p["y"] - a["y"])
+                if d < bd:
+                    best, bd = p, d
+            if best is None:
+                continue
+            guards = sum(1 for q in self.people if q is not best
+                         and abs(q["x"] - best["x"]) + abs(q["y"] - best["y"]) <= WOLF_BAND_SAFETY)
+            if guards >= WOLF_GUARDS_SAFE or self._shelter_factor(best) > 0.5:
+                continue                                 # too risky for the wolf — it leaves them be
+            if bd <= 1:                                  # in reach — strike
+                if self.rng.random() < ANIMALS["wolf"]["kill_chance"] * bold / (1 + guards):
+                    best["hp"] = max(0.0, best["hp"] - WOLF_BITE)
+                    best["death_cause"] = "a wolf"
+                    cap = ANIMALS["wolf"]["repro_at"] * ENERGY_CAP_MULT
+                    a["energy"] = min(cap, a["energy"] + WOLF_BITE_GAIN)
+                    a["feed_next"] = self.clock + ANIMALS["wolf"]["feed_cd"]
+                    mind.remember(best, "a wolf set on me out in the open", 0.9, "danger", self.clock)
+                    mind.speak(best, "Wolf! Get back!", self.clock)
+                    self._note("danger", f"A wolf attacked {best['name']}.")
+                    if best["hp"] <= 0:
+                        killed.append(best)
+            else:                                        # close the distance
+                self._move_animal(a, (int(np.sign(best["x"] - a["x"])),
+                                      int(np.sign(best["y"] - a["y"]))), ANIMALS["wolf"]["speed"])
+        return killed
+
     def _tick_wildlife(self, dt_game_min: float):
         if not self.animals:
             return
@@ -1383,6 +1482,7 @@ class World:
         dt_day = dt_game_min / (24 * 60)
         hod = self.time_of_day()
         night = hod < 6 or hod >= 21
+        wolf_pos = [(a["x"], a["y"]) for a in self.animals if a["sp"] == "wolf"]
 
         dead = []
         for p in self.people:
@@ -1418,6 +1518,10 @@ class World:
                 loc = self._nearest_loc(mask, lx, ly, wx0, wy0)
                 if loc:
                     known[key] = loc
+            # How much danger this soul is in from a prowling wolf right now (0..1), eased by
+            # the band and nullified by a roof — cached so both the body's flee-reflex and the
+            # mind's deliberation read the same read of the situation.
+            p["_danger"] = self._danger_at(p, wolf_pos)
             action, movedir = self._person_decide(p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly)
             p["action"] = action
             if action == "eat":
@@ -1553,7 +1657,7 @@ class World:
             # Seeking and wandering move the body; acting-in-place does not.
             if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
                           "seek_fiber", "seek_leaves", "seek_berry", "hunt", "fish",
-                          "haul", "wander", "socialize"):
+                          "haul", "wander", "socialize", "flee"):
                 self._move_person(p, movedir)
 
             # Health couples to the physiological RESERVES (never to comfort). Any reserve in
@@ -1561,6 +1665,20 @@ class World:
             # A sound body heals, but only up to its VITALITY ceiling (min of satiety & stamina),
             # so a chronically hungry or exhausted soul's hp is dragged down and slowly declines
             # even when it isn't outright starving — the malnutrition/exhaustion coupling.
+            # Exposure — being caught out in the cold/wet without a roof taxes the body: it
+            # tires faster and, when the weather turns severe, loses health. Cached so the mind
+            # can weigh "I'm exposed — get under cover" when it deliberates.
+            threat = self._exposure_threat(night)
+            eff = threat * (1.0 - self._shelter_factor(p)) if threat > 0 else 0.0
+            p["_exposed"] = round(eff, 3)
+            if eff > 0:
+                p["fatigue"] = min(1.0, p.get("fatigue", 0.0) + EXPOSURE_FATIGUE * eff * dt_game_min)
+            if eff > EXPOSURE_SEVERE:
+                p["hp"] = max(0.0, p["hp"] - EXPOSURE_HP * (eff - EXPOSURE_SEVERE) * dt_game_min)
+                p["death_cause"] = "the cold"
+            elif p.get("death_cause") == "the cold":         # no longer freezing — drop the stale cause
+                p.pop("death_cause", None)
+
             res = (p["hydration"], p["satiety"], p["stamina"])
             deficit = sum(max(0.0, PERSON["hp_danger"] - r) for r in res)
             vitality = min(p["satiety"], p["stamina"])
@@ -1568,9 +1686,17 @@ class World:
                 p["hp"] = max(0.0, p["hp"] - PERSON["starve_dmg"] * deficit * dt_game_min)
             elif min(res) > PERSON["hp_safe"]:
                 p["hp"] = min(vitality, p["hp"] + PERSON["heal"] * dt_game_min)
+                p.pop("death_cause", None)               # a recovering body sheds its near-miss
 
             if p["hp"] <= 0 or p["age"] > PERSON["max_age"]:
                 dead.append(p)
+
+        # Predation: hungry wolves harry anyone caught alone and unsheltered. A fatal bite
+        # adds its victim to the dead (deduped — a soul already down won't be listed twice).
+        seen_dead = {id(d) for d in dead}
+        for victim in self._wolves_menace_people(dt_game_min, night):
+            if id(victim) not in seen_dead:
+                dead.append(victim); seen_dead.add(id(victim))
 
         # Social pass: people in sight of one another notice, gossip, trade — and adults pair
         # off. Then the band may bear children. This is where reputation, the barter economy
@@ -1581,6 +1707,8 @@ class World:
         for p in dead:
             if p["age"] > PERSON["max_age"]:
                 cause = "old age"
+            elif p.get("death_cause"):                        # a wolf or the cold finished them
+                cause = p["death_cause"]
             elif p.get("illness") and self.clock >= p["illness"]["onset_t"]:
                 cause = p["illness"]["d"].replace("_", " ")   # the sickness took them
             else:                                            # name the reserve that gave out first
@@ -1875,6 +2003,10 @@ class World:
             "unsolved": unsolved,
             "unsolved_problems": [crafting.SURVIVAL_DISCOVERIES[r] for r in unsolved],
             "hardship": min(1.0, max(p.get("thirst", 0), p.get("fatigue", 0) * 0.6)),
+            # Situational stakes the mind weighs: a prowling wolf nearby (danger) and being
+            # caught out in foul weather without a roof (exposed). Both cached this tick.
+            "danger": p.get("_danger", 0.0),
+            "exposed": p.get("_exposed", 0.0),
         }
 
     def _person_decide(self, p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly):
@@ -1887,6 +2019,10 @@ class World:
         a re-think when a need spikes mid-task, and a sip/bite when literally standing on
         relief — so a daydreaming wanderer never starves beside a stream."""
         x, y = p["x"], p["y"]
+        # Fear reflex: a wolf right on top of an exposed soul overrides whatever they were doing —
+        # bolt for home/the band now, don't wait for the next deliberation beat.
+        if p.get("_danger", 0.0) >= FLEE_TRIGGER:
+            return self._flee(p)
         # (Re)deliberate when there's no aim, the beat has elapsed, or a need has spiked past
         # whatever the current intention is worth (an emergency interrupt).
         inten = p.get("intention")
@@ -1956,6 +2092,8 @@ class World:
             return self._seek(p, x, y, here_food, edible, lx, ly, "food", "eat", "seek_food")
         if kind == "rest":
             return "rest", None
+        if kind == "flee":
+            return self._flee(p)
         if kind == "ply":
             # Ply one's trade: produce the surplus that division of labour and barter run on.
             return self._ply(p, edible, drinkable, tree, fiber, leaf, lx, ly)
@@ -2025,6 +2163,15 @@ class World:
         if abs(hx - p["x"]) + abs(hy - p["y"]) > 6:
             return "wander", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
         return "wander", None
+
+    def _flee(self, p):
+        """Bolt for safety: home is shelter and the band is protection, so run there. Once on
+        the home tile, hunker down (rest) — a roof is the safest place to be."""
+        hx, hy = p["home"]
+        x, y = p["x"], p["y"]
+        if abs(hx - x) + abs(hy - y) > 0:
+            return "flee", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+        return "rest", None
 
     def _person_build_decide(self, p, tree, stone, fiber, leaf, lx, ly):
         """The crafting/building drive (a comfortable person's 'project'). Returns a body
@@ -3754,6 +3901,41 @@ if __name__ == "__main__":
     axe_ok = (not born_knowing) and knapped
     print(f"  axe-discovery test: born-knowing-axe={born_knowing} learns-by-knapping={knapped} "
           f"-> {'OK' if axe_ok else 'FAILED'}")
+
+    # STAKES — exposure & predation give a roof and the band real survival worth.
+    wx = World().generate(seed=7); wx.people = []
+    xy, xx = np.argwhere((wx.water == WATER_NONE) & (wx.biome == B["grassland"]))[0]
+    wx._add_person(int(xx), int(xy), name="Exposed")
+    xp = wx.people[0]; xp["home_struct"] = None
+    wx.weather = "storm"; wx.weather_intensity = 1.0
+    threat = wx._exposure_threat(night=True)
+    open_eff = threat * (1.0 - wx._shelter_factor(xp))             # roofless in a night storm
+    xp["home_struct"] = "s_h"; xp["home"] = (xp["x"], xp["y"]); xp["insul"] = 1.0
+    snug_eff = threat * (1.0 - wx._shelter_factor(xp))             # a snug hut shields fully
+    exposure_ok = open_eff > EXPOSURE_SEVERE and snug_eff < 0.05
+    print(f"  exposure test: night-storm exposure open={open_eff:.2f} vs snug-hut={snug_eff:.2f} "
+          f"-> {'OK' if exposure_ok else 'FAILED'}")
+
+    # A hungry wolf beside a lone, unsheltered soul draws blood; the band (companions near) deters it.
+    xp["home_struct"] = None; wx.animals = []
+    wx._add_animal("wolf", int(xp["x"]) + 1, int(xp["y"]))
+    wolf = wx.animals[0]
+    bit = False
+    for _ in range(200):
+        xp["hp"] = max(xp["hp"], 1.0); wolf["feed_next"] = 0.0
+        wolf["x"], wolf["y"] = int(xp["x"]) + 1, int(xp["y"])     # keep it on the doorstep & hungry
+        wx._wolves_menace_people(0.4, night=True)
+        if xp["hp"] < 1.0:
+            bit = True; break
+    xp["hp"] = 1.0
+    for k in range(WOLF_GUARDS_SAFE):                              # now ring the victim with companions
+        wx._add_person(int(xp["x"]), int(xp["y"]), name=f"Guard{k}")
+    for _ in range(80):
+        wolf["feed_next"] = 0.0; wolf["x"], wolf["y"] = int(xp["x"]) + 1, int(xp["y"])
+        wx._wolves_menace_people(0.4, night=True)
+    guarded_ok = xp["hp"] == 1.0
+    print(f"  predation test: lone soul bitten={bit}, guarded soul unharmed={guarded_ok} "
+          f"-> {'OK' if (bit and guarded_ok) else 'FAILED'}")
 
     # And the blueprint library scales up: force a cabin and confirm it can be raised too.
     wc2 = World().generate(seed=7); wc2.people = []
