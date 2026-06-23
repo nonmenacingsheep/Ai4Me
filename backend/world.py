@@ -1666,7 +1666,7 @@ class World:
                 # their own item in the decide step). Then tick the active craft's timer;
                 # the item is only granted when the work is finished.
                 if (not p.get("craft") and p["inv"].get("axe", 0) < 1
-                        and self._person_knows(p, "crude_axe")):
+                        and self._person_knows(p, "crude_axe") and self._can_make_tools(p)):
                     self._begin_craft(p, "crude_axe")
                 self._advance_craft(p, dt_game_min)
             elif action == "found_site":
@@ -1780,6 +1780,14 @@ class World:
                         for gid, _h, _r in self._GEAR:
                             if giver.get("inv", {}).get(gid, 0) >= 2 and taker.get("inv", {}).get(gid, 0) == 0:
                                 ev = mind.give(giver, taker, gid, self.clock)
+                                if ev:
+                                    self._note("social", ev)
+                                break
+                        # A toolmaker hands a spare TOOL to a band-mate who has none — how a
+                        # builder gets their axe and a hunter their spear (tool-gating's payoff).
+                        for _rid, key in self._TOOLS:
+                            if giver.get("inv", {}).get(key, 0) >= 2 and taker.get("inv", {}).get(key, 0) == 0:
+                                ev = mind.give(giver, taker, key, self.clock)
                                 if ev:
                                     self._note("social", ev)
                                 break
@@ -2228,10 +2236,10 @@ class World:
                                          "stone", "mine", "seek_stone"),
         }
 
-        # Once they've WORKED OUT the axe (by chopping wood by hand — see the chop handler), they
-        # fashion one: it makes every later chop yield more. A soul who hasn't yet had the insight
-        # builds and gathers bare-handed, and works it out along the way.
-        if inv.get("axe", 0) < 1 and self._person_knows(p, "crude_axe"):
+        # Once a TOOLMAKER has worked out the axe (by chopping wood by hand — see the chop
+        # handler), they fashion one; it makes every later chop yield more. A non-toolmaker can't
+        # make their own — they build and gather bare-handed until a toolmaker gifts them one.
+        if inv.get("axe", 0) < 1 and self._person_knows(p, "crude_axe") and self._can_make_tools(p):
             if inv.get("wood", 0) >= BUILD["axe_wood"]:
                 return "craft", None
             return getters["wood"]()
@@ -2513,6 +2521,15 @@ class World:
     # raw it ultimately comes from (rope is made from fiber on the spot).
     _GEAR = (("leaf_flask", "water", "leaves"), ("forage_sack", "sack", "fiber"),
              ("sleeping_mat", "mat", "fiber"))
+    # Tools only a TOOLMAKER fashions (recipe id, inv key) — so builders & hunters depend on the
+    # toolmaker for their gear, who keeps spares to hand round (the heart of tool-gating).
+    _TOOLS = (("crude_axe", "axe"), ("crude_spear", "crude_spear"))
+
+    def _can_make_tools(self, p) -> bool:
+        """Only a toolmaker has the craft to fashion proper tools (axe/spear/rod). Everyone else
+        depends on them — a builder chops bare-handed (slower) until gifted an axe, a hunter needs
+        a spear from the maker's bench. This is what makes the toolmaker's calling matter."""
+        return (p.get("vocation") or mind.vocation(p)) == "toolmaker"
 
     def _survival_craft_decide(self, p, fiber, leaf, getters):
         """If the band knows a make-shift craft this person lacks, gather its materials and
@@ -2599,6 +2616,8 @@ class World:
             return self._idle(p)
         if voc == "toolmaker":
             getters = {
+                "wood":   lambda: self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly,
+                                             "wood", "chop", "seek_wood"),
                 "fiber":  lambda: self._seek(p, x, y, bool(fiber[ly, lx]), fiber, lx, ly,
                                              "fiber", "gather_fiber", "seek_fiber"),
                 "leaves": lambda: self._seek(p, x, y, bool(leaf[ly, lx]), leaf, lx, ly,
@@ -2632,6 +2651,21 @@ class World:
                 if need.get(mat, 0) > 0 and mat in getters:
                     return getters[mat]()
             break
+        # Then TOOLS — the toolmaker's defining work. Keep a couple of axes (one to use, one to
+        # hand a builder) and a spare spear for a hunter, so the band's gear flows from one bench.
+        for rid, key in self._TOOLS:
+            if not self._person_knows(p, rid) or inv.get(key, 0) >= 2:
+                continue
+            if rid == "crude_axe":
+                if inv.get("wood", 0) >= BUILD["axe_wood"]:
+                    self._begin_craft(p, rid)
+                    return "craft", None
+                return getters["wood"]()
+            # Spears/rods need flint or a workbench — make them only when the materials are already
+            # at hand (no forced flint-mining yet); otherwise leave it for a later tech rung.
+            if crafting.can_craft(inv, rid, stations=(), tools=None):
+                self._begin_craft(p, rid)
+                return "craft", None
         return None
 
     # ── tile building: blueprint → site → block placement ───────────────────────
@@ -4053,17 +4087,17 @@ if __name__ == "__main__":
     print(f"\nsimulated {steps} steps in {sim_s:.2f}s "
           f"({steps/sim_s:.0f} steps/s, {sim_s*1000/steps:.2f} ms/step avg)")
 
-    # Tile-building unit check — isolate the chain from survival noise: a comfortable
-    # builder, kept fed/watered and handed raw logs + thatch, must craft an axe, mark
-    # out a building, and lay it block by block until it's finished and housed.
+    # Tile-building unit check — isolate the chain from survival noise: a comfortable builder,
+    # kept fed/watered and handed raw logs + thatch + an axe (tools are the toolmaker's job now —
+    # gating tested separately), must mark out a building and lay it block by block until housed.
     wc = World().generate(seed=7)
     wc.people = []
     land = np.argwhere((wc.water == WATER_NONE) & (wc.biome == B["grassland"]))
     by, bx = land[len(land) // 2]
     wc._add_person(int(bx), int(by), name="Builder")
     b = wc.people[0]
-    b["inv"].update({"wood": 80, "fiber": 40, "leaves": 30})   # logs, thatch & leaves to work
-    b["recipes"] = ["crude_axe"]                   # already worked out the axe (knapping tested separately)
+    b["inv"].update({"wood": 80, "fiber": 40, "leaves": 30, "axe": 1})   # logs, thatch, leaves & an axe
+    b["recipes"] = ["crude_axe"]
     wc.clock = 12 * 60                              # high noon (daytime → secondary drives active)
     for _ in range(1500):
         b["hunger"] = b["thirst"] = 0.1; b["fatigue"] = 0.1   # stay comfortable
@@ -4071,7 +4105,7 @@ if __name__ == "__main__":
             break
         wc._tick_people(0.4)
     site = wc.sites[0] if wc.sites else None
-    built_ok = bool(b["inv"].get("axe") and b.get("home_struct") and wc.blocks and wc.roofs)
+    built_ok = bool(b.get("home_struct") and wc.blocks and wc.roofs)
     print(f"  build test (autonomous): Builder axe={b['inv'].get('axe',0)}, "
           f"first home = {site['name'] if site else 'none'}, blocks={len(wc.blocks)}, "
           f"roofs={len(wc.roofs)}, insul={b.get('insul')}, housed={b.get('home_struct') is not None} "
@@ -4092,6 +4126,31 @@ if __name__ == "__main__":
     axe_ok = (not born_knowing) and knapped
     print(f"  axe-discovery test: born-knowing-axe={born_knowing} learns-by-knapping={knapped} "
           f"-> {'OK' if axe_ok else 'FAILED'}")
+
+    # TOOL-GATING — only a toolmaker can fashion an axe; a builder who knows the recipe can't,
+    # and gets one handed over when a toolmaker carrying a spare stands beside them.
+    wtg = World().generate(seed=7); wtg.people = []
+    tgy, tgx = np.argwhere((wtg.water == WATER_NONE) & (wtg.biome == B["grassland"]))[0]
+    wtg._add_person(int(tgx), int(tgy), name="Smith")
+    tmk = wtg.people[0]; tmk["traits"] = {"sociability": 0.5, "ambition": 0.3, "curiosity": 0.8, "caution": 0.3}
+    tmk["vocation"] = mind.vocation(tmk); tmk["recipes"] = ["crude_axe"]; tmk["inv"] = {"wood": 10, "home": 1}
+    wtg._add_person(int(tgx) + 1, int(tgy), name="Hauler")
+    bld = wtg.people[1]; bld["traits"] = {"sociability": 0.5, "ambition": 0.8, "curiosity": 0.3, "caution": 0.3}
+    bld["vocation"] = mind.vocation(bld); bld["recipes"] = ["crude_axe"]; bld["inv"] = {"wood": 10}
+    getters = {"wood": lambda: ("seek_wood", None), "fiber": lambda: ("seek_fiber", None), "leaves": lambda: ("seek_leaves", None)}
+    bld["home_struct"] = "s"      # housed builder, knows the recipe, has wood — must NOT make an axe
+    bld_makes = wtg._person_build_decide(bld, np.zeros((1, 1), bool), np.zeros((1, 1), bool),
+                                         np.zeros((1, 1), bool), np.zeros((1, 1), bool), 0, 0)
+    builder_blocked = not bld.get("craft")        # a non-toolmaker never started an axe
+    tmk_can = wtg._can_make_tools(tmk) and not wtg._can_make_tools(bld)
+    # The toolmaker carries two spare axes; standing beside the axe-less builder, one flows over.
+    tmk["inv"]["axe"] = 2
+    for _ in range(3):
+        wtg._tick_minds_social()
+    gifted_ok = bld["inv"].get("axe", 0) >= 1
+    tool_gate_ok = tmk_can and builder_blocked and gifted_ok
+    print(f"  tool-gating test: toolmaker-only={tmk_can} builder-can't-make={builder_blocked} "
+          f"axe-gifted-to-builder={gifted_ok} -> {'OK' if tool_gate_ok else 'FAILED'}")
 
     # STAKES — exposure & predation give a roof and the band real survival worth.
     wx = World().generate(seed=7); wx.people = []
