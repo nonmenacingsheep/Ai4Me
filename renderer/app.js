@@ -372,6 +372,195 @@ document.getElementById('wai-save')?.addEventListener('click', () => {
   closeWorldAI();
 });
 
+/* ═══ Templates — the god designs buildings (blueprint editor) & places them ═══ */
+// Glyph palette shared with the backend (BLOCK_CHARS). Colour echoes the world's block tints.
+const WTPL_PALETTE = [
+  { g: 'W', label: 'Wall', color: '#8a6a4a' },
+  { g: 'D', label: 'Door', color: '#c79a5b' },
+  { g: 'F', label: 'Floor', color: '#5a4636' },
+  { g: 'O', label: 'Window', color: '#6fb6c9' },
+  { g: '#', label: 'Fence', color: '#9a8262' },
+  { g: 'L', label: 'Leaf', color: '#5f9e58' },
+  { g: 'C', label: 'Core', color: '#d8b24a' },
+  { g: '.', label: 'Erase', color: '#1a1a1f' },
+];
+const WTPL_COLOR = Object.fromEntries(WTPL_PALETTE.map(p => [p.g, p.color]));
+const wtplModal = document.getElementById('wtpl-modal');
+const WTPL = { cols: 5, rows: 5, grid: [], paint: 'W', editId: null };
+
+function wtplBlankGrid(cols, rows, old) {
+  const g = [];
+  for (let y = 0; y < rows; y++) {
+    let row = '';
+    for (let x = 0; x < cols; x++) row += (old && old[y] && old[y][x]) ? old[y][x] : '.';
+    g.push(row);
+  }
+  return g;
+}
+
+function renderTplPalette() {
+  const el = document.getElementById('wtpl-palette'); if (!el) return;
+  el.innerHTML = '';
+  for (const p of WTPL_PALETTE) {
+    const b = document.createElement('button');
+    b.className = 'wtpl-pal' + (p.g === WTPL.paint ? ' active' : '');
+    b.type = 'button'; b.dataset.glyph = p.g;
+    b.innerHTML = `<span class="wsw" style="background:${p.color}"></span>${p.label}`;
+    el.appendChild(b);
+  }
+}
+
+function renderTplGrid() {
+  const cv = document.getElementById('wtpl-grid'); if (!cv) return;
+  const cell = Math.max(14, Math.min(34, Math.floor(340 / Math.max(WTPL.cols, WTPL.rows))));
+  cv.width = WTPL.cols * cell; cv.height = WTPL.rows * cell;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#0c0c10'; ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let y = 0; y < WTPL.rows; y++) {
+    for (let x = 0; x < WTPL.cols; x++) {
+      const g = WTPL.grid[y][x];
+      if (g !== '.') { ctx.fillStyle = WTPL_COLOR[g] || '#888'; ctx.fillRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2); }
+      if (g === 'C') { ctx.fillStyle = '#1a1a1f'; ctx.font = `${cell * 0.6}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('C', x * cell + cell / 2, y * cell + cell / 2); }
+      ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.strokeRect(x * cell + 0.5, y * cell + 0.5, cell, cell);
+    }
+  }
+  cv._cell = cell;
+  const dims = document.getElementById('wtpl-dims'); if (dims) dims.textContent = `${WTPL.cols}×${WTPL.rows}`;
+}
+
+function tplPaintAt(ev) {
+  const cv = document.getElementById('wtpl-grid'); const cell = cv._cell || 20;
+  const r = cv.getBoundingClientRect();
+  const x = Math.floor((ev.clientX - r.left) * (cv.width / r.width) / cell);
+  const y = Math.floor((ev.clientY - r.top) * (cv.height / r.height) / cell);
+  if (x < 0 || y < 0 || x >= WTPL.cols || y >= WTPL.rows) return;
+  const row = WTPL.grid[y];
+  WTPL.grid[y] = row.slice(0, x) + WTPL.paint + row.slice(x + 1);
+  renderTplGrid();
+}
+
+function openTplEditor(existing) {
+  WTPL.editId = existing ? existing.id : null;
+  WTPL.cols = existing ? (existing.layout[0] || '').length : 5;
+  WTPL.rows = existing ? existing.layout.length : 5;
+  WTPL.grid = existing ? existing.layout.slice() : wtplBlankGrid(5, 5);
+  WTPL.paint = 'W';
+  document.getElementById('wtpl-name').value = existing ? existing.name : '';
+  document.getElementById('wtpl-cols').value = WTPL.cols;
+  document.getElementById('wtpl-rows').value = WTPL.rows;
+  document.getElementById('wtpl-roof').checked = existing ? !!existing.roof : true;
+  document.getElementById('wtpl-insul').value = existing ? existing.insulation : 1;
+  document.getElementById('wtpl-insul-val').textContent = (existing ? existing.insulation : 1).toFixed(2);
+  document.getElementById('wtpl-communal').checked = existing ? !!existing.communal : false;
+  document.getElementById('wtpl-cap').value = existing ? (existing.capacity || 0) : 0;
+  renderTplPalette(); renderTplGrid();
+  wtplModal?.classList.add('open'); wtplModal?.setAttribute('aria-hidden', 'false');
+}
+function closeTplEditor() { wtplModal?.classList.remove('open'); wtplModal?.setAttribute('aria-hidden', 'true'); }
+
+async function saveTpl() {
+  const name = document.getElementById('wtpl-name').value.trim() || 'Building';
+  const payload = {
+    id: WTPL.editId, name, layout: WTPL.grid.slice(),
+    roof: document.getElementById('wtpl-roof').checked,
+    insulation: parseFloat(document.getElementById('wtpl-insul').value),
+    communal: document.getElementById('wtpl-communal').checked,
+    capacity: parseInt(document.getElementById('wtpl-cap').value, 10) || 0,
+  };
+  try {
+    const j = await (await fetch('/api/world/templates', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    })).json();
+    if (!j.ok) { alert(j.error || 'Could not save blueprint.'); return; }
+    closeTplEditor(); loadTemplates();
+  } catch (_) { alert('Could not save blueprint.'); }
+}
+
+// Draw a small thumbnail of a blueprint's layout into a canvas.
+function drawTplThumb(cv, layout) {
+  const rows = layout.length, cols = (layout[0] || '').length;
+  const cell = Math.max(3, Math.floor(54 / Math.max(rows, cols, 1)));
+  cv.width = cols * cell; cv.height = rows * cell;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#0c0c10'; ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
+    const g = layout[y][x]; if (g && g !== '.') { ctx.fillStyle = WTPL_COLOR[g] || '#888'; ctx.fillRect(x * cell, y * cell, cell, cell); }
+  }
+}
+
+async function loadTemplates() {
+  const list = document.getElementById('wtpl-list'); if (!list) return;
+  list.innerHTML = '<div class="wtpl-empty">Loading…</div>';
+  let tpls = [];
+  try { const j = await (await fetch('/api/world/templates')).json(); tpls = j.templates || []; } catch (_) {}
+  WORLD._templates = tpls;
+  list.innerHTML = '';
+  if (!tpls.length) { list.innerHTML = '<div class="wtpl-empty">No blueprints yet — design one above.</div>'; return; }
+  for (const t of tpls) {
+    const card = document.createElement('div'); card.className = 'wtpl-card'; card.dataset.id = t.id;
+    const thumb = document.createElement('canvas'); thumb.className = 'wtpl-thumb';
+    drawTplThumb(thumb, t.layout || []);
+    const meta = document.createElement('div'); meta.className = 'wtpl-meta';
+    meta.innerHTML = `<div class="wtpl-name">${escapeHtml(t.name)}</div>` +
+      `<div class="wtpl-tags">${(t.layout || []).length}×${((t.layout || [])[0] || '').length}` +
+      `${t.communal ? ' · communal' : ''} · insul ${(+t.insulation).toFixed(2)}${t.capacity ? ' · holds ' + t.capacity : ''}</div>`;
+    const acts = document.createElement('div'); acts.className = 'wtpl-acts';
+    acts.innerHTML = `<button class="wbtn wtpl-place" data-id="${t.id}">Place</button>` +
+      `<button class="wbtn wtpl-edit" data-id="${t.id}">Edit</button>` +
+      `<button class="wbtn wtpl-del" data-id="${t.id}">✕</button>`;
+    card.append(thumb, meta, acts);
+    list.appendChild(card);
+  }
+}
+
+function armTemplatePlacement(id) {
+  WORLD.tool = 'template';
+  WORLD.templateId = id;
+  WORLD.templateInstant = (document.getElementById('wtpl-mode')?.value || 'instant') === 'instant';
+  // Visually deselect any paint button; the map is now armed to place this building.
+  document.querySelectorAll('.wbtn[data-tool]').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.wtpl-card').forEach(c => c.classList.toggle('armed', c.dataset.id === id));
+  const co = document.getElementById('whud-coords');
+  if (co) co.textContent = 'click the map to place';
+}
+
+document.getElementById('wtpl-new')?.addEventListener('click', () => openTplEditor(null));
+document.getElementById('wtpl-close')?.addEventListener('click', closeTplEditor);
+document.getElementById('wtpl-cancel')?.addEventListener('click', closeTplEditor);
+wtplModal?.addEventListener('click', (e) => { if (e.target === wtplModal) closeTplEditor(); });
+document.getElementById('wtpl-save')?.addEventListener('click', saveTpl);
+document.getElementById('wtpl-palette')?.addEventListener('click', (e) => {
+  const b = e.target.closest('.wtpl-pal'); if (!b) return;
+  WTPL.paint = b.dataset.glyph; renderTplPalette();
+});
+(() => {
+  const cv = document.getElementById('wtpl-grid'); if (!cv) return;
+  let down = false;
+  cv.addEventListener('pointerdown', (e) => { down = true; cv.setPointerCapture(e.pointerId); tplPaintAt(e); });
+  cv.addEventListener('pointermove', (e) => { if (down) tplPaintAt(e); });
+  const up = () => { down = false; }; cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+})();
+const _tplResize = () => {
+  WTPL.cols = Math.max(1, Math.min(16, parseInt(document.getElementById('wtpl-cols').value, 10) || 1));
+  WTPL.rows = Math.max(1, Math.min(16, parseInt(document.getElementById('wtpl-rows').value, 10) || 1));
+  WTPL.grid = wtplBlankGrid(WTPL.cols, WTPL.rows, WTPL.grid);
+  renderTplGrid();
+};
+document.getElementById('wtpl-cols')?.addEventListener('change', _tplResize);
+document.getElementById('wtpl-rows')?.addEventListener('change', _tplResize);
+document.getElementById('wtpl-clear')?.addEventListener('click', () => { WTPL.grid = wtplBlankGrid(WTPL.cols, WTPL.rows); renderTplGrid(); });
+document.getElementById('wtpl-insul')?.addEventListener('input', (e) => { document.getElementById('wtpl-insul-val').textContent = (+e.target.value).toFixed(2); });
+document.getElementById('wtpl-list')?.addEventListener('click', async (e) => {
+  const id = e.target.closest('[data-id]')?.dataset.id; if (!id) return;
+  if (e.target.closest('.wtpl-place')) armTemplatePlacement(id);
+  else if (e.target.closest('.wtpl-edit')) { const t = (WORLD._templates || []).find(x => x.id === id); if (t) openTplEditor(t); }
+  else if (e.target.closest('.wtpl-del')) {
+    if (!confirm('Delete this blueprint?')) return;
+    try { await fetch('/api/world/templates/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); } catch (_) {}
+    loadTemplates();
+  }
+});
+
 /* ═══ Folders she can read (scoped, opt-in; lives in the composer + menu) ═══
    Changes here persist immediately (the menu isn't behind the Settings Save). */
 let pendingFileRoots = [];
@@ -4451,6 +4640,18 @@ function renderPersonPanel(p) {
 async function worldPaint(x, y) {
   const d = WORLD.data; if (!d || x < 0 || y < 0 || x >= d.w || y >= d.h) return;
   const r = +(document.getElementById('wbrush')?.value || 4);
+  if (WORLD.tool === 'template') {
+    if (!WORLD.templateId) return;
+    try {
+      const j = await (await fetch('/api/world/templates/place', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: WORLD.templateId, x, y, instant: WORLD.templateInstant }),
+      })).json();
+      const co = document.getElementById('whud-coords');
+      if (co && j.result) co.textContent = j.result;        // names WHY on a bad spot (in the water, etc.)
+    } catch (_) {}
+    return;
+  }
   let body = { x, y, r };
   switch (WORLD.tool) {
     case 'raise': body.tool = 'sculpt'; body.d = 0.12; break;
@@ -4626,6 +4827,7 @@ function bindWorld() {
       const open = sec.classList.toggle('open');
       if (open && sec.dataset.menu === 'crafting') loadCraftingRecipes();   // lazy-load on first open
       if (open && sec.dataset.menu === 'ledger') loadLedger();
+      if (open && sec.dataset.menu === 'templates') loadTemplates();
     });
   });
   const csearch = document.getElementById('wcraft-search');
@@ -4680,7 +4882,7 @@ function bindWorld() {
       clampCamera(); renderWorld(); refreshWorldDetail();
       return;
     }
-    if (WORLD.dragging && WORLD.tool !== 'spawn' && WORLD.tool !== 'person') {
+    if (WORLD.dragging && WORLD.tool !== 'spawn' && WORLD.tool !== 'person' && WORLD.tool !== 'template') {
       const now = Date.now();
       if (now - WORLD.lastPaint > 90) { WORLD.lastPaint = now; worldPaint(x, y); }
     }

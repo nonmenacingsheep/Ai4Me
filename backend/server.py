@@ -1179,6 +1179,52 @@ async def api_world_action(req: Request):
     return {"ok": bool(summary), "result": summary}
 
 
+@app.get("/api/world/templates")
+async def api_world_templates():
+    """The god's hand-authored building library, for the Templates dropdown (each carries its
+    glyph layout so the UI can draw a thumbnail)."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "templates": []}
+    w = world_store.get_world()
+    return {"ok": True, "templates": await asyncio.to_thread(w.list_templates)}
+
+
+@app.post("/api/world/templates")
+async def api_world_template_save(req: Request):
+    """Create or update a hand-authored blueprint from the editor."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "error": "World is off — enable it in Settings."}
+    body = await req.json()
+    w = world_store.get_world()
+    res = await asyncio.to_thread(w.save_template, body)
+    return res
+
+
+@app.post("/api/world/templates/delete")
+async def api_world_template_delete(req: Request):
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False}
+    body = await req.json()
+    w = world_store.get_world()
+    return await asyncio.to_thread(w.delete_template, str(body.get("id", "")).strip())
+
+
+@app.post("/api/world/templates/place")
+async def api_world_template_place(req: Request):
+    """Place a hand-authored building on the map at (x,y). `instant` stamps it finished; else it
+    drops a site for the band to raise. Returns {ok, result} — result names WHY on a bad spot."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "result": "World is off — enable it in Settings."}
+    body = await req.json()
+    w = world_store.get_world()
+    res = await asyncio.to_thread(w.place_template, str(body.get("id", "")).strip(),
+                                  int(body.get("x", 0)), int(body.get("y", 0)),
+                                  bool(body.get("instant", True)), "him")
+    if res.get("ok"):
+        await broadcast({"type": "world_changed", "changes": [res.get("result", "placed a building")]})
+    return res
+
+
 @app.post("/api/world/reset")
 async def api_world_reset(req: Request):
     """Generate a fresh world (new seed). Guarded by the capability toggle."""
@@ -2012,6 +2058,10 @@ def _apply_world_action(spec: dict, by: str) -> str:
         if tool == "whisper":
             w.whisper(x, y, str(spec.get("text", "")).strip(), by=by)
             return f"{by} whispered a thought into a soul near ({x},{y})"
+        if tool == "place_template":
+            res = w.place_template(str(spec.get("id", "")).strip(), x, y,
+                                   instant=bool(spec.get("instant", True)), by=by)
+            return res.get("result", "") if res.get("ok") else ""
     except Exception as e:
         print(f"[world] action {tool!r} failed: {e}")
     return ""

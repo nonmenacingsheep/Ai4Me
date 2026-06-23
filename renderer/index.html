@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=62" />
+  <link rel="stylesheet" href="style.css?v=63" />
 </head>
 <body>
 
@@ -172,6 +172,48 @@
         <div class="modal-footer">
           <button class="btn-secondary" id="wai-cancel">Cancel</button>
           <button class="btn-primary" id="wai-save">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="wtpl-modal" aria-hidden="true">
+      <div class="modal">
+        <div class="modal-glow"></div>
+        <div class="modal-header">
+          <h2>Blueprint Editor</h2>
+          <button class="modal-close" id="wtpl-close" title="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label for="wtpl-name">Name</label>
+            <input id="wtpl-name" class="mem-add-input" maxlength="40" placeholder="e.g. Blacksmith's Workshop" />
+          </div>
+          <div class="field">
+            <label>Tiles <span class="field-hint" style="display:inline">— pick a piece, then paint on the grid</span></label>
+            <div class="wtpl-palette" id="wtpl-palette"></div>
+          </div>
+          <div class="field">
+            <label>Grid <span id="wtpl-dims" style="opacity:.7"></span></label>
+            <div class="wtpl-sizerow">
+              <label>cols <input type="number" id="wtpl-cols" min="1" max="16" value="5"></label>
+              <label>rows <input type="number" id="wtpl-rows" min="1" max="16" value="5"></label>
+              <button class="btn-secondary" id="wtpl-clear" type="button">Clear</button>
+            </div>
+            <canvas id="wtpl-grid" class="wtpl-grid"></canvas>
+          </div>
+          <div class="field">
+            <label>Properties</label>
+            <label class="wopt"><input type="checkbox" id="wtpl-roof" checked> Has a roof (thatches the floor — shelters from weather)</label>
+            <label class="wopt">Insulation <input type="range" id="wtpl-insul" min="0" max="1" step="0.05" value="1"><span id="wtpl-insul-val">1.00</span></label>
+            <label class="wopt"><input type="checkbox" id="wtpl-communal"> Communal (a shared band building, not a personal home)</label>
+            <label class="wopt">Capacity <input type="number" id="wtpl-cap" min="0" max="99" value="0" style="width:60px"> <span style="opacity:.6">souls (0 = unset)</span></label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" id="wtpl-cancel">Cancel</button>
+          <button class="btn-primary" id="wtpl-save">Save blueprint</button>
         </div>
       </div>
     </div>
@@ -855,6 +897,18 @@
                 </div>
               </section>
 
+              <section class="wmenu" data-menu="templates">
+                <button class="wmenu-head"><span>Templates</span><svg class="wmenu-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+                <div class="wmenu-body">
+                  <div class="wmenu-label">Design your own buildings, then place them on the map.</div>
+                  <button class="wbtn wbtn-wide" id="wtpl-new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 8v8M8 12h8"/></svg><span>New blueprint</span></button>
+                  <label class="wopt" style="margin-top:8px">Place as
+                    <select id="wtpl-mode"><option value="instant">finished building</option><option value="site">site to raise</option></select>
+                  </label>
+                  <div id="wtpl-list" class="wtpl-list"></div>
+                </div>
+              </section>
+
               <section class="wmenu" data-menu="settings">
                 <button class="wmenu-head"><span>Settings</span><svg class="wmenu-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
                 <div class="wmenu-body">
@@ -962,6 +1016,6 @@
     <div class="pt-hint" id="pt-hint">double-click her to hide the conversation</div>
   </div>
 
-  <script src="app.js?v=62"></script>
+  <script src="app.js?v=63"></script>
 </body>
 </html>

@@ -91,6 +91,8 @@ def _json_safe(o):
 _DIR = os.path.join(os.path.expanduser("~"), ".ai4me")
 PATH_GRID = os.path.join(_DIR, "world.npz")     # tile arrays (compressed)
 PATH_META = os.path.join(_DIR, "world.json")    # clock, weather, entities, log
+PATH_TEMPLATES = os.path.join(_DIR, "templates.json")  # the god's hand-authored building blueprints
+                                                # (a library independent of any one world — survives resets)
 
 # ─── Biomes ────────────────────────────────────────────────────────────────
 # index → (name, base map colour the renderer can start from). Water is a separate
@@ -548,6 +550,8 @@ class World:
         self.berry_bushes: list[dict] = []  # scattered berry bushes (some poisonous), P3
         self._berry_index: dict[tuple[int, int], dict] = {}  # (x,y)->bush, rebuilt on load/seed
         self.granary: dict = {"store": {}, "x": None, "y": None}  # the band's shared common store
+        self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
+        self._load_templates()                    # pull the library off disk + register it for placement
         self.log: list[dict] = []        # recent god actions / notable events
         # Craft knowledge. Everyone is born knowing the basics (STARTER_RECIPES); the make-
         # shift survival crafts (water flask, etc.) must be DISCOVERED by an individual and
@@ -2455,11 +2459,14 @@ class World:
         return None
 
     def _orphaned_monument(self):
-        """An in-progress communal monument no living soul is still raising (its builder died),
-        free for another to adopt and finish — so a half-built hall is never abandoned forever."""
+        """An in-progress communal build no living soul is still raising — a monument whose
+        raiser died, or a building the GOD marked out (site-mode template placement) — free for
+        an ambitious builder to adopt and finish, so a half-built hall is never abandoned forever."""
         live_sites = {q.get("site") for q in self.people}
         for s in self.sites:
-            if s["bp"] == MONUMENT_BP and not s["done"] and s["id"] not in live_sites:
+            if s["done"] or s["id"] in live_sites:
+                continue
+            if s["bp"] == MONUMENT_BP or s.get("orphan"):
                 return s
         return None
 
@@ -2791,6 +2798,121 @@ class World:
         mind.remember(p, f"raised my own {site['name'].lower()} — a home at last", 0.85,
                       "build", self.clock)
         self._earn_renown(p, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
+
+    # ── god-authored building templates (the Templates god-tool) ────────────────
+    # The god designs buildings in a blank-grid editor and saves them as blueprints in the
+    # SAME glyph format the band's own buildings use, so a hand-drawn smithy or longhouse can
+    # be placed on the map (instantly, or as a site for souls to raise) — and is stored ready
+    # for the AI to draw on as a "prior" in a later phase (it ignores them for now).
+    def _load_templates(self) -> None:
+        try:
+            with open(PATH_TEMPLATES, encoding="utf-8") as f:
+                self.user_blueprints = json.load(f) or []
+        except (FileNotFoundError, ValueError, OSError):
+            self.user_blueprints = []
+        self._register_user_blueprints()
+
+    def _save_templates(self) -> None:
+        try:
+            os.makedirs(_DIR, exist_ok=True)
+            tmp = PATH_TEMPLATES + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.user_blueprints, f, default=_json_safe)
+            os.replace(tmp, PATH_TEMPLATES)
+        except OSError as e:
+            print(f"[world] template save failed: {e}")
+
+    def _register_user_blueprints(self) -> None:
+        """Inject the library into the shared BLUEPRINTS registry (keyed by id) so all the
+        existing footprint-fit + placement machinery treats them like any built-in blueprint."""
+        for ub in self.user_blueprints:
+            BLUEPRINTS[ub["id"]] = {
+                "name": ub.get("name", "Building"),
+                "roof": bool(ub.get("roof", True)),
+                "insulation": float(ub.get("insulation", 1.0)),
+                "layout": list(ub.get("layout", [])),
+                "communal": bool(ub.get("communal", False)),
+                "capacity": int(ub.get("capacity", 0)),
+                "user": True,
+            }
+
+    @staticmethod
+    def _valid_layout(layout) -> bool:
+        """A layout is a non-empty list of equal-length rows of known glyphs, ≤ 16×16."""
+        if not isinstance(layout, list) or not layout or len(layout) > 16:
+            return False
+        w = len(layout[0])
+        if not (1 <= w <= 16):
+            return False
+        ok = set(BLOCK_CHARS) | {GLYPH_CORE}
+        return all(isinstance(r, str) and len(r) == w and all(c in ok for c in r) for r in layout)
+
+    def list_templates(self) -> list:
+        """The library for the dropdown — each with its layout so the UI can draw a thumbnail."""
+        return [dict(ub) for ub in self.user_blueprints]
+
+    def save_template(self, data: dict) -> dict:
+        """Create or update a hand-authored blueprint. Returns {ok, id|error}."""
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "bad payload"}
+        layout = data.get("layout")
+        if not self._valid_layout(layout):
+            return {"ok": False, "error": "layout must be 1–16 rows of equal length using . F W D O # L C"}
+        name = (str(data.get("name") or "").strip() or "Building")[:40]
+        ub = {
+            "id": data.get("id") or ("ub_" + uuid.uuid4().hex[:8]),
+            "name": name,
+            "layout": [str(r) for r in layout],
+            "roof": bool(data.get("roof", True)),
+            "insulation": max(0.0, min(1.0, float(data.get("insulation", 1.0)))),
+            "communal": bool(data.get("communal", False)),
+            "capacity": max(0, int(data.get("capacity", 0))),
+            "t": round(self.clock, 1),
+        }
+        self.user_blueprints = [b for b in self.user_blueprints if b["id"] != ub["id"]]
+        self.user_blueprints.append(ub)
+        self._register_user_blueprints()
+        self._save_templates()
+        return {"ok": True, "id": ub["id"]}
+
+    def delete_template(self, bp_id: str) -> dict:
+        before = len(self.user_blueprints)
+        self.user_blueprints = [b for b in self.user_blueprints if b["id"] != bp_id]
+        BLUEPRINTS.pop(bp_id, None)
+        self._save_templates()
+        return {"ok": len(self.user_blueprints) < before}
+
+    def place_template(self, bp_id: str, x: int, y: int, instant: bool = True, by: str = "him") -> dict:
+        """Place a hand-authored building on the map at (x,y) as the footprint CENTRE. `instant`
+        stamps the finished building in one stroke (god world-building); otherwise it drops an
+        adoptable construction SITE the band will raise tile by tile. Returns {ok, result}, and
+        on a bad spot reports WHY (off-map / over water / overlapping) — the dry-run fit check."""
+        if bp_id not in BLUEPRINTS:
+            return {"ok": False, "result": "no such template"}
+        bp = BLUEPRINTS[bp_id]
+        bw, bh = len(bp["layout"][0]), len(bp["layout"])
+        ox, oy = int(x) - bw // 2, int(y) - bh // 2
+        tasks, core = self._blueprint_tasks(bp_id, ox, oy)
+        if not tasks:
+            return {"ok": False, "result": "won't fit there — off the map, over water, or overlapping a building"}
+        if not instant:
+            site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": bp_id, "name": bp["name"],
+                    "ox": int(ox), "oy": int(oy), "by": by, "insul": float(bp.get("insulation", 1.0)),
+                    "tasks": tasks, "done": False, "t": round(self.clock, 1),
+                    "communal": True, "orphan": True}      # orphan+communal → a free builder adopts it
+            self.sites.append(site)
+            self.version += 1
+            self._note("build", f"{by} marked out a {bp['name'].lower()} for the band to raise.")
+            return {"ok": True, "result": f"marked out a {bp['name']} at ({x},{y}) for the band to build"}
+        for t in tasks:                                    # instant: stamp every tile, finished
+            if t["layer"] == "roof":
+                self.roofs.add((t["x"], t["y"]))
+            else:
+                self.blocks[(t["x"], t["y"])] = t["code"]
+        sid = self._add_structure(bp_id, ox, oy, by=by)
+        self.version += 1
+        self._note("build", f"{by} placed a {bp['name']} at ({x},{y}).")
+        return {"ok": True, "result": f"placed a {bp['name']} at ({x},{y})", "struct": sid}
 
     def _work_ready(self, p, key, dt, work: float) -> bool:
         """Spread a piece of manual labour over visible game-time: returns True (and resets the
@@ -4026,6 +4148,27 @@ if __name__ == "__main__":
     drew_ok = needy["inv"].get("food", 0) > 0 and wg.granary["store"].get("food", 0) < stock_before
     print(f"  granary test: commons stocked={granary_ok} ({wg.granary['store'].get('food',0)} food), "
           f"needy soul drew from it={drew_ok} -> {'OK' if (granary_ok and drew_ok) else 'FAILED'}")
+
+    # TEMPLATES — the god designs a building and places it: instant stamps it finished, a bad
+    # spot is refused with a reason, and site-mode drops an adoptable orphan site. Cleans up after.
+    wt = World().generate(seed=7); wt.people = []
+    save_res = wt.save_template({"name": "Smithy", "layout": ["WDW", "WFW", "WWW"], "insulation": 1.0})
+    tid = save_res.get("id")
+    listed_ok = any(b["id"] == tid for b in wt.list_templates())
+    land_t = np.argwhere((wt.water == WATER_NONE) & (wt.biome == B["grassland"]))
+    tyy, txx = land_t[len(land_t) // 2]
+    n_blocks0 = len(wt.blocks)
+    place = wt.place_template(tid, int(txx), int(tyy), instant=True)
+    placed_ok = place["ok"] and len(wt.blocks) > n_blocks0
+    wyy, wxx = np.argwhere(wt.water != WATER_NONE)[0]               # a spot in the water — must refuse
+    bad = wt.place_template(tid, int(wxx), int(wyy), instant=True)
+    refused_ok = (not bad["ok"]) and ("fit" in bad["result"])
+    site_res = wt.place_template(tid, int(txx) + 8, int(tyy) + 8, instant=False)
+    site_ok = site_res["ok"] and any(s.get("orphan") for s in wt.sites)
+    wt.delete_template(tid)                                         # don't pollute the real library
+    templates_ok = save_res["ok"] and listed_ok and placed_ok and refused_ok and site_ok
+    print(f"  templates test: saved+listed={listed_ok} placed-instant={placed_ok} "
+          f"bad-spot-refused={refused_ok} site-mode={site_ok} -> {'OK' if templates_ok else 'FAILED'}")
 
     # And the blueprint library scales up: force a cabin and confirm it can be raised too.
     wc2 = World().generate(seed=7); wc2.people = []
