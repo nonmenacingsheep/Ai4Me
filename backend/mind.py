@@ -62,7 +62,7 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
-                "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee")
+                "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard")
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 # Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
@@ -399,6 +399,17 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     if danger > 0.05:
         out.append(("flee", None, (0.5 + 0.55 * danger) * (0.7 + 0.6 * cau),
                     "a wolf is near — get to safety"))
+
+    # Guardianship — a bold soul whose neighbour is in a wolf's sights doesn't bolt: it puts
+    # itself between them and the threat. Scales with the ward's peril and the guardian's NERVE
+    # (the inverse of caution), and only fires for a settled soul with a roof of its own to
+    # spare the watch. Pitched to out-score a bold soul's own flee — so courage actually shows —
+    # while a timid soul's flee still wins, and acute personal survival out-scores both.
+    ward = _clamp01(ctx.get("ward_threat", 0.0))
+    if ward > 0.2 and p.get("home_struct") is not None:
+        nerve = 1.0 - cau
+        out.append(("guard", None, (0.45 + 0.5 * ward) * (0.35 + 0.9 * nerve),
+                    "a wolf threatens my own — I'll stand watch"))
 
     # Shelter & ambition — a home of one's own is half survival, half pride. A build already
     # underway adds sunk-cost MOMENTUM so it gets finished rather than dropped mid-wall.

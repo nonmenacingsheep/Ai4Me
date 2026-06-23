@@ -3873,7 +3873,7 @@ const WACTION_ICON = {
   chop: '🪓', seek_wood: '🪓',
   mine: '⛏️', seek_stone: '⛏️', clay: '⛏️', sand: '⛏️', flint: '⛏️',
   socialize: '💬', befriend: '💬',
-  flee: '🏃',
+  flee: '🏃', guard: '🛡️',
   // 'wander' intentionally has no icon — idle wandering shouldn't clutter the view.
 };
 // Trees drawn as ~2×2-tile canopy sprites (per the requested sizing) when zoomed in,

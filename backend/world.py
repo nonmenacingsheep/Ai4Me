@@ -266,6 +266,7 @@ WOLF_GUARDS_SAFE   = 2        # this many companions nearby and the wolf won't r
 WOLF_BITE          = 0.17     # hp a wolf bite costs its victim
 WOLF_BITE_GAIN     = 6.0      # energy a wolf gains from a person (well under a deer — people aren't easy prey)
 FLEE_TRIGGER       = 0.55     # cached danger at/above which the BODY reflexively flees, overriding its aim
+GUARD_RANGE        = 7        # a guardian shields band-mates (and faces down wolves) within this range
 
 # ─── Tile building (Phase 3.5) — top-down "blocks" ───────────────────────────
 # People raise REAL buildings the Minecraft way: a building is a footprint of
@@ -1201,9 +1202,9 @@ class World:
             adj = np.roll(np.roll(wet, dy, 0), dx, 1)
             moist[adj] = np.maximum(moist[adj], 0.6)
 
-    def _danger_at(self, p, wolf_pos) -> float:
-        """Wolf-threat to this soul right now (0..1): keen when a wolf is close, eased by each
-        companion within band range, and zero under a real roof. Cheap — scans only wolves."""
+    def _wolf_threat_at(self, p, wolf_pos) -> float:
+        """RAW wolf proximity to this soul (0..1), before any protection — 'is a wolf bearing
+        down on me'. Zero under a roof. Drives the guardian's resolve (a ward to protect)."""
         if not wolf_pos or self._shelter_factor(p) > 0.5:
             return 0.0
         px, py = p["x"], p["y"]
@@ -1214,9 +1215,32 @@ class World:
                 near = d
         if near > WOLF_MENACE_VISION:
             return 0.0
+        return 1.0 - near / (WOLF_MENACE_VISION + 1)
+
+    def _guardian_near(self, x, y, exclude=None) -> bool:
+        """Is a living soul standing GUARD within range of (x,y)? Their watch lets others forage
+        unafraid and warns wolves off — the protector's role the band comes to depend on."""
+        for q in self.people:
+            if q is exclude:
+                continue
+            if (q.get("intention") or {}).get("kind") == "guard" \
+                    and abs(q["x"] - x) + abs(q["y"] - y) <= GUARD_RANGE:
+                return True
+        return False
+
+    def _danger_at(self, p, wolf_pos) -> float:
+        """OPERATIONAL danger that drives flight/forage-interruption: the raw wolf threat, eased
+        by each companion within band range and ZEROED when a guardian stands watch nearby — so a
+        protected forager keeps working instead of bolting. (Self-guardians don't shield self.)"""
+        raw = self._wolf_threat_at(p, wolf_pos)
+        if raw <= 0:
+            return 0.0
+        if self._guardian_near(p["x"], p["y"], exclude=p):
+            return 0.0
+        px, py = p["x"], p["y"]
         guards = sum(1 for q in self.people if q is not p
                      and abs(q["x"] - px) + abs(q["y"] - py) <= WOLF_BAND_SAFETY)
-        return (1.0 - near / (WOLF_MENACE_VISION + 1)) / (1 + guards)
+        return raw / (1 + guards)
 
     def _exposure_threat(self, night: bool) -> float:
         """How punishing it is to be OUTDOORS right now (0..1), from night cold + weather +
@@ -1263,8 +1287,9 @@ class World:
                 continue
             guards = sum(1 for q in self.people if q is not best
                          and abs(q["x"] - best["x"]) + abs(q["y"] - best["y"]) <= WOLF_BAND_SAFETY)
-            if guards >= WOLF_GUARDS_SAFE or self._shelter_factor(best) > 0.5:
-                continue                                 # too risky for the wolf — it leaves them be
+            if guards >= WOLF_GUARDS_SAFE or self._shelter_factor(best) > 0.5 \
+                    or self._guardian_near(best["x"], best["y"], exclude=best):
+                continue                                 # band, roof, or a standing guardian — the wolf backs off
             if bd <= 1:                                  # in reach — strike
                 if self.rng.random() < ANIMALS["wolf"]["kill_chance"] * bold / (1 + guards):
                     best["hp"] = max(0.0, best["hp"] - WOLF_BITE)
@@ -1549,6 +1574,7 @@ class World:
             # How much danger this soul is in from a prowling wolf right now (0..1), eased by
             # the band and nullified by a roof — cached so both the body's flee-reflex and the
             # mind's deliberation read the same read of the situation.
+            p["_wolf_threat"] = self._wolf_threat_at(p, wolf_pos)   # raw peril (drives a guardian's resolve)
             p["_danger"] = self._danger_at(p, wolf_pos)
             action, movedir = self._person_decide(p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly)
             p["action"] = action
@@ -1684,7 +1710,7 @@ class World:
             # Seeking and wandering move the body; acting-in-place does not.
             if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
                           "seek_fiber", "seek_leaves", "seek_berry", "hunt", "fish",
-                          "haul", "wander", "socialize", "flee"):
+                          "haul", "wander", "socialize", "flee", "guard"):
                 self._move_person(p, movedir)
 
             # Health couples to the physiological RESERVES (never to comfort). Any reserve in
@@ -2046,6 +2072,12 @@ class World:
             # Situational stakes the mind weighs: a prowling wolf nearby (danger) and being
             # caught out in foul weather without a roof (exposed). Both cached this tick.
             "danger": p.get("_danger", 0.0),
+            # The keenest wolf-peril on any band-mate within guarding reach — a brave, settled
+            # soul weighs this and stands watch over them instead of minding only itself.
+            "ward_threat": max((q.get("_wolf_threat", 0.0) for q in self.people
+                                if q is not p
+                                and abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= GUARD_RANGE),
+                               default=0.0),
             "exposed": p.get("_exposed", 0.0),
             "build_progress": build_progress,
         }
@@ -2062,7 +2094,8 @@ class World:
         x, y = p["x"], p["y"]
         # Fear reflex: a wolf right on top of an exposed soul overrides whatever they were doing —
         # bolt for home/the band now, don't wait for the next deliberation beat.
-        if p.get("_danger", 0.0) >= FLEE_TRIGGER:
+        if p.get("_danger", 0.0) >= FLEE_TRIGGER \
+                and (p.get("intention") or {}).get("kind") != "guard":
             return self._flee(p)
         # (Re)deliberate when there's no aim, the beat has elapsed, or a need has spiked past
         # whatever the current intention is worth (an emergency interrupt).
@@ -2135,6 +2168,8 @@ class World:
             return "rest", None
         if kind == "flee":
             return self._flee(p)
+        if kind == "guard":
+            return self._guard(p)
         if kind == "ply":
             # Ply one's trade: produce the surplus that division of labour and barter run on.
             return self._ply(p, edible, drinkable, tree, fiber, leaf, lx, ly)
@@ -2213,6 +2248,27 @@ class World:
         if abs(hx - x) + abs(hy - y) > 0:
             return "flee", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         return "rest", None
+
+    def _guard(self, p):
+        """Stand watch over the band-mate most in a wolf's sights: stride to their side and
+        hold there (the body's _guardian_near check then shields them and warns the wolf off).
+        With no one left to ward, fall back to idle — the threat has passed."""
+        x, y = p["x"], p["y"]
+        ward, wd = None, GUARD_RANGE + 1
+        for q in self.people:
+            if q is p:
+                continue
+            t = q.get("_wolf_threat", 0.0)
+            if t <= 0:
+                continue
+            d = abs(q["x"] - x) + abs(q["y"] - y)
+            if d <= GUARD_RANGE and t > 0 and d < wd:
+                ward, wd = q, d
+        if ward is None:
+            return self._idle(p)
+        if wd > 1:                                   # close in to put myself between ward and wolf
+            return "guard", (int(np.sign(ward["x"] - x)), int(np.sign(ward["y"] - y)))
+        return "guard", None                         # at their side — hold the watch
 
     def _person_build_decide(self, p, tree, stone, fiber, leaf, lx, ly):
         """The crafting/building drive (a comfortable person's 'project'). Returns a body
@@ -4307,6 +4363,45 @@ if __name__ == "__main__":
     guarded_ok = xp["hp"] == 1.0
     print(f"  predation test: lone soul bitten={bit}, guarded soul unharmed={guarded_ok} "
           f"-> {'OK' if (bit and guarded_ok) else 'FAILED'}")
+
+    # GUARDIAN ROLE — a single soul STANDING WATCH (not just any companion) wards off the wolf
+    # and zeroes the ward's operational danger, and a bold soul chooses to guard while a timid
+    # one flees. Tests the deterrence, the danger-nulling, and the drive in one pass.
+    wgd = World().generate(seed=11); wgd.people = []
+    wyy, wxx = np.argwhere((wgd.water == WATER_NONE) & (wgd.biome == B["grassland"]))[0]
+    wgd._add_person(int(wxx), int(wyy), name="Ward")
+    ward = wgd.people[0]; ward["home_struct"] = None; ward["hp"] = 1.0
+    wgd.animals = []; wgd._add_animal("wolf", int(ward["x"]) + 1, int(ward["y"]))
+    wolfg = wgd.animals[0]
+    # A lone protector who is NOT guarding (no intention) doesn't shield — the wolf still bites.
+    prot = wgd._add_person(int(ward["x"]) + 2, int(ward["y"]), name="Protector")
+    prot = wgd.people[-1]; prot["intention"] = {"kind": "rest"}
+    wpos = [(wolfg["x"], wolfg["y"])]
+    danger_idle = wgd._danger_at(ward, wpos)
+    prot["intention"] = {"kind": "guard"}                          # now they stand watch
+    danger_guarded = wgd._danger_at(ward, wpos)
+    bit2 = False
+    for _ in range(120):
+        ward["hp"] = 1.0; wolfg["feed_next"] = 0.0
+        wolfg["x"], wolfg["y"] = int(ward["x"]) + 1, int(ward["y"])
+        prot["x"], prot["y"] = int(ward["x"]) + 2, int(ward["y"])  # keep the guardian in range
+        wgd._wolves_menace_people(0.4, night=True)
+        if ward["hp"] < 1.0:
+            bit2 = True; break
+    deter_ok = danger_idle > 0.05 and danger_guarded == 0.0 and not bit2
+    # The drive: a bold soul (low caution) with a roof and a threatened ward picks "guard";
+    # a timid one with the same ctx flees instead.
+    bold = wgd._add_person(int(wxx), int(wyy), name="Bold"); bold = wgd.people[-1]
+    bold["home_struct"] = "s_h"; bold["traits"]["caution"] = 0.05; bold["values"] = {}
+    timid = wgd._add_person(int(wxx), int(wyy), name="Timid"); timid = wgd.people[-1]
+    timid["home_struct"] = "s_h"; timid["traits"]["caution"] = 0.95; timid["values"] = {}
+    gctx = {"ward_threat": 0.6, "danger": 0.5, "clock": 0.0, "night": False, "others_exist": True}
+    bold_kind = mind.deliberate(bold, gctx, wgd.rng)["kind"]
+    timid_kind = mind.deliberate(timid, gctx, wgd.rng)["kind"]
+    drive_ok = bold_kind == "guard" and timid_kind == "flee"
+    guardian_ok = deter_ok and drive_ok
+    print(f"  guardian test: danger idle={danger_idle:.2f}→guarded={danger_guarded:.2f}, ward-bitten={bit2}, "
+          f"bold→{bold_kind}/timid→{timid_kind} -> {'OK' if guardian_ok else 'FAILED'}")
 
     # COMMUNAL GRANARY — a forager's home surplus overflows into a shared store, and a soul
     # whose own larder is bare draws from the commons (the interdependence the pool creates).
