@@ -1824,6 +1824,22 @@ class World:
                                 if ev:
                                     self._note("social", ev)
                                 break
+                    # The quiet bonds of daily life — kin breaking bread side by side (#1), and
+                    # children at play (#5) — each warms a relationship a little. Gated to a small
+                    # per-tick chance so standing together a while builds the bond gradually
+                    # rather than spiking it, and to keep the pass cheap.
+                    if self.rng.random() < 0.06:
+                        both_eat = a.get("action") == "eat" and b.get("action") == "eat"
+                        both_kids = a["age"] < ADULT_AGE and b["age"] < ADULT_AGE
+                        if both_eat or both_kids:
+                            ra2, rb2 = mind._rel(a, b, self.clock), mind._rel(b, a, self.clock)
+                            mind._adjust(ra2, 0.008, 0.03); mind._adjust(rb2, 0.008, 0.03)
+                            if self.rng.random() < 0.15:
+                                if both_kids:
+                                    mind.speak(a, f"Tag — you're it, {b['name']}!", self.clock)
+                                    self._note("social", f"{a['name']} and {b['name']} played together.")
+                                else:
+                                    self._note("social", f"{a['name']} and {b['name']} shared a meal.")
 
     # ── generations: bonding, birth, inheritance (Phase 4) ───────────────────────
     def _maybe_bond(self, a, b):
@@ -2248,10 +2264,23 @@ class World:
         return None
 
     def _idle(self, p):
-        """Drift home if strayed, else amble — the resting state of a mind between aims."""
+        """Drift home if strayed, else gather toward company — the resting state of a mind
+        between aims. Idle souls drift toward a nearby band-mate rather than scattering, so the
+        village reads as a gathering of folk rather than figures milling alone (#4)."""
         hx, hy = p["home"]
         if abs(hx - p["x"]) + abs(hy - p["y"]) > 6:
             return "wander", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
+        # Drift toward the nearest neighbour within an easy stroll (not a cross-map trek), so
+        # the idle band clusters; once beside someone, just amble (the social pass does the rest).
+        best, bd = None, 11
+        for q in self.people:
+            if q is p:
+                continue
+            d = abs(q["x"] - p["x"]) + abs(q["y"] - p["y"])
+            if 1 < d < bd:
+                best, bd = q, d
+        if best is not None:
+            return "wander", (int(np.sign(best["x"] - p["x"])), int(np.sign(best["y"] - p["y"])))
         return "wander", None
 
     def _flee(self, p):
@@ -4600,6 +4629,25 @@ if __name__ == "__main__":
     prudence_ok = inj_ok and enough_ok and leash_ok
     print(f"  prudence test: hurt→{hurt_kind}, full-ply {full_ply:.2f}<empty {empty_ply:.2f}={enough_ok}, "
           f"weak-leashes-home={leash_ok} -> {'OK' if prudence_ok else 'FAILED'}")
+
+    # SOCIAL TEXTURE — two souls meeting GREET each other with a spoken line (#3, conversation
+    # bubbles), and idle souls DRIFT toward company instead of scattering (#4 clustering).
+    wc = World().generate(seed=5); wc.people = []
+    cyy, cxx = np.argwhere((wc.water == WATER_NONE) & (wc.biome == B["grassland"]))[0]
+    wc._add_person(int(cxx), int(cyy), name="Ada")
+    wc._add_person(int(cxx) + 1, int(cyy), name="Ben")
+    a, b = wc.people; wc.clock = 5000.0
+    for q in (a, b):
+        q.pop("say", None)
+    mind.encounter(a, b, wc.clock, wc.rng)
+    greeted = bool(a.get("say")) and bool(b.get("say"))
+    # Idle clustering: a soul with a neighbour a short stroll off ambles toward them.
+    a["home"] = (int(a["x"]), int(a["y"])); b["x"], b["y"] = int(a["x"]) + 5, int(a["y"])
+    _act, move = wc._idle(a)
+    clusters = move == (1, 0)
+    social_ok = greeted and clusters
+    print(f"  social-texture test: greeted={greeted} (\"{a.get('say','')}\"), idle-clusters={clusters} "
+          f"-> {'OK' if social_ok else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the

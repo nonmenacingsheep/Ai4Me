@@ -268,6 +268,53 @@ def _adjust(r: dict, dtrust: float = 0.0, dsent: float = 0.0) -> None:
     r["sentiment"] = max(-1.0, min(1.0, r["sentiment"] + dsent))
 
 
+def _pick(rng, options: list[str]) -> str:
+    """Choose one line (rng is the world's numpy Generator)."""
+    return options[int(rng.integers(len(options)))]
+
+
+def _topic_line(m: dict, name: str, rng) -> str:
+    """Turn a vivid memory into something a soul would actually bring up to a neighbour, so the
+    chatter reads as ABOUT something they lived (#2)."""
+    k = m.get("kind", "")
+    if k == "danger":
+        return _pick(rng, [f"A wolf gave me a fright, {name}.", "I'll not wander far alone again.",
+                           f"Did you hear the howling, {name}?"])
+    if k == "trade":
+        return _pick(rng, [f"That swap served me well, {name}.", f"We should deal again, {name}."])
+    if k in ("discovery", "craft"):
+        return _pick(rng, [f"I worked something out, {name} — I'll show you.",
+                           f"My hands have learned a new trick, {name}."])
+    if k == "gossip":
+        return _pick(rng, [f"You'll have heard the talk, {name}?", f"Folk are saying things, {name}."])
+    if k in ("loss", "death"):
+        return _pick(rng, [f"I still feel the loss, {name}.", f"It's been hard since, {name}."])
+    if k == "social":
+        return _pick(rng, [f"It's good to have kin about, {name}.", f"You've been kind, {name}."])
+    return f"{name}, {m.get('text','')}"
+
+
+def _chat_line(sp: dict, ot: dict, clock: float, rng) -> str:
+    """What `sp` says to `ot` on meeting: warm/curt by how they feel, and now and then about
+    something recent on the mind rather than an empty hello (#3 greetings, #2 topics)."""
+    sent = sp.get("rel", {}).get(ot["id"], {}).get("sentiment", 0.0)
+    name = ot["name"]
+    vivid = [m for m in sp.get("memory", []) if m.get("imp", 0) >= 0.5
+             and m.get("kind") in ("danger", "trade", "discovery", "craft", "gossip",
+                                    "loss", "death", "social")]
+    if vivid and rng.random() < 0.45:
+        m = max(vivid, key=lambda mm: mm["imp"] + _recency(mm["t"], clock, MEM_HALFLIFE_DAYS))
+        return _topic_line(m, name, rng)
+    if sent > 0.3:
+        return _pick(rng, [f"Good to see you, {name}.", f"{name}! Come sit a while.",
+                           f"Well met, {name} — how do you fare?"])
+    if sent < -0.3:
+        return _pick(rng, [f"...{name}.", f"I've little to say to you, {name}.",
+                           f"Hmph. {name}."])
+    return _pick(rng, [f"Well met, {name}.", f"How goes it, {name}?",
+                       f"A fair day, {name}.", f"Greetings, {name}."])
+
+
 def encounter(p: dict, other: dict, clock: float, rng) -> list[str]:
     """Two people are within sight. Update both ledgers, occasionally gossip, and — if it
     makes sense — trade. Returns short event strings (for the world log / speech). Pure
@@ -282,6 +329,10 @@ def encounter(p: dict, other: dict, clock: float, rng) -> list[str]:
     if clock - ra["last"] >= GREET_COOLDOWN:
         ra["last"] = rb["last"] = clock
         p["last_social_t"] = other["last_social_t"] = clock   # contact eases loneliness
+        # They greet — each says a line, warm or curt by how they feel and now and then about
+        # something on their mind. Spoken bubbles make a gathering read as a conversation.
+        speak(p, _chat_line(p, other, clock, rng), clock)
+        speak(other, _chat_line(other, p, clock, rng), clock)
         # Gossip: pass along a strong opinion about a third party, so good/bad names travel.
         if rng.random() < GOSSIP_CHANCE:
             spread = _gossip(p, other, clock)
