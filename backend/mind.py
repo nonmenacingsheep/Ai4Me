@@ -395,6 +395,11 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         # sleeping at all times: the comfort-desire part of the fatigue pull is suppressed,
         # the body's true-exhaustion ramp is not.
         fatigue_u *= REST_BY_DAY_DAMP
+    # Injury — a hurt body wants to lie low and mend rather than carry on into harm. Scales with
+    # how badly wounded; keeps the soul resting (where hp heals) until it has recovered (#9).
+    hp_deficit = 1.0 - _clamp01(p.get("hp", 1.0))
+    if hp_deficit > 0.3:
+        fatigue_u = max(fatigue_u, 0.45 + 0.4 * hp_deficit)
     # Exposure — caught out in the cold/wet, a soul is pulled to get under cover (rest at home).
     if exposed > 0.1:
         fatigue_u = max(fatigue_u, 0.4 + 0.45 * exposed)
@@ -512,6 +517,14 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         ply_u = {"forager": 0.20 + 0.10 * (1.0 - amb),
                  "builder": 0.15 + 0.13 * amb,
                  "toolmaker": 0.15 + 0.16 * cur}.get(voc, 0.18) * comfort
+        # Stop at enough (#14): a forager whose own larder is already brimming doesn't keep
+        # mindlessly hauling food — the trade pull eases right off, freeing the hours for the
+        # band (company, helping, building) instead of an ever-growing pile that only spoils.
+        if voc == "forager":
+            larder = p.get("store", {}).get("food", 0)
+            target = PROVISION_TARGET * SEASON_STOCK_MULT.get(ctx.get("season", "spring"), 1.0)
+            if larder >= target:
+                ply_u *= 0.25
         why = {"forager": "lay in food while I can", "builder": "stock good timber",
                "toolmaker": "make spare gear for us all"}.get(voc, "ply my trade")
         out.append(("ply", None, ply_u, why))

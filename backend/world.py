@@ -2204,9 +2204,14 @@ class World:
         if kind == "explore":
             p["last_explore_t"] = self.clock
             # Curiosity is leashed to home range: range out, but turn back before straying
-            # past easy return to known water — wonder shouldn't be a death sentence.
+            # past easy return to known water — wonder shouldn't be a death sentence. The leash
+            # SHORTENS when the body is weak (hungry/thirsty/tired/hurt), so a soul never wanders
+            # far from relief while running low — prudence reins in curiosity (#20).
+            weak = max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0),
+                       1.0 - p.get("hp", 1.0))
+            leash = EXPLORE_LEASH * (1.0 - 0.6 * min(1.0, weak))
             hx, hy = p["home"]
-            if abs(hx - x) + abs(hy - y) > EXPLORE_LEASH:
+            if abs(hx - x) + abs(hy - y) > leash:
                 return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
             return "wander", self._explore_dir(p)
         if kind == "avoid" and target:
@@ -4562,6 +4567,39 @@ if __name__ == "__main__":
     sleep_ok = day_kind != "rest" and night_kind == "rest" and spent_kind == "rest"
     print(f"  circadian test: day-drowsy→{day_kind}, night→{night_kind}, day-exhausted→{spent_kind} "
           f"-> {'OK' if sleep_ok else 'FAILED'}")
+
+    # PRUDENCE HABITS — a hurt soul lies low to mend (#9), a forager with a full larder eases off
+    # hauling more food (#14), and a weak soul's wander-leash shortens so it won't stray from
+    # relief (#20). All driven through the real arbiter / actuation.
+    wp = World().generate(seed=5); wp.people = []
+    pyy, pxx = np.argwhere((wp.water == WATER_NONE) & (wp.biome == B["grassland"]))[0]
+    wp._add_person(int(pxx), int(pyy), name="Hurt")
+    hz = wp.people[0]; hz["home_struct"] = "s_h"; hz["home"] = (int(hz["x"]), int(hz["y"]))
+    hz["thirst"] = hz["hunger"] = 0.1; hz["fatigue"] = 0.4; hz["stamina"] = 0.8
+    hz["hp"] = 0.45                                         # wounded — should choose to rest and mend
+    hurt_kind = max(mind.drives(hz, wp._mind_ctx(hz, night=False)), key=lambda d: d[2])[0]
+    hz["hp"] = 1.0
+    inj_ok = hurt_kind == "rest"
+    # Forager ply eases off once the larder is brimming.
+    fctx = {"vocation": "forager", "home_struct": "s_h", "clock": 5000.0, "night": False,
+            "season": "spring", "others_exist": True}
+    hz["home_struct"] = "s_h"; hz["fatigue"] = 0.1
+    def _ply_u(store):
+        hz["store"] = store
+        return next((d[2] for d in mind.drives(hz, fctx) if d[0] == "ply"), 0.0)
+    empty_ply, full_ply = _ply_u({"food": 0}), _ply_u({"food": 99})
+    hz["store"] = {}
+    enough_ok = full_ply < empty_ply * 0.5
+    # Weak soul's leash shortens (the actuation math: a near-starving wanderer far out turns home).
+    hz["hunger"] = 0.1; hz["fatigue"] = 0.9; hz["x"] = int(hz["home"][0]) + 20; hz["y"] = int(hz["home"][1])
+    e4, d4, t4, s4, f4, l4, lx4, ly4, _, _ = wp._perceive(hz["x"], hz["y"])
+    hz["intention"] = {"kind": "explore", "u": 9.9}; hz["delib_cd"] = wp.clock + 9e9   # hold explore
+    wa, wmove = wp._person_decide(hz, e4, d4, t4, s4, f4, l4, False, lx4, ly4)
+    homeward = wmove == (int(np.sign(hz["home"][0] - hz["x"])), 0)
+    leash_ok = homeward
+    prudence_ok = inj_ok and enough_ok and leash_ok
+    print(f"  prudence test: hurt→{hurt_kind}, full-ply {full_ply:.2f}<empty {empty_ply:.2f}={enough_ok}, "
+          f"weak-leashes-home={leash_ok} -> {'OK' if prudence_ok else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the
