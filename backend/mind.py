@@ -529,6 +529,13 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     bored = _clamp01((clock - p.get("last_explore_t", 0.0)) / SOCIAL_FORGET)
     out.append(("explore", None, (0.08 + cur * bored * 0.75) * night_damp, "the far country calls"))
 
+    # Apprenticeship — a soul still short on craft seeks out a markedly more-skilled band-mate to
+    # learn from, keenest in the curious (the teaching itself happens when they're together).
+    mentor_id = ctx.get("mentor_id")
+    if mentor_id and not night:
+        out.append(("befriend", mentor_id, (0.15 + 0.15 * cur) * night_damp,
+                    f"I'd learn the crafts {ctx.get('mentor_name')} knows"))
+
     # Invention — when the band still has problems it hasn't solved (no way to carry water,
     # say), a curious mind tinkers toward a make-shift fix. Sharpened by hardship recently
     # felt: a soul that has known thirst is keener to crack the water problem.
@@ -906,6 +913,7 @@ def give(p: dict, other: dict, good: str, clock: float) -> str | None:
     p["renown"] = p.get("renown", 0.0) + 0.05               # generosity is seen — it builds standing
     remember(p, f"gave {good} to {other['name']}, freely", 0.6, "social", clock)
     remember(other, f"{p['name']} gave me {good} when I had none", 0.75, "social", clock)
+    other.setdefault("owes", {})[p["id"]] = round(clock, 1)   # a kindness remembered, to be repaid (gratitude)
     p["last_social_t"] = other["last_social_t"] = clock
     return f"{p['name']} gave {good} to {other['name']}."
 

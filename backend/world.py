@@ -1838,17 +1838,22 @@ class World:
                     # per-tick chance so standing together a while builds the bond gradually
                     # rather than spiking it, and to keep the pass cheap.
                     if self.rng.random() < 0.06:
+                        _WORK = {"gather", "seek_food", "forage_berry", "seek_berry", "chop",
+                                 "seek_wood", "mine", "hunt", "fish"}
                         both_eat = a.get("action") == "eat" and b.get("action") == "eat"
                         both_kids = a["age"] < ADULT_AGE and b["age"] < ADULT_AGE
-                        if both_eat or both_kids:
+                        both_work = a.get("action") in _WORK and b.get("action") in _WORK   # co-foraging
+                        if both_eat or both_kids or both_work:
                             ra2, rb2 = mind._rel(a, b, self.clock), mind._rel(b, a, self.clock)
                             mind._adjust(ra2, 0.008, 0.03); mind._adjust(rb2, 0.008, 0.03)
                             if self.rng.random() < 0.15:
                                 if both_kids:
                                     mind.speak(a, f"Tag — you're it, {b['name']}!", self.clock)
                                     self._note("social", f"{a['name']} and {b['name']} played together.")
-                                else:
+                                elif both_eat:
                                     self._note("social", f"{a['name']} and {b['name']} shared a meal.")
+                                else:
+                                    self._note("social", f"{a['name']} and {b['name']} worked side by side.")
 
     # ── generations: bonding, birth, inheritance (Phase 4) ───────────────────────
     def _maybe_bond(self, a, b):
@@ -2045,18 +2050,31 @@ class World:
         nd = 999
         ail_id = ail_name = None
         ad = 999
+        mentor_id = mentor_name = None
+        mgap = 1
+        owes = p.get("owes", {})
+        my_recipes = p.get("recipes") or []
         healthy = p.get("hp", 1.0) > 0.6 and not (p.get("illness") and self.clock >= p["illness"]["onset_t"])
         for q in self.people:
             if q is p:
                 continue
             d = abs(q["x"] - p["x"]) + abs(q["y"] - p["y"])
-            if q.get("inv", {}).get("food", 0) <= 1 and d < nd and d <= PERSON["vision"] * 3:
-                needy_id, needy_name, nd = q["id"], q["name"], d
+            if q.get("inv", {}).get("food", 0) <= 1 and d <= PERSON["vision"] * 3:
+                # Repay a past benefactor before a stranger — gratitude reweights need by debt.
+                eff = d * (0.4 if q["id"] in owes else 1.0)
+                if eff < nd:
+                    needy_id, needy_name, nd = q["id"], q["name"], eff
             # A band-mate laid low by sickness (symptoms showing) within reach — only a soul who
             # is itself well goes to nurse them (#11 tend the sick / #10 rescue).
             if healthy and d < ad and d <= PERSON["vision"] * 3 \
                     and q.get("illness") and self.clock >= q["illness"]["onset_t"]:
                 ail_id, ail_name, ad = q["id"], q["name"], d
+            # A markedly more-skilled band-mate to apprentice oneself to — the soul seeks them out
+            # to learn their crafts (apprenticeship; the teaching itself happens on contact).
+            if d <= PERSON["vision"] * 3 and len(my_recipes) < 8:
+                gap = sum(1 for r in (q.get("recipes") or []) if r not in my_recipes)
+                if gap > mgap:
+                    mentor_id, mentor_name, mgap = q["id"], q["name"], gap
         # Whereabouts memory: a soul KNOWS where someone is only by seeing them. Record every
         # person in sight now, so a later wish to find them can be navigated from a real last-known
         # spot rather than by magically tracking their position (feeds the non-omniscient seek).
@@ -2099,6 +2117,7 @@ class World:
             "foe_id": foe_id, "foe_name": foe_name, "foe_mag": foe_mag,
             "needy_id": needy_id, "needy_name": needy_name,
             "ail_id": ail_id, "ail_name": ail_name,
+            "mentor_id": mentor_id, "mentor_name": mentor_name,
             "nearby": nearby or "no one",
             # What the band still hasn't figured out, and how hard-pressed this soul is —
             # so a curious, recently-thirsty person is the keenest to invent.
@@ -3723,7 +3742,10 @@ class World:
                 continue
             rel = learner.get("rel", {}).get(teacher["id"]) or {}
             trust = rel.get("trust", 0.0)
-            if trust < 0.4 or self.rng.random() > 0.5:
+            # A wide skill gap means an eager apprentice and much to impart — teaching takes hold
+            # more readily the more the learner has to learn (apprenticeship).
+            chance = 0.5 + 0.4 * min(1.0, len(gap) / 4.0)
+            if trust < 0.4 or self.rng.random() > chance:
                 continue
             rid = gap[int(self.rng.integers(len(gap)))]
             if self._grant_recipe(learner, rid, via=f"taught by {teacher['name']}",
@@ -4717,6 +4739,33 @@ if __name__ == "__main__":
     care_ok = tend_picks and tended_flag and (1.0 - hp_nursed) < (1.0 - hp_alone)
     print(f"  care test: well-soul→{care_kind[0]} (sick={tend_picks}), nursed-hploss {1-hp_nursed:.3f}"
           f"<alone {1-hp_alone:.3f} -> {'OK' if care_ok else 'FAILED'}")
+
+    # GRATITUDE & APPRENTICESHIP — a soul repays a past benefactor before a stranger even when the
+    # stranger is nearer (#gratitude), and a low-skill soul seeks out a far more-skilled band-mate
+    # to learn from (#apprenticeship). Both surfaced through the real ctx + drive arbiter.
+    wk = World().generate(seed=5); wk.people = []
+    kyy, kxx = np.argwhere((wk.water == WATER_NONE) & (wk.biome == B["grassland"]))[0]
+    wk._add_person(int(kxx), int(kyy), name="Giver")
+    wk._add_person(int(kxx) + 3, int(kyy), name="Stranger")    # nearer, but no debt owed
+    wk._add_person(int(kxx) + 6, int(kyy), name="Patron")      # farther, but a past benefactor
+    giver, stranger, patron = wk.people; wk.clock = 5000.0
+    giver["home_struct"] = "s_h"; giver["home"] = (int(giver["x"]), int(giver["y"]))
+    giver["inv"]["food"] = 9
+    for q in (stranger, patron):
+        q["inv"]["food"] = 0
+    giver["owes"] = {patron["id"]: 100.0}                      # patron once gave to me
+    gctx2 = wk._mind_ctx(giver, night=False)
+    gratitude_ok = gctx2.get("needy_id") == patron["id"]       # repay the patron first
+    # Apprenticeship: a near-unskilled soul beside a master should see them as a mentor.
+    learner = giver
+    learner["recipes"] = ["rope"]; stranger["recipes"] = ["rope"]
+    patron["recipes"] = ["rope", "crude_axe", "leaf_flask", "forage_sack", "campfire", "sleeping_mat"]
+    learner.pop("owes", None)
+    actx = wk._mind_ctx(learner, night=False)
+    appr_ok = actx.get("mentor_id") == patron["id"] \
+        and any(d[0] == "befriend" and d[1] == patron["id"] for d in mind.drives(learner, actx))
+    print(f"  gratitude/apprentice test: repay-patron={gratitude_ok}, mentor-found={appr_ok} "
+          f"-> {'OK' if (gratitude_ok and appr_ok) else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the
