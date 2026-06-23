@@ -436,6 +436,11 @@ HUNT_MEAT_YIELD = {"rabbit": 2, "deer": 5}      # raw meat a carcass gives (a de
 FISH_CATCH_ROD = 0.05              # per game-min at the water with a rod
 FISH_CATCH_BARE = 0.013           # tickling fish by hand — slow going
 MEAT_STOCK = 6                     # a forager lays in raw flesh up to this, then cooks/stockpiles
+# Hunting parties: big game (a deer) is too much for one — it takes a PARTY of HUNT_PARTY_MIN
+# hunters on hand to bring down, and the carcass is shared among them. A lone hunter can only
+# take small game (rabbits), so hunters depend on one another for the richest hauls.
+HUNT_PARTY_MIN = 2                 # hunters near the quarry needed to down big game
+HUNT_PARTY_RANGE = 4               # how near a band-mate counts as part of the hunting party
 RAW_FLESH_SICKEN = 0.16            # chance a raw meat/fish meal brings on tainted_gut
 COOKED_HUNGER_RELIEF = 0.55        # a cooked meal is the most filling thing there is
 COOKED_SATIETY = 0.22
@@ -1619,13 +1624,7 @@ class World:
                 if pid:
                     prey = next((a for a in self.animals if a["id"] == pid), None)
                     if prey is not None and abs(prey["x"] - x) + abs(prey["y"] - y) <= 1:
-                        has_spear = p["inv"].get("crude_spear", 0) > 0
-                        if self.rng.random() < (HUNT_KILL_SPEAR if has_spear else HUNT_KILL_BARE):
-                            self.animals = [a for a in self.animals if a["id"] != pid]
-                            yld = HUNT_MEAT_YIELD.get(prey["sp"], 2) + (1 if has_spear else 0)
-                            p["inv"]["meat"] = p["inv"].get("meat", 0) + yld
-                            self._note("hunt", f"{p['name']} brought down a {prey['sp']}.")
-                            self.version += 1
+                        self._resolve_hunt_strike(p, prey)
             elif action == "fish":
                 if drinkable[ly, lx]:
                     rate = FISH_CATCH_ROD if p["inv"].get("fishing_rod", 0) else FISH_CATCH_BARE
@@ -3147,22 +3146,59 @@ class World:
                         "known": False}
         return True
 
-    def _nearest_prey(self, p, max_d=HUNT_VISION):
-        """The nearest huntable animal (rabbit/deer) within `max_d`, or None."""
+    def _party_near(self, x, y, exclude=None) -> int:
+        """How many people are within hunting-party range of (x,y) — the band-mates on hand to
+        join a hunt (or, at the quarry, the party available to bring big game down)."""
+        return sum(1 for q in self.people if q is not exclude
+                   and abs(q["x"] - x) + abs(q["y"] - y) <= HUNT_PARTY_RANGE)
+
+    def _nearest_prey(self, p, max_d=HUNT_VISION, big_ok=True):
+        """The nearest huntable animal within `max_d`, or None. With `big_ok` False (a lone
+        hunter), deer are skipped — only small game (rabbits) is worth a solo chase."""
         x, y = p["x"], p["y"]
         best = None; best_d = max_d + 1
         for a in self.animals:
             if a["sp"] not in ("rabbit", "deer"):
+                continue
+            if a["sp"] == "deer" and not big_ok:
                 continue
             d = abs(a["x"] - x) + abs(a["y"] - y)
             if d < best_d:
                 best, best_d = a, d
         return best
 
+    def _resolve_hunt_strike(self, p, prey) -> bool:
+        """One strike at adjacent quarry. Big game (deer) needs a PARTY of HUNT_PARTY_MIN on hand
+        or the strike just scatters it; a felled deer is SHARED among the party, while small game
+        is the lone hunter's own. Returns True on a kill. A spear makes the strike far surer."""
+        has_spear = p["inv"].get("crude_spear", 0) > 0
+        big = prey["sp"] == "deer"
+        party = ([q for q in self.people
+                  if abs(q["x"] - prey["x"]) + abs(q["y"] - prey["y"]) <= HUNT_PARTY_RANGE]
+                 if big else [p])
+        if big and len(party) < HUNT_PARTY_MIN:
+            return False                                       # too few hands — the deer breaks away
+        if self.rng.random() >= (HUNT_KILL_SPEAR if has_spear else HUNT_KILL_BARE):
+            return False
+        self.animals = [a for a in self.animals if a["id"] != prey["id"]]
+        yld = HUNT_MEAT_YIELD.get(prey["sp"], 2) + (1 if has_spear else 0)
+        if big and len(party) > 1:                             # share the carcass among the party
+            share = max(1, yld // len(party))
+            for q in party:
+                q["inv"]["meat"] = q["inv"].get("meat", 0) + share
+            self._note("hunt", f"{p['name']}'s party brought down a {prey['sp']}.")
+        else:
+            p["inv"]["meat"] = p["inv"].get("meat", 0) + yld
+            self._note("hunt", f"{p['name']} brought down a {prey['sp']}.")
+        self.version += 1
+        return True
+
     def _hunt(self, p, max_d=HUNT_VISION):
         """Pursue the nearest game within `max_d`; a body action toward it, or a strike when
-        adjacent (the kill is resolved in the action handler). None when there's nothing to chase."""
-        prey = self._nearest_prey(p, max_d)
+        adjacent (the kill is resolved in the action handler). None when there's nothing to chase.
+        Big game is only pursued when a band-mate is near enough to make a party."""
+        big_ok = self._party_near(p["x"], p["y"], exclude=p) >= (HUNT_PARTY_MIN - 1)
+        prey = self._nearest_prey(p, max_d, big_ok=big_ok)
         if prey is None:
             return None
         dx, dy = prey["x"] - p["x"], prey["y"] - p["y"]
@@ -4219,6 +4255,23 @@ if __name__ == "__main__":
         coop_ok = solo_blocked and crew_builds
     print(f"  co-op build test: lone-builder-blocked={solo_blocked if csite else '?'} "
           f"crew-of-two-builds={crew_builds if csite else '?'} -> {'OK' if coop_ok else 'FAILED'}")
+
+    # HUNTING PARTIES — big game (a deer) can't be taken by one: a lone hunter's strikes never
+    # fell it; a party of HUNT_PARTY_MIN on hand brings it down and shares the meat.
+    whp = World().generate(seed=7); whp.people = []; whp.animals = []
+    py, px = np.argwhere((whp.water == WATER_NONE) & (whp.biome == B["grassland"]))[0]
+    whp._add_person(int(px), int(py), name="Hunter1"); h1 = whp.people[0]; h1["inv"] = {"crude_spear": 1}
+    whp._add_animal("deer", int(px) + 1, int(py)); deer = whp.animals[-1]
+    solo_failed = all(not whp._resolve_hunt_strike(h1, deer) for _ in range(200))   # never fells it alone
+    # lone hunter targets small game only (deer skipped without a party near)
+    whp._add_animal("rabbit", int(px) - 1, int(py))
+    targets_small = whp._nearest_prey(h1, big_ok=False)["sp"] == "rabbit"
+    whp._add_person(int(px) + 1, int(py) - 1, name="Hunter2"); h2 = whp.people[1]; h2["inv"] = {"crude_spear": 1}
+    party_killed = any(whp._resolve_hunt_strike(h1, deer) for _ in range(400))      # a party fells it
+    shared = h2["inv"].get("meat", 0) > 0                                           # and shares the meat
+    party_ok = solo_failed and targets_small and party_killed and shared
+    print(f"  hunting-party test: lone-can't-fell-deer={solo_failed} solo-targets-small={targets_small} "
+          f"party-fells-it={party_killed} meat-shared={shared} -> {'OK' if party_ok else 'FAILED'}")
 
     # STAKES — exposure & predation give a roof and the band real survival worth.
     wx = World().generate(seed=7); wx.people = []
