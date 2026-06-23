@@ -267,6 +267,8 @@ WOLF_BITE          = 0.17     # hp a wolf bite costs its victim
 WOLF_BITE_GAIN     = 6.0      # energy a wolf gains from a person (well under a deer — people aren't easy prey)
 FLEE_TRIGGER       = 0.55     # cached danger at/above which the BODY reflexively flees, overriding its aim
 GUARD_RANGE        = 7        # a guardian shields band-mates (and faces down wolves) within this range
+REST_HOMEWARD_MAX  = 8        # at rest, a soul walks home to sleep only if home is within this many tiles
+                              # (farther off it sleeps where it stands — no fatal all-night march home)
 
 # ─── Tile building (Phase 3.5) — top-down "blocks" ───────────────────────────
 # People raise REAL buildings the Minecraft way: a building is a footprint of
@@ -2165,6 +2167,13 @@ class World:
                     return f
             return self._seek(p, x, y, here_food, edible, lx, ly, "food", "eat", "seek_food")
         if kind == "rest":
+            # Sleep under the roof if home is a short walk off (so the band beds down in its
+            # dwellings, #2) — but only when not yet bone-tired and home is genuinely near;
+            # a spent soul sleeps where it stands rather than marching all night into exhaustion.
+            hx, hy = p["home"]
+            hd = abs(hx - x) + abs(hy - y)
+            if p.get("home_struct") and 1 < hd <= REST_HOMEWARD_MAX and p.get("fatigue", 0) < 0.8:
+                return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
             return "rest", None
         if kind == "flee":
             return self._flee(p)
@@ -4532,6 +4541,27 @@ if __name__ == "__main__":
     think_ok = survive_first and meaning_when_safe
     print(f"  thinking-first test: thirsty→{th['intention']['kind']}, "
           f"safe-loner→{loner['intention']['kind']} -> {'OK' if think_ok else 'FAILED'}")
+
+    # CIRCADIAN SLEEP — a soul keeps daylight hours: mild daytime drowsiness does NOT send it
+    # to bed (it pushes through and does something), but the same tiredness AT NIGHT does, and
+    # genuine daytime exhaustion (a spent stamina reserve) still earns rest. Fixes "they sleep
+    # whenever". Driven through the real drive arbiter.
+    ws = World().generate(seed=5); ws.people = []
+    syy, sxx = np.argwhere((ws.water == WATER_NONE) & (ws.biome == B["grassland"]))[0]
+    ws._add_person(int(sxx), int(syy), name="Drowsy")
+    dz = ws.people[0]; dz["home_struct"] = "s_h"; dz["home"] = (int(dz["x"]), int(dz["y"]))
+    dz["thirst"] = dz["hunger"] = 0.1; dz["traits"]["sociability"] = 0.8; dz["last_social_t"] = -3000
+    dz["fatigue"] = 0.55; dz["stamina"] = 0.7            # tired-ish, but reserve sound
+    day_ctx = ws._mind_ctx(dz, night=False)
+    day_kind = max(mind.drives(dz, day_ctx), key=lambda d: d[2])[0]   # what wins by day
+    night_ctx = ws._mind_ctx(dz, night=True)
+    night_kind = max(mind.drives(dz, night_ctx), key=lambda d: d[2])[0]
+    dz["fatigue"] = 0.95; dz["stamina"] = 0.2           # now truly spent — should rest even by day
+    spent_ctx = ws._mind_ctx(dz, night=False)
+    spent_kind = max(mind.drives(dz, spent_ctx), key=lambda d: d[2])[0]
+    sleep_ok = day_kind != "rest" and night_kind == "rest" and spent_kind == "rest"
+    print(f"  circadian test: day-drowsy→{day_kind}, night→{night_kind}, day-exhausted→{spent_kind} "
+          f"-> {'OK' if sleep_ok else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the

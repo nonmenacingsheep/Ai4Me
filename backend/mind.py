@@ -150,6 +150,8 @@ def need_urgency(comfort: float, reserve: float = 1.0) -> float:
     danger = (1.0 - reserve) * RESERVE_TILT + max(0.0, DANGER_RESERVE - reserve) * DANGER_SLOPE
     return desire + danger
 HYSTERESIS = 0.12            # an intention must be beaten by this margin to be dropped
+REST_BY_DAY_DAMP = 0.35      # daytime: ordinary drowsiness is damped to this fraction (keeps daylight hours)
+REST_BY_DAY_RESERVE = 0.35   # …but a stamina reserve at/below this is true exhaustion — rest pull stands
 BUILD_MOMENTUM = 0.35       # sunk-cost pull: a fully-underway build adds this much to its drive,
                             # so a half-raised home is FINISHED rather than abandoned mid-wall for
                             # some lesser whim (the user's "houses never get done" complaint)
@@ -380,13 +382,20 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     out.append(("eat", None, hunger_u, "hunger gnaws at me"))
     fatigue_u = need_urgency(p.get("fatigue", 0), p.get("stamina", 1.0))
     night = ctx.get("night")
+    exposed = _clamp01(ctx.get("exposed", 0.0))
     if night:
         # People sleep at night. Fatigue rises fast (~a full day's worth daily), so a nightly
         # rest is non-negotiable — only a pressing thirst/hunger (whose danger ramp out-scores
         # this) should wake them. Without this they socialize through the night and waste away.
-        fatigue_u = max(fatigue_u, 0.75)
+        fatigue_u = max(fatigue_u, 0.85)
+    elif exposed <= 0.1 and p.get("stamina", 1.0) > REST_BY_DAY_RESERVE:
+        # By DAY a soul pushes through ordinary drowsiness instead of napping — only genuine
+        # exhaustion (the stamina reserve actually running low, whose danger ramp survives this
+        # damp) sends them to rest. This is what makes them keep daylight hours rather than
+        # sleeping at all times: the comfort-desire part of the fatigue pull is suppressed,
+        # the body's true-exhaustion ramp is not.
+        fatigue_u *= REST_BY_DAY_DAMP
     # Exposure — caught out in the cold/wet, a soul is pulled to get under cover (rest at home).
-    exposed = _clamp01(ctx.get("exposed", 0.0))
     if exposed > 0.1:
         fatigue_u = max(fatigue_u, 0.4 + 0.45 * exposed)
     out.append(("rest", None, fatigue_u, "I should get out of this weather" if exposed > 0.3
