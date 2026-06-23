@@ -542,6 +542,15 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     if foe_id and foe_mag > 0.3:
         out.append(("avoid", foe_id, cau * foe_mag, f"I'll keep clear of {foe_name}"))
 
+    # Care — a well, settled soul goes to nurse a band-mate laid low by sickness (#11), bringing
+    # food to them if it can (#10 rescue). Keenest in the sociable; comfort-gated so a soul tends
+    # its own needs first, and below survival's danger ramp so nursing never costs a life.
+    ail_id = ctx.get("ail_id")
+    if ail_id and p.get("home_struct") is not None:
+        comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+        out.append(("tend", ail_id, (0.55 + 0.30 * soc) * comfort,
+                    f"{ctx.get('ail_name')} is ill — I'll tend them"))
+
     # Provisioning — a settled soul lays in a food reserve at home against lean days: survival
     # FORESIGHT, not just an idle-hours flourish, so every housed soul feels it (not only the
     # forager). Comfort-gated like any project and keenest when the larder runs low, but always

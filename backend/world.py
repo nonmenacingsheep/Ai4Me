@@ -404,6 +404,7 @@ DISEASE = {
 WATERBORNE = ("cholera", "dysentery", "typhoid_fever")   # only these come from raw water
 WATER_INFECT_CHANCE = 0.012        # chance a single raw drink from a natural source infects
 IMMUNITY_DAYS = 90.0               # how long recovery shields against that same disease
+TEND_RECOVERY_BOOST = 0.6          # extra game-min shaved off an illness per game-min it's nursed
 HEARTH_COST = {"wood": 3, "stone": 2, "leaves": 1}   # the campfire a soul raises to boil water by
 
 # ─── Berry bushes (P3 gathering overhaul) ────────────────────────────────────
@@ -1807,6 +1808,14 @@ class World:
                             ev = mind.give(giver, taker, "food", self.clock)
                             if ev:
                                 self._note("social", ev)
+                        # Rescue: a caretaker nursing this sick soul shares food with them even
+                        # off their last ration — a hungry, ailing body must be fed (#10).
+                        if (inten.get("kind") == "tend" and inten.get("target") == taker["id"]
+                                and giver.get("inv", {}).get("food", 0) > 0
+                                and taker.get("illness") and taker.get("hunger", 0) > 0.4):
+                            ev = mind.give(giver, taker, "food", self.clock)
+                            if ev:
+                                self._note("social", ev)
                         # A toolmaker (or anyone) beside a band-mate who lacks a piece of gear
                         # they carry a SPARE of hands it over — how crafted goods spread when
                         # they aren't barter goods. This is the toolmaker's social role.
@@ -2034,12 +2043,20 @@ class World:
                 foe_id, foe_name, foe_mag = worst[0], worst[1]["name"], -worst[1]["sentiment"]
         needy_id = needy_name = None
         nd = 999
+        ail_id = ail_name = None
+        ad = 999
+        healthy = p.get("hp", 1.0) > 0.6 and not (p.get("illness") and self.clock >= p["illness"]["onset_t"])
         for q in self.people:
             if q is p:
                 continue
             d = abs(q["x"] - p["x"]) + abs(q["y"] - p["y"])
             if q.get("inv", {}).get("food", 0) <= 1 and d < nd and d <= PERSON["vision"] * 3:
                 needy_id, needy_name, nd = q["id"], q["name"], d
+            # A band-mate laid low by sickness (symptoms showing) within reach — only a soul who
+            # is itself well goes to nurse them (#11 tend the sick / #10 rescue).
+            if healthy and d < ad and d <= PERSON["vision"] * 3 \
+                    and q.get("illness") and self.clock >= q["illness"]["onset_t"]:
+                ail_id, ail_name, ad = q["id"], q["name"], d
         # Whereabouts memory: a soul KNOWS where someone is only by seeing them. Record every
         # person in sight now, so a later wish to find them can be navigated from a real last-known
         # spot rather than by magically tracking their position (feeds the non-omniscient seek).
@@ -2081,6 +2098,7 @@ class World:
             "fav_id": fav_id, "fav_name": fav_name,
             "foe_id": foe_id, "foe_name": foe_name, "foe_mag": foe_mag,
             "needy_id": needy_id, "needy_name": needy_name,
+            "ail_id": ail_id, "ail_name": ail_name,
             "nearby": nearby or "no one",
             # What the band still hasn't figured out, and how hard-pressed this soul is —
             # so a curious, recently-thirsty person is the keenest to invent.
@@ -2230,6 +2248,13 @@ class World:
             if abs(hx - x) + abs(hy - y) > leash:
                 return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
             return "wander", self._explore_dir(p)
+        if kind == "tend" and target:
+            # Go to the sick band-mate's side and nurse them (the recovery boost + any food
+            # they're handed happen on contact in the illness tick / social pass).
+            move = self._seek_toward(p, target)
+            if move is not None:
+                return "socialize", move
+            return "tend", None
         if kind == "avoid" and target:
             t = next((q for q in self.people if q["id"] == target), None)
             if t is not None and (t["x"] != x or t["y"] != y):
@@ -3438,6 +3463,18 @@ class World:
             return "forage_berry", None
         return "seek_berry", (int(np.sign(dx)), int(np.sign(dy)))
 
+    def _tended(self, p) -> bool:
+        """Is a well band-mate keeping vigil at this sick soul's side — standing within a tile
+        with the resolve to tend them? Their nursing eases the illness."""
+        for q in self.people:
+            if q is p:
+                continue
+            if (q.get("intention") or {}).get("kind") == "tend" \
+                    and (q["intention"].get("target") == p["id"]) \
+                    and abs(q["x"] - p["x"]) + abs(q["y"] - p["y"]) <= 1:
+                return True
+        return False
+
     def _illness_factor(self, p):
         """How much a current sickness accelerates fluid/appetite loss (1.0 when healthy or
         still incubating; >1 once symptoms set in)."""
@@ -3460,7 +3497,13 @@ class World:
             ill["known"] = True
             self._note("illness", f"{p['name']} has fallen ill.")
             mind.remember(p, f"I've fallen ill — {DISEASE[ill['d']]['hint']}", 0.9, "illness", now)
-        p["hp"] = max(0.0, p["hp"] - DISEASE[ill["d"]]["hp"] * dt_game_min)
+        # A caretaker keeping vigil at the sick soul's side eases the illness: the body loses
+        # less health and weathers it sooner — so nursing visibly matters (#11).
+        tended = self._tended(p)
+        hp_rate = DISEASE[ill["d"]]["hp"] * (0.5 if tended else 1.0)
+        p["hp"] = max(0.0, p["hp"] - hp_rate * dt_game_min)
+        if tended:
+            ill["end_t"] -= TEND_RECOVERY_BOOST * dt_game_min   # the sickness runs its course faster
         if now >= ill["end_t"]:                              # weathered it
             p.setdefault("immune", {})[ill["d"]] = now + IMMUNITY_DAYS * 1440.0
             p["illness"] = None
@@ -4648,6 +4691,32 @@ if __name__ == "__main__":
     social_ok = greeted and clusters
     print(f"  social-texture test: greeted={greeted} (\"{a.get('say','')}\"), idle-clusters={clusters} "
           f"-> {'OK' if social_ok else 'FAILED'}")
+
+    # CARE — a well, housed soul resolves to TEND a sick band-mate nearby (#11), and a sick soul
+    # kept company by a caretaker loses less health (nursing matters / #10 rescue feeds them).
+    wn = World().generate(seed=5); wn.people = []
+    nyy, nxx = np.argwhere((wn.water == WATER_NONE) & (wn.biome == B["grassland"]))[0]
+    wn._add_person(int(nxx), int(nyy), name="Healer")
+    wn._add_person(int(nxx) + 1, int(nyy), name="Sick")
+    heal, sick = wn.people; wn.clock = 5000.0
+    heal["home_struct"] = "s_h"; heal["home"] = (int(heal["x"]), int(heal["y"]))
+    heal["thirst"] = heal["hunger"] = heal["fatigue"] = 0.1; heal["hp"] = 1.0
+    heal["traits"]["sociability"] = 0.9; heal["store"] = {"food": 99}   # no provision pull
+    heal["last_social_t"] = heal["last_explore_t"] = wn.clock           # not starved for company/novelty
+    dz_d = next(iter(DISEASE))
+    sick["illness"] = {"d": dz_d, "infected_t": 0.0, "onset_t": 0.0, "end_t": 1e9, "known": True}
+    heal["delib_cd"] = 0
+    care_kind = max(mind.drives(heal, wn._mind_ctx(heal, night=False)), key=lambda d: d[2])
+    tend_picks = care_kind[0] == "tend" and care_kind[1] == sick["id"]
+    # Recovery: same illness, same span — nursed vs alone — the nursed body loses less health.
+    heal["intention"] = {"kind": "tend", "target": sick["id"]}
+    tended_flag = wn._tended(sick)
+    sick["hp"] = 1.0; wn._tick_illness(sick, 10.0); hp_nursed = sick["hp"]
+    heal["intention"] = {"kind": "rest"}
+    sick["hp"] = 1.0; sick["illness"]["end_t"] = 1e9; wn._tick_illness(sick, 10.0); hp_alone = sick["hp"]
+    care_ok = tend_picks and tended_flag and (1.0 - hp_nursed) < (1.0 - hp_alone)
+    print(f"  care test: well-soul→{care_kind[0]} (sick={tend_picks}), nursed-hploss {1-hp_nursed:.3f}"
+          f"<alone {1-hp_alone:.3f} -> {'OK' if care_ok else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the
