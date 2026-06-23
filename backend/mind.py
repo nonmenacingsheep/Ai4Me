@@ -377,7 +377,10 @@ def _gossip(speaker: dict, listener: dict, clock: float) -> str | None:
         lr = {"name": op["name"], "trust": 0.5, "sentiment": 0.0,
               "met": round(clock, 1), "trades": 0, "last": 0.0}
         listener["rel"][best_id] = lr
-    lr["sentiment"] = max(-1.0, min(1.0, lr["sentiment"] + GOSSIP_PULL * op["sentiment"]))
+    # Deference: a speaker of standing sways opinion further — the band weights a renowned voice
+    # more heavily than a nobody's (#15).
+    pull = GOSSIP_PULL * (1.0 + min(1.0, speaker.get("renown", 0.0)))
+    lr["sentiment"] = max(-1.0, min(1.0, lr["sentiment"] + pull * op["sentiment"]))
     lr["trust"] = max(0.0, min(1.0, lr["trust"] + 0.04 * (1 if op["sentiment"] > 0 else -1)))
     tone = "warmly" if op["sentiment"] > 0 else "darkly"
     remember(listener, f"{speaker['name']} spoke {tone} of {op['name']}", 0.45, "gossip", clock)

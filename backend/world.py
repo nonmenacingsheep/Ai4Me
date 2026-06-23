@@ -1089,7 +1089,25 @@ class World:
         if self.clock - self._last_pest >= 1440.0:                 # vermin check once a game-day (P5)
             self._tick_pests()
             self._last_pest = self.clock
+        season_now = self.season()
+        if season_now != getattr(self, "_last_season", season_now):
+            self._festival(season_now)                             # the band marks the turn of the year
+        self._last_season = season_now
         self.version += 1
+
+    def _festival(self, season_now):
+        """A turn-of-the-season gathering: the band comes together, every bond warms a little, and
+        the most-esteemed soul calls the festival — a shared rite that knits the group (#18)."""
+        if len(self.people) < 2:
+            return
+        for i, a in enumerate(self.people):
+            for b in self.people[i + 1:]:
+                ra, rb = mind._rel(a, b, self.clock), mind._rel(b, a, self.clock)
+                mind._adjust(ra, 0.02, 0.06); mind._adjust(rb, 0.02, 0.06)
+            a["last_social_t"] = self.clock
+        elder = max(self.people, key=lambda q: q.get("renown", 0.0))
+        mind.speak(elder, f"Gather, all — we've come through to {season_now}!", self.clock)
+        self._note("social", f"The band gathered to mark the turn to {season_now}.")
 
     # ── active region & dormancy (the key to a huge, smooth world) ───────────────
     def _active_region(self):
@@ -4806,6 +4824,32 @@ if __name__ == "__main__":
     maker_ok = teller.get("renown", 0.0) > r0 and listener["inv"].get("axe", 0) == 1
     print(f"  culture test: tale-spread={story_ok}, maker-renown {r0:.2f}->{teller.get('renown',0):.2f}={maker_ok} "
           f"-> {'OK' if (story_ok and maker_ok) else 'FAILED'}")
+
+    # FESTIVAL & DEFERENCE — a turn-of-season gathering warms every bond and the elder calls it
+    # (#18), and a renowned voice sways opinion further than a nobody's (#15).
+    wv = World().generate(seed=5); wv.people = []
+    vyy, vxx = np.argwhere((wv.water == WATER_NONE) & (wv.biome == B["grassland"]))[0]
+    for i in range(3):
+        wv._add_person(int(vxx) + i, int(vyy), name=f"Folk{i}")
+    wv.clock = 5000.0
+    elder = wv.people[0]; elder["renown"] = 0.9
+    before = mind._rel(wv.people[1], wv.people[2], wv.clock)["sentiment"]
+    wv._festival("summer")
+    after = mind._rel(wv.people[1], wv.people[2], wv.clock)["sentiment"]
+    festival_ok = after > before and bool(elder.get("say"))
+    # Deference: same opinion, louder when the speaker has standing.
+    third = "p_ghost"
+    famous = {"id": "p_fame", "name": "Famous", "renown": 1.0,
+              "rel": {third: {"name": "X", "sentiment": 0.8, "trust": 0.7, "met": 0.0, "trades": 0, "last": 0.0}}}
+    humble = {"id": "p_humb", "name": "Humble", "renown": 0.0,
+              "rel": {third: {"name": "X", "sentiment": 0.8, "trust": 0.7, "met": 0.0, "trades": 0, "last": 0.0}}}
+    lf = {"id": "p_lf", "name": "Lf", "rel": {}}
+    lh = {"id": "p_lh", "name": "Lh", "rel": {}}
+    mind._gossip(famous, lf, wv.clock); mind._gossip(humble, lh, wv.clock)
+    deference_ok = lf["rel"][third]["sentiment"] > lh["rel"][third]["sentiment"]
+    print(f"  festival/deference test: bond {before:.2f}->{after:.2f} elder-calls={bool(elder.get('say'))}, "
+          f"famous {lf['rel'][third]['sentiment']:.2f}>humble {lh['rel'][third]['sentiment']:.2f}={deference_ok} "
+          f"-> {'OK' if (festival_ok and deference_ok) else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the
