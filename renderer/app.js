@@ -3897,6 +3897,12 @@ const WORE_RGB = {
   copper_ore: [200, 118, 64], tin_ore: [206, 210, 214], iron_ore: [90, 92, 100],
   gold_ore: [226, 196, 78], coal: [40, 40, 46],
 };
+// Dominant-good icon for a stockpile crate (the larder/granary contents made visible).
+const WGOOD_ICON = {
+  food: '🍖', cooked_meat: '🍖', cooked_fish: '🐟', meat: '🥩', fish: '🐟',
+  water: '💧', safe_water: '💧', wood: '🪵', stone: '🪨', fiber: '🧵',
+  leaves: '🍃', sand: '⏳', clay: '🟤', flint: '🔪',
+};
 
 const WORLD = {
   data: null, base: null, baseCtx: null,
@@ -3940,6 +3946,7 @@ function setWorld(s) {
     people: s.people || [], structures: s.structures || [],
     blocks: s.blocks || [], roofs: s.roofs || [], sites: s.sites || [],
     ore: s.ore || [], berries: s.berries || [], blockNames: s.block_names || {},
+    stone: s.stone || [], stockpiles: s.stockpiles || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -4236,6 +4243,20 @@ function renderWorld() {
       ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
     }
   }
+  // Stone boulders: a grey rock on the highland tile that marks where the band mines stone.
+  if (z >= 3) {
+    for (const sp of (d.stone || [])) {
+      const sx = (sp[0] - cam.camX) * z, sy = (sp[1] - cam.camY) * z;
+      if (!onScreen(sx, sy, 1)) continue;
+      const cx = sx + z / 2, cy = sy + z * 0.55, r = Math.max(1.5, z * 0.3);
+      ctx.fillStyle = '#8c8c8c';
+      ctx.beginPath(); ctx.ellipse(cx, cy, r, r * 0.8, 0, 0, 6.283); ctx.fill();
+      ctx.fillStyle = '#a8a8a8';                              // a lit top facet
+      ctx.beginPath(); ctx.ellipse(cx - r * 0.25, cy - r * 0.25, r * 0.45, r * 0.35, 0, 0, 6.283); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.ellipse(cx, cy, r, r * 0.8, 0, 0, 6.283); ctx.stroke();
+    }
+  }
   // Berry bushes: a little cluster of berries on the shrub once zoomed in. Ripe ones show
   // bright fruit; a picked (un-ripe) bush is just bare foliage. Poison status is NOT shown —
   // the bushes don't advertise it, and neither do the souls who haven't learned yet.
@@ -4279,6 +4300,37 @@ function renderWorld() {
     ctx.beginPath();
     ctx.moveTo(ox - s * 0.12, oy + s * 0.46); ctx.lineTo(ox + s / 2, oy);
     ctx.lineTo(ox + s * 1.12, oy + s * 0.46); ctx.closePath(); ctx.fill();
+  }
+  // Stockpiles: the stores the band keeps — the common granary and home larders — drawn as a
+  // little crate of goods with the dominant item and its count, so a god can watch supplies grow.
+  if (z >= 2) {
+    for (const sp of (d.stockpiles || [])) {
+      const sx = (sp.x - cam.camX) * z, sy = (sp.y - cam.camY) * z;
+      if (!onScreen(sx, sy, 2)) continue;
+      const items = sp.items || {};
+      let top = null, topN = 0;
+      for (const k in items) if (items[k] > topN) { top = k; topN = items[k]; }
+      const s = Math.max(6, z * 0.8);
+      const ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;
+      ctx.fillStyle = sp.communal ? '#7a5a2e' : '#6b4f2a';     // crate body (granary a touch lighter)
+      ctx.fillRect(ox, oy, s, s);
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
+      ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';                      // a plank line across the crate
+      ctx.fillRect(ox, oy + s * 0.48, s, Math.max(1, s * 0.08));
+      if (z >= 5) {
+        const icon = WGOOD_ICON[top] || '📦';
+        ctx.font = `${Math.round(s * 0.6)}px serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(icon, ox + s / 2, oy + s * 0.42);
+        ctx.fillStyle = '#fff'; ctx.font = `bold ${Math.round(s * 0.42)}px sans-serif`;
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)'; ctx.lineWidth = 2;
+        const label = String(sp.total);
+        ctx.strokeText(label, ox + s / 2, oy + s + s * 0.28);
+        ctx.fillText(label, ox + s / 2, oy + s + s * 0.28);
+        ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+      }
+    }
   }
   // Wildlife as crisp pixel sprites, sized per species (deer/wolf ≈ 2×2 tiles, rabbit 1).
   const sm = WORLD.smooth;

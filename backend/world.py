@@ -486,6 +486,7 @@ LEAF_CAP = 24                            # a person can carry a big bundle of le
 ORE_KINDS = ("copper_ore", "tin_ore", "iron_ore", "gold_ore", "coal")
 ORE_WEIGHTS = (0.30, 0.18, 0.30, 0.07, 0.15)
 ORE_NODES_PER = 1_000_000               # ~1 deposit per this many tiles
+STONE_PER_ROCK = 120                    # ~1 visible boulder per this many rock/mountain tiles
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -562,6 +563,7 @@ class World:
         self.sites: list[dict] = []      # buildings under construction (blueprint + per-tile tasks)
         self.ore_nodes: list[dict] = []  # scattered metal/coal deposits to mine
         self._ore_index: dict[tuple[int, int], dict] = {}  # (x,y)->node, rebuilt on load/seed
+        self.stone_nodes: list[dict] = []  # visible boulders on the highland rock (where stone is mined)
         self.berry_bushes: list[dict] = []  # scattered berry bushes (some poisonous), P3
         self._berry_index: dict[tuple[int, int], dict] = {}  # (x,y)->bush, rebuilt on load/seed
         self.granary: dict = {"store": {}, "x": None, "y": None}  # the band's shared common store
@@ -645,6 +647,7 @@ class World:
         self._seed_grove(self._origin)          # a copse so the band has wood within reach
         self._seed_initial_wildlife(count=340, center=self._origin, radius=600)
         self._seed_ore_nodes()
+        self._seed_stone_nodes()
         self._seed_berry_bushes()
         self._seed_initial_people(count=7, center=self._origin)
 
@@ -693,6 +696,21 @@ class World:
 
     def _rebuild_ore_index(self):
         self._ore_index = {(n["x"], n["y"]): n for n in self.ore_nodes}
+
+    def _seed_stone_nodes(self):
+        """Scatter visible boulders across the highland rock — a clear on-map cue for where the
+        band mines stone (rendered like ore). Mining stays biome-based; these just make the
+        resource legible instead of an invisible property of grey terrain."""
+        self.stone_nodes = []
+        rock = np.argwhere(np.isin(self.biome, [B["mountain"], B["rock"]])
+                           & (self.water == WATER_NONE))
+        if not len(rock):
+            return
+        n = max(20, len(rock) // STONE_PER_ROCK)
+        picks = self.rng.choice(len(rock), size=min(n, len(rock)), replace=False)
+        for idx in picks:
+            ry, rx = rock[idx]
+            self.stone_nodes.append({"x": int(rx), "y": int(ry)})
 
     def _seed_berry_bushes(self):
         """Scatter berry bushes across the temperate/forest land, a fraction of them poisonous.
@@ -1711,7 +1729,7 @@ class World:
                 g = float(self.veg_growth[y, x])
                 if (leaf[ly, lx] and g > 0.25 and p["inv"].get("leaves", 0) < LEAF_CAP
                         and self._gather_ready(p, "leaves", dt_game_min)):
-                    self.veg_growth[y, x] = max(0.0, g - 0.12)   # stripping leaves barely dents the plant
+                    self.veg_growth[y, x] = 0.0                  # stripped bare — the foliage is gone until it regrows
                     p["inv"]["leaves"] = p["inv"].get("leaves", 0) + LEAF_GATHER
             elif action == "craft":
                 # If nothing's underway yet, start the bootstrap axe (survival crafts start
@@ -2232,6 +2250,10 @@ class World:
         if kind == "tinker":
             # Sit and puzzle out a make-shift craft — slow, gated, motivated by a felt
             # problem, and PERSONAL (it spreads to others later by teaching, not at once).
+            # A settled soul does its puzzling back home, not alone out in the wild.
+            home = self._homeward_if_away(p)
+            if home:
+                return home
             self._tinker(p, night)
             return "tinker", None
         if kind == "eat":
@@ -2359,6 +2381,17 @@ class World:
         if best is not None:
             return "wander", (int(np.sign(best["x"] - p["x"])), int(np.sign(best["y"] - p["y"])))
         return "wander", None
+
+    def _homeward_if_away(self, p, reach: int = 4):
+        """A step toward home if a SETTLED soul has strayed from it — so making and puzzling-out
+        (craft / research) happen back in the safe settlement, not alone in the dangerous wild.
+        None when the soul is homeless (it works where it is) or already home."""
+        if not p.get("home_struct"):
+            return None
+        hx, hy = p["home"]
+        if abs(hx - p["x"]) + abs(hy - p["y"]) <= reach:
+            return None
+        return "wander", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
 
     def _flee(self, p):
         """Bolt for safety: home is shelter and the band is protection, so run there. Once on
@@ -2759,11 +2792,17 @@ class World:
             if rid in ("forage_sack", "sleeping_mat") and inv.get(rid, 0) >= 1:
                 continue
             if crafting.can_craft(inv, rid, stations=(), tools=None):
+                home = self._homeward_if_away(p)               # assemble it back at the settlement
+                if home:
+                    return home
                 self._begin_craft(p, rid)                      # have everything — start it (takes time)
                 return "craft", None
             need = crafting.missing(inv, rid)                  # what's short — go get it
             if "rope" in need and inv.get("rope", 0) < need["rope"]:
                 if inv.get("fiber", 0) >= 3:
+                    home = self._homeward_if_away(p)           # spin it at home, not in the wild
+                    if home:
+                        return home
                     self._begin_craft(p, "rope")               # spin fiber into rope (also takes time)
                     return "craft", None
                 return getters["fiber"]()
@@ -3026,10 +3065,18 @@ class World:
             self.roofs.add((task["x"], task["y"]))
         else:
             self.blocks[(task["x"], task["y"])] = task["code"]
+            self._clear_ground(task["x"], task["y"])     # trample the growth under & around the tile
         task["done"] = True
         self.version += 1
         if self._site_next_task(site) is None:
             self._finish_site(p, site)
+
+    def _clear_ground(self, x, y, radius: int = 1):
+        """Strip the vegetation under a placed tile and the ring around it — a building stands on
+        cleared, trodden ground, not in a thicket. Cheap, bounded box edit on the veg layer."""
+        y0, y1 = max(0, y - radius), min(H, y + radius + 1)
+        x0, x1 = max(0, x - radius), min(W, x + radius + 1)
+        self.veg_growth[y0:y1, x0:x1] = 0.0
 
     def _earn_renown(self, p, amount: float, why: str) -> None:
         """Raise a soul's social standing for a visible deed, and lodge it as a proud memory."""
@@ -3954,6 +4001,27 @@ class World:
     def _roofs_payload(self):
         return [[x, y] for (x, y) in self.roofs]
 
+    def _stockpiles_payload(self):
+        """Visible stores the band keeps: the common granary and every home larder that actually
+        holds something — so a god can SEE the food/wood/stone piling up, not just trust it's
+        there. Each entry carries its location, contents, and total count for a ground pile."""
+        out = []
+        g = self.granary
+        if g.get("x") is not None and g.get("store"):
+            items = {k: int(v) for k, v in g["store"].items() if v > 0}
+            if items:
+                out.append({"x": g["x"], "y": g["y"], "items": items,
+                            "total": sum(items.values()), "communal": True})
+        for p in self.people:
+            if not p.get("home_struct"):
+                continue
+            store = {k: int(v) for k, v in (p.get("store") or {}).items() if v > 0}
+            if store:
+                hx, hy = p["home"]
+                out.append({"x": int(hx), "y": int(hy), "items": store,
+                            "total": sum(store.values()), "communal": False})
+        return out
+
     def _sites_payload(self):
         """Construction sites with build progress (for inspect / the god-tools UI)."""
         out = []
@@ -3986,7 +4054,9 @@ class World:
             "roofs": self._roofs_payload(),
             "sites": self._sites_payload(),
             "ore": [{"x": n["x"], "y": n["y"], "kind": n["kind"]} for n in self.ore_nodes],
+            "stone": [[n["x"], n["y"]] for n in self.stone_nodes],
             "berries": [{"x": b["x"], "y": b["y"], "ripe": self._bush_ripe(b)} for b in self.berry_bushes],
+            "stockpiles": self._stockpiles_payload(),
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -4168,6 +4238,7 @@ class World:
                 "blocks": {f"{x},{y}": int(c) for (x, y), c in self.blocks.items()},
                 "roofs": [[x, y] for (x, y) in self.roofs],
                 "sites": self.sites, "ore_nodes": self.ore_nodes,
+                "stone_nodes": self.stone_nodes,
                 "berry_bushes": self.berry_bushes, "granary": self.granary,
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
@@ -4222,6 +4293,9 @@ class World:
             self.roofs = {(int(x), int(y)) for x, y in (meta.get("roofs") or [])}
             self.sites = meta.get("sites", [])
             self.ore_nodes = meta.get("ore_nodes", [])
+            self.stone_nodes = meta.get("stone_nodes", [])
+            if not self.stone_nodes:                      # older saves predate boulders — scatter them now
+                self._seed_stone_nodes()
             self.granary = meta.get("granary") or {"store": {}, "x": None, "y": None}
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:
@@ -4850,6 +4924,33 @@ if __name__ == "__main__":
     print(f"  festival/deference test: bond {before:.2f}->{after:.2f} elder-calls={bool(elder.get('say'))}, "
           f"famous {lf['rel'][third]['sentiment']:.2f}>humble {lh['rel'][third]['sentiment']:.2f}={deference_ok} "
           f"-> {'OK' if (festival_ok and deference_ok) else 'FAILED'}")
+
+    # POLISH — ground clears under a tile (#A), stone boulders are seeded & shipped (#F), stores
+    # surface as stockpiles (#C/D), and a settled soul routes home to craft/research (#E).
+    wpo = World().generate(seed=5)
+    cgy, cgx = int(wpo.people[0]["y"]) if wpo.people else 40, int(wpo.people[0]["x"]) if wpo.people else 40
+    wpo.veg_growth[cgy - 1:cgy + 2, cgx - 1:cgx + 2] = 0.9
+    wpo._clear_ground(cgx, cgy)
+    cleared_ok = float(wpo.veg_growth[cgy, cgx]) == 0.0 and float(wpo.veg_growth[cgy + 1, cgx]) == 0.0
+    stone_ok = len(wpo.stone_nodes) > 0 and "stone" in wpo.snapshot()
+    # Stockpiles payload: a granary + a home larder both show up.
+    wpo.people = []
+    syp, sxp = np.argwhere((wpo.water == WATER_NONE) & (wpo.biome == B["grassland"]))[0]
+    wpo._add_person(int(sxp), int(syp), name="Keeper")
+    kp = wpo.people[0]; kp["home_struct"] = "s_h"; kp["home"] = (int(kp["x"]), int(kp["y"]))
+    kp["store"] = {"food": 7, "wood": 3}
+    wpo.granary = {"store": {"food": 12}, "x": int(sxp) + 5, "y": int(syp)}
+    piles = wpo._stockpiles_payload()
+    stock_ok = any(s["communal"] for s in piles) and any(not s["communal"] and s["total"] == 10 for s in piles)
+    # Craft-at-home: a settled soul far from home is sent homeward; near home it stays put.
+    kp["x"], kp["y"] = int(kp["home"][0]) + 20, int(kp["home"][1])
+    away = wpo._homeward_if_away(kp)
+    kp["x"], kp["y"] = kp["home"]
+    homebody = wpo._homeward_if_away(kp)
+    craft_home_ok = away is not None and away[0] == "wander" and homebody is None
+    polish_ok = cleared_ok and stone_ok and stock_ok and craft_home_ok
+    print(f"  polish test: ground-cleared={cleared_ok}, stone-nodes={len(wpo.stone_nodes)}>0={stone_ok}, "
+          f"stockpiles={stock_ok}, craft-routes-home={craft_home_ok} -> {'OK' if polish_ok else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the
