@@ -213,6 +213,12 @@ NEED_MODEL = (
 # sight — turning a good forage into a buffer against a lean stretch. Kept ABOVE the barter
 # surplus so banking never starves the gift/trade economy of spare food.
 STORE_KEEP = {"food": 5, "safe_water": 3}   # carry up to this; bank only the excess (raw water stays on-person to boil)
+# Communal granary (interdependence): once the band has roofs, working adults pour their HOME
+# surplus (above a personal cushion) into a shared store that anyone can draw from — so children,
+# the sick and non-foraging specialists lean on the pool the foragers fill. The seam the P2
+# `store_access` stub was left for.
+GRANARY_MIN_HOUSED = 3                        # the band raises a common granary once this many are housed
+GRANARY_CUSHION = {"food": 8, "safe_water": 4}  # keep this much in your OWN larder before giving the rest
 PROVISION_LOAD = 4          # gather this much above the travel reserve before hauling it home to bank
 PROVISION_LEASH = 12        # stockpiling stays near home — never range far from water to lay in food
 
@@ -541,6 +547,7 @@ class World:
         self._ore_index: dict[tuple[int, int], dict] = {}  # (x,y)->node, rebuilt on load/seed
         self.berry_bushes: list[dict] = []  # scattered berry bushes (some poisonous), P3
         self._berry_index: dict[tuple[int, int], dict] = {}  # (x,y)->bush, rebuilt on load/seed
+        self.granary: dict = {"store": {}, "x": None, "y": None}  # the band's shared common store
         self.log: list[dict] = []        # recent god actions / notable events
         # Craft knowledge. Everyone is born knowing the basics (STARTER_RECIPES); the make-
         # shift survival crafts (water flask, etc.) must be DISCOVERED by an individual and
@@ -2313,10 +2320,28 @@ class World:
             return False
         return grant in (True, "always") or (isinstance(grant, (int, float)) and self.clock < grant)
 
+    def _granary_store(self):
+        """The band's shared common store, or None until it exists. It comes into being — at the
+        centre of the settled homes — once GRANARY_MIN_HOUSED souls have roofs, the moment a band
+        is established enough to keep a commons. Returns the store dict to deposit into / draw from."""
+        g = self.granary
+        if g.get("x") is None:
+            housed = [q for q in self.people if q.get("home_struct")]
+            if len(housed) >= GRANARY_MIN_HOUSED:
+                g["x"] = int(sum(q["home"][0] for q in housed) / len(housed))
+                g["y"] = int(sum(q["home"][1] for q in housed) / len(housed))
+                self._add_structure("granary", g["x"], g["y"], by="the band")
+                self._note("build", "The band raised a common granary — a shared store against lean days.")
+            else:
+                return None
+        return g["store"]
+
     def _deposit_home(self, p):
         """Resting at home, a soul banks the surplus food/water it is carrying above its travel
         reserve into the larder — so a good forage outlives the day. Only survival consumables
-        are stored (building stock and gear stay on-person where the build logic expects them)."""
+        are stored (building stock and gear stay on-person where the build logic expects them).
+        A well-stocked larder then OVERFLOWS into the band's common granary, so a forager's
+        bounty feeds the children, the sick and the specialists who cannot lay in their own."""
         inv, store = p["inv"], p.setdefault("store", {})
         for key, keep in STORE_KEEP.items():
             spare = inv.get(key, 0) - keep
@@ -2325,6 +2350,13 @@ class World:
                 inv[key] = keep
                 if inv[key] <= 0:
                     inv.pop(key, None)
+        gst = self._granary_store()
+        if gst is not None:
+            for key, cushion in GRANARY_CUSHION.items():       # overflow above a personal cushion → the commons
+                spare = store.get(key, 0) - cushion
+                if spare > 0:
+                    gst[key] = gst.get(key, 0) + spare
+                    store[key] = cushion
 
     def _prefer_store(self, p, want):
         """Decide whether to fall back on the larder rather than forage. Only when the store
@@ -2332,10 +2364,12 @@ class World:
         remembered wild spot — so a needy soul is never marched PAST nearer water/food to the
         larder (that detour, overriding a closer known spring, quietly cost thirst deaths)."""
         store = p.get("store", {})
+        gst = self.granary.get("store") if self.granary.get("x") is not None else {}
         if want == "food":
-            stocked = store.get("food", 0) > 0
+            stocked = store.get("food", 0) > 0 or gst.get("food", 0) > 0
         else:
-            stocked = store.get("safe_water", 0) + store.get("water", 0) > 0
+            stocked = (store.get("safe_water", 0) + store.get("water", 0)
+                       + gst.get("safe_water", 0)) > 0
         if not stocked:
             return False
         hx, hy = p["home"]
@@ -2354,8 +2388,11 @@ class World:
         draw a unit. `want` is 'food' or 'water'. Returns a body action (haul toward home, or the
         consume action once home and the unit is in the pack), or None when the store can't help."""
         store = p.get("store", {})
+        gst = self.granary.get("store") if self.granary.get("x") is not None else None
         keys = ["food"] if want == "food" else ["safe_water", "water"]   # boiled water first
-        if not any(store.get(k, 0) > 0 for k in keys):
+        has_personal = any(store.get(k, 0) > 0 for k in keys)
+        has_common = gst is not None and any(gst.get(k, 0) > 0 for k in (keys if want == "food" else ["safe_water"]))
+        if not has_personal and not has_common:
             return None
         hx, hy = p["home"]
         if abs(hx - p["x"]) + abs(hy - p["y"]) > 1:                      # still on the way home
@@ -2366,9 +2403,16 @@ class World:
                 if store[k] <= 0:
                     store.pop(k, None)
                 p["inv"][k] = p["inv"].get(k, 0) + 1
-                if want == "food":
-                    return "eat", None
-                return ("drink_safe" if k == "safe_water" else "drink_pack"), None
+                return ("eat" if want == "food" else ("drink_safe" if k == "safe_water" else "drink_pack")), None
+        # Own larder is bare — lean on the common granary the band keeps.
+        for k in (keys if want == "food" else ["safe_water"]):
+            if gst and gst.get(k, 0) > 0:
+                gst[k] -= 1
+                if gst[k] <= 0:
+                    gst.pop(k, None)
+                p["inv"][k] = p["inv"].get(k, 0) + 1
+                mind.remember(p, "drew from the common store when my own ran bare", 0.5, "social", self.clock)
+                return ("eat" if want == "food" else "drink_safe"), None
         return None
 
     def _pursue_building(self, p, bp_name, getters, communal: bool = False):
@@ -3690,7 +3734,7 @@ class World:
                 "blocks": {f"{x},{y}": int(c) for (x, y), c in self.blocks.items()},
                 "roofs": [[x, y] for (x, y) in self.roofs],
                 "sites": self.sites, "ore_nodes": self.ore_nodes,
-                "berry_bushes": self.berry_bushes,
+                "berry_bushes": self.berry_bushes, "granary": self.granary,
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -3744,6 +3788,7 @@ class World:
             self.roofs = {(int(x), int(y)) for x, y in (meta.get("roofs") or [])}
             self.sites = meta.get("sites", [])
             self.ore_nodes = meta.get("ore_nodes", [])
+            self.granary = meta.get("granary") or {"store": {}, "x": None, "y": None}
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:
                 self._rebuild_berry_index()
@@ -3960,6 +4005,27 @@ if __name__ == "__main__":
     guarded_ok = xp["hp"] == 1.0
     print(f"  predation test: lone soul bitten={bit}, guarded soul unharmed={guarded_ok} "
           f"-> {'OK' if (bit and guarded_ok) else 'FAILED'}")
+
+    # COMMUNAL GRANARY — a forager's home surplus overflows into a shared store, and a soul
+    # whose own larder is bare draws from the commons (the interdependence the pool creates).
+    wg = World().generate(seed=7); wg.people = []
+    gyy, gxx = np.argwhere((wg.water == WATER_NONE) & (wg.biome == B["grassland"]))[0]
+    for i in range(GRANARY_MIN_HOUSED):
+        wg._add_person(int(gxx) + i, int(gyy), name=f"Forager{i}")
+    for q in wg.people:
+        q["home_struct"] = "s_h"; q["home"] = (int(q["x"]), int(q["y"]))
+    donor = wg.people[0]; donor["inv"]["food"] = 30          # a big haul to bank
+    wg._deposit_home(donor)                                  # → personal larder, then overflow to commons
+    granary_ok = wg.granary["x"] is not None and wg.granary["store"].get("food", 0) > 0
+    wg._add_person(int(gxx), int(gyy) + 1, name="Hungry")
+    needy = wg.people[-1]
+    needy["home_struct"] = "s_h"; needy["home"] = (int(needy["x"]), int(needy["y"]))
+    needy["store"] = {}; needy["inv"] = {}
+    stock_before = wg.granary["store"].get("food", 0)
+    wg._fetch_from_store(needy, "food")
+    drew_ok = needy["inv"].get("food", 0) > 0 and wg.granary["store"].get("food", 0) < stock_before
+    print(f"  granary test: commons stocked={granary_ok} ({wg.granary['store'].get('food',0)} food), "
+          f"needy soul drew from it={drew_ok} -> {'OK' if (granary_ok and drew_ok) else 'FAILED'}")
 
     # And the blueprint library scales up: force a cabin and confirm it can be raised too.
     wc2 = World().generate(seed=7); wc2.people = []
