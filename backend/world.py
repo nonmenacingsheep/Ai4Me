@@ -1773,11 +1773,22 @@ class World:
             self._note("death", f"{p['name']} died of {cause}.")
             self._bequeath(p)                                # home + a share of standing pass to kin
             # Those who knew the dead carry it: a heavy, durable memory.
+            mourner, grief = None, 0.0
             for q in self.people:
                 if q is p:
                     continue
                 if p["id"] in q.get("rel", {}) or mind._manhattan(p, q) <= PERSON["vision"]:
                     mind.remember(q, f"{p['name']} died of {cause}", 0.95, "death", self.clock)
+                # The one who loved them most leads the mourning (a partner above all).
+                bond = q.get("rel", {}).get(p["id"], {}).get("sentiment", 0.0)
+                if q.get("partner") == p["id"]:
+                    bond += 1.0
+                if bond > grief:
+                    mourner, grief = q, bond
+            # Mourning rite: the closest soul grieves aloud — the band marks a loss, not just logs it.
+            if mourner is not None and grief > 0.3:
+                mind.speak(mourner, f"Rest now, {p['name']}. We'll remember you.", self.clock)
+                self._note("death", f"{mourner['name']} mourns {p['name']}.")
         if dead:
             ids = {id(p) for p in dead}
             self.people = [p for p in self.people if id(p) not in ids]
@@ -1832,6 +1843,10 @@ class World:
                                 ev = mind.give(giver, taker, key, self.clock)
                                 if ev:
                                     self._note("social", ev)
+                                    # Maker-renown: a tool one fashioned, now serving another, builds
+                                    # the maker's name as a craftsman the band relies on (#20).
+                                    self._earn_renown(giver, RENOWN_GAIN["gift"],
+                                                      f"made a {key} that now serves {taker['name']}")
                                 break
                     # The quiet bonds of daily life — kin breaking bread side by side (#1), and
                     # children at play (#5) — each warms a relationship a little. Gated to a small
@@ -4766,6 +4781,31 @@ if __name__ == "__main__":
         and any(d[0] == "befriend" and d[1] == patron["id"] for d in mind.drives(learner, actx))
     print(f"  gratitude/apprentice test: repay-patron={gratitude_ok}, mentor-found={appr_ok} "
           f"-> {'OK' if (gratitude_ok and appr_ok) else 'FAILED'}")
+
+    # CULTURE — a soul of standing passes a vivid TALE into another's memory (#16, lore spreads),
+    # and a maker who hands over a tool that now serves another earns renown as a craftsman (#20).
+    wl = World().generate(seed=5); wl.people = []
+    lyy, lxx = np.argwhere((wl.water == WATER_NONE) & (wl.biome == B["grassland"]))[0]
+    wl._add_person(int(lxx), int(lyy), name="Teller")
+    wl._add_person(int(lxx) + 1, int(lyy), name="Listener")
+    teller, listener = wl.people; wl.clock = 5000.0
+    teller["renown"] = 0.6
+    mind.remember(teller, "a wolf set on the band and we drove it off", 0.9, "danger", 0.0)
+    got_tale = False
+    for _ in range(80):
+        if mind._tell_tale(teller, listener, wl.clock, wl.rng):
+            got_tale = True; break
+    story_ok = got_tale and any(m["kind"] == "tale" for m in listener.get("memory", []))
+    # Maker-renown: gifting a spare tool to a band-mate who has none lifts the maker's standing.
+    wl.clock = 6000.0
+    teller["inv"] = {"axe": 2}; listener["inv"] = {}
+    r0 = teller.get("renown", 0.0)
+    for q in (teller, listener):                              # trust enough that they'll interact
+        q.setdefault("rel", {})
+    wl._tick_minds_social()
+    maker_ok = teller.get("renown", 0.0) > r0 and listener["inv"].get("axe", 0) == 1
+    print(f"  culture test: tale-spread={story_ok}, maker-renown {r0:.2f}->{teller.get('renown',0):.2f}={maker_ok} "
+          f"-> {'OK' if (story_ok and maker_ok) else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the

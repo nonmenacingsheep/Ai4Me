@@ -48,6 +48,8 @@ TRUST_TRADE_GAIN = 0.08      # trust earned by a completed fair trade
 TRUST_DECAY = 0.0            # (reserved) passive trust drift toward neutral
 GOSSIP_CHANCE = 0.5          # prob. a meeting includes passing along an opinion
 GOSSIP_PULL = 0.25           # how far the listener's view shifts toward the speaker's
+STORY_RENOWN = 0.25          # standing at which a soul's tales start to carry to others
+STORY_CHANCE = 0.35          # prob. a meeting with a soul of standing passes on one of their tales
 
 # Goods a person will barter, and which need each relieves (drives who wants what).
 TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
@@ -341,6 +343,13 @@ def encounter(p: dict, other: dict, clock: float, rng) -> list[str]:
         spread2 = _gossip(other, p, clock) if rng.random() < GOSSIP_CHANCE else None
         if spread2:
             events.append(spread2)
+        # Storytelling: a soul of standing passes a vivid tale of something they lived into a
+        # listener's memory — how lore (a great hunt, a death, a hard-won craft) travels the band
+        # and outlives the one who lived it. The seed of an abstract, shared culture.
+        for teller, listener in ((p, other), (other, p)):
+            tale = _tell_tale(teller, listener, clock, rng)
+            if tale:
+                events.append(tale)
 
     # Barter when adjacent and both are comfortable enough to stop and deal.
     if _manhattan(p, other) <= 1 and _comfortable(p) and _comfortable(other):
@@ -373,6 +382,28 @@ def _gossip(speaker: dict, listener: dict, clock: float) -> str | None:
     tone = "warmly" if op["sentiment"] > 0 else "darkly"
     remember(listener, f"{speaker['name']} spoke {tone} of {op['name']}", 0.45, "gossip", clock)
     return f"{speaker['name']} told {listener['name']} about {op['name']}."
+
+
+def _tell_tale(teller: dict, listener: dict, clock: float, rng) -> str | None:
+    """A soul of some standing recounts a vivid thing they lived; the listener takes it into
+    their own memory as something *heard* (not lived). This is how lore spreads and persists —
+    abstract culture riding the same channel as gossip."""
+    if teller.get("renown", 0.0) < STORY_RENOWN or rng.random() >= STORY_CHANCE:
+        return None
+    # Only first-hand, vivid, share-worthy memories make tales — not hearsay already passed on.
+    tales = [m for m in teller.get("memory", []) if m.get("imp", 0) >= 0.7
+             and m.get("kind") in ("danger", "discovery", "craft", "death", "trade", "illness")]
+    if not tales:
+        return None
+    m = tales[int(rng.integers(len(tales)))]
+    text = m["text"]
+    heard = f"I heard tell from {teller['name']}: {text}"
+    if any(mm.get("text") == heard for mm in listener.get("memory", [])):
+        return None                                      # they've already heard this one
+    remember(listener, heard, min(0.7, m["imp"] * 0.8), "tale", clock)
+    speak(teller, _pick(rng, ["Let me tell you of something...", "There's a tale in that...",
+                              "I'll not forget the day..."]), clock)
+    return f"{teller['name']} told {listener['name']} a tale."
 
 
 def _try_trade(p: dict, other: dict, ra: dict, rb: dict, clock: float) -> str | None:
