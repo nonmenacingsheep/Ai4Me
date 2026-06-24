@@ -3826,6 +3826,15 @@ document.addEventListener('keydown', (e) => {
       toggleWorldPause();
     }
   }
+  // 'n' toggles the navigation heatmap — how the world reads to a soul on foot (debug overlay).
+  if ((e.key === 'n' || e.key === 'N') && activeView === 'world') {
+    const t = e.target;
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (!typing) {
+      WORLD.navOverlay = !WORLD.navOverlay;
+      renderWorld();
+    }
+  }
 });
 
 /* ─── Boot ─────────────────────────────────────────────────────────── */
@@ -4075,7 +4084,7 @@ function buildDetailCanvas(v) {
   // Keep the veg layer + step so renderWorld can draw crisp tree-canopy sprites on top.
   // _id changes each time a fresh window is streamed, invalidating the foliage cache.
   return { canvas: cvs, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, vw, vh,
-           step: v.step || 1, vegSp: vs, vegGrowth: vg, _id: ++_wDetailId };
+           step: v.step || 1, vegSp: vs, vegGrowth: vg, water: wa, _id: ++_wDetailId };
 }
 
 // When zoomed in enough that the overview looks blocky, stream a crisp window of the
@@ -4198,6 +4207,51 @@ function buildFoliageLayer(cv, cam, z) {
       }
     }
   }
+}
+
+// Navigation heatmap (debug, toggled with 'n'): shows the world the way a soul has to walk it —
+// green open ground, yellow slow water (rivers/shallows they ford), dark-blue deep water they
+// can't cross, grey walls, blue building interiors they may enter, green communal buildings any
+// of them may use, and a red bloom of danger around prowling wolves. Drawn from data already on
+// hand (the crisp detail water layer + blocks + structures + wolves) — no backend cost.
+function drawNavOverlay(cv, cam, z) {
+  const d = WORLD.data, dt = d.detail, ctx = cv.getContext('2d');
+  const onScreen = (sx, sy) => !(sx < -z || sy < -z || sx > cv.width || sy > cv.height);
+  ctx.save();
+  if (dt && dt.water) {
+    const wa = dt.water;
+    for (let cy = 0; cy < dt.vh; cy++) {
+      for (let cx2 = 0; cx2 < dt.vw; cx2++) {
+        const w = wa[cy * dt.vw + cx2];
+        const col = (w === 1 || w === 4) ? 'rgba(232,206,40,0.28)'      // river/shallow — slow ford
+          : (w === 2 || w === 3) ? 'rgba(18,42,96,0.42)'                // lake/ocean — impassable
+            : 'rgba(70,200,90,0.10)';                                   // open ground — go
+        const sx = (dt.x0 + cx2 - cam.camX) * z, sy = (dt.y0 + cy - cam.camY) * z;
+        if (!onScreen(sx, sy)) continue;
+        ctx.fillStyle = col; ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
+      }
+    }
+  }
+  for (const b of (d.blocks || [])) {                                   // walls block; interiors are walkable
+    const sx = (b[0] - cam.camX) * z, sy = (b[1] - cam.camY) * z;
+    if (!onScreen(sx, sy)) continue;
+    ctx.fillStyle = b[2] === 2 ? 'rgba(110,110,125,0.55)' : 'rgba(60,120,235,0.42)';
+    ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
+  }
+  for (const st of (d.structures || [])) {                             // communal buildings — anyone may go
+    if (!/granary|hall|gather/i.test(st.kind || '')) continue;
+    const sx = (st.x - cam.camX) * z, sy = (st.y - cam.camY) * z;
+    if (!onScreen(sx, sy)) continue;
+    ctx.fillStyle = 'rgba(50,210,120,0.55)'; ctx.fillRect(sx - z, sy - z, z * 3, z * 3);
+  }
+  for (const a of (d.animals || [])) {                                 // danger blooms around wolves
+    if (a.sp !== 'wolf') continue;
+    const sx = (a.x - cam.camX) * z + z / 2, sy = (a.y - cam.camY) * z + z / 2, R = 6 * z;
+    const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, R);
+    g.addColorStop(0, 'rgba(222,40,40,0.38)'); g.addColorStop(1, 'rgba(222,40,40,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(sx, sy, R, 0, 6.283); ctx.fill();
+  }
+  ctx.restore();
 }
 
 function renderWorld() {
@@ -4332,6 +4386,8 @@ function renderWorld() {
       }
     }
   }
+  // Navigation heatmap, on demand ('n') — over terrain & buildings, under the living entities.
+  if (WORLD.navOverlay && z >= 4) drawNavOverlay(cv, cam, z);
   // Wildlife as crisp pixel sprites, sized per species (deer/wolf ≈ 2×2 tiles, rabbit 1).
   const sm = WORLD.smooth;
   for (const a of d.animals) {
