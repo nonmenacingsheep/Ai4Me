@@ -362,8 +362,17 @@ MONUMENT_BP = "gathering"          # the communal status build raised once a sou
 # home, a communal monument, teaching a craft, giving freely) and fades slowly if not renewed,
 # so status must be earned and maintained. Ambition turns standing into a pursued goal — the
 # monument project — so settled, driven souls compete to leave a mark, not just nest.
-RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05, help=0.06)
+RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05, help=0.06, contribute=0.05)
 HELP_RANGE = 30               # how near a band-mate's unfinished build a housed soul will go to help
+# Governance — the band's FIRST NORM: pull your weight at the common granary. Judged once a day on
+# a rolling window. Soft enforcement through reputation only (standing + how others regard you),
+# never punishment — it nudges conduct without ever endangering a life.
+GOV_MIN_BAND       = 3        # no commons-norm until the band is at least this many adults
+GOV_CONTRIB        = 4.0      # granary units given (this window) to count as a steady contributor
+GOV_FREERIDE       = 4.0      # granary units taken (this window) past which a non-giver is judged
+GOV_FREERIDE_COST  = 0.05     # renown a chronic free-rider sheds per day
+GOV_DISAPPROVAL    = 0.03     # how much each bandmate's regard for a free-rider dips per day
+GOV_LEDGER_DECAY   = 0.6      # daily decay of the give/take ledger — recent conduct is what counts
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
@@ -1123,6 +1132,7 @@ class World:
             self._last_spoil = self.clock
         if self.clock - self._last_pest >= 1440.0:                 # vermin check once a game-day (P5)
             self._tick_pests()
+            self._tick_governance()                                # judge the commons-norm once a day
             self._last_pest = self.clock
         season_now = self.season()
         if season_now != getattr(self, "_last_season", season_now):
@@ -2183,18 +2193,14 @@ class World:
         # actually pay for from their pack. This is what turns "I'm done" into "who needs a hand?".
         help_site = None
         if not is_child and p.get("home_struct") is not None:
-            px, py, inv = p["x"], p["y"], p["inv"]
+            px, py = p["x"], p["y"]
             best_d = HELP_RANGE + 1
             for s in self.sites:
                 if s.get("done") or s.get("communal") or s.get("owner") == p["id"]:
                     continue
-                t = self._site_next_task(s)
-                if t is None:
+                if self._site_next_task(s) is None:
                     continue
-                item, qty = t["cost"]
-                if inv.get(item, 0) < qty:
-                    continue
-                d = abs(s["ox"] - px) + abs(s["oy"] - py)
+                d = abs(s["ox"] - px) + abs(s["oy"] - py)   # near enough to lend a hand (we'll gather the makings)
                 if d < best_d:
                     best_d, help_site = d, s["id"]
         return {
@@ -2348,9 +2354,9 @@ class World:
                     return "socialize", move
             return self._idle(p)
         if kind == "help":
-            # Lend a hand on a band-mate's unfinished build — go to it and lay a tile from one's
-            # own pack. The home still belongs to its owner (see _finish_site).
-            return self._help_build(p, target)
+            # Lend a hand on a band-mate's unfinished build — gather its makings and lay a tile.
+            # The home still belongs to its owner (see _finish_site).
+            return self._help_build(p, target, tree, stone, fiber, leaf, lx, ly)
         if kind in ("socialize", "befriend"):
             move = self._seek_toward(p, target) if target else self._seek_person(p)
             if move is not None:
@@ -2657,6 +2663,7 @@ class World:
                 if spare > 0:
                     gst[key] = gst.get(key, 0) + spare
                     store[key] = cushion
+                    p["gran_given"] = p.get("gran_given", 0.0) + spare   # pulling their weight (norm)
 
     def _prefer_store(self, p, want):
         """Decide whether to fall back on the larder rather than forage. Only when the store
@@ -2711,6 +2718,7 @@ class World:
                 if gst[k] <= 0:
                     gst.pop(k, None)
                 p["inv"][k] = p["inv"].get(k, 0) + 1
+                p["gran_taken"] = p.get("gran_taken", 0.0) + 1          # leaning on the commons (norm)
                 mind.remember(p, "drew from the common store when my own ran bare", 0.5, "social", self.clock)
                 return ("eat" if want == "food" else "drink_safe"), None
         return None
@@ -2852,10 +2860,14 @@ class World:
         return (p.get("vocation") or mind.vocation(p)) == "toolmaker"
 
     MATERIAL_GIFT_SPARE = 3      # raw a giver keeps for itself before handing the surplus to a maker
+    GIFT_COOLDOWN = 480.0        # game-min a giver waits between material gifts (a kindness, not a faucet)
 
     def _maybe_gift_craft_material(self, giver, taker):
         """If `taker` knows a piece of gear but lacks it AND is short a raw material that `giver`
-        has to spare, hand a unit over so the maker can get on with it. One gift per contact."""
+        has to spare, hand a unit over so the maker can get on with it. Rate-limited per giver so
+        it's an occasional kindness, not a faucet that drains the giver every adjacent tick."""
+        if self.clock < giver.get("gift_cd", 0.0):
+            return
         tinv = taker.get("inv", {})
         ginv = giver.get("inv", {})
         for rid, _have_key, _raw in self._GEAR:
@@ -2873,6 +2885,8 @@ class World:
                     ev = mind.give(giver, taker, mat, self.clock)
                     if ev:
                         self._note("social", ev)
+                        self._bump("gift_material")
+                        giver["gift_cd"] = self.clock + self.GIFT_COOLDOWN
                         self._earn_renown(giver, RENOWN_GAIN["gift"],
                                           f"shared {mat} so {taker['name']} could make a {rid.replace('_', ' ')}")
                     return
@@ -3261,6 +3275,7 @@ class World:
                     home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
                     p["home"] = (int(home[0]), int(home[1]))
                 self.version += 1
+                self._bump("plan_found")
                 verb = "began a" if communal else "marked out a"
                 self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
                 return
@@ -3273,25 +3288,43 @@ class World:
         mind.speak(p, f"Not here — {why}.", self.clock)
         p["build_cd"] = self.clock + 720.0      # nowhere to build here — try again later
 
-    def _help_build(self, p, site_id):
-        """Walk to a band-mate's unfinished site and lay a tile on it (helping). Yields to idle if
-        the site is gone/finished or the next tile needs a material this helper isn't carrying."""
+    def _bump(self, key):
+        """Tiny behaviour counter so a canary can confirm a new behaviour actually FIRES live
+        (a recurring blind spot — a behaviour can be correct yet never trigger)."""
+        d = self.__dict__.setdefault("_beh", {})
+        d[key] = d.get(key, 0) + 1
+
+    def _help_build(self, p, site_id, tree, stone, fiber, leaf, lx, ly):
+        """Lend a hand on a band-mate's unfinished build: FORAGE the next tile's material if short
+        of it (just as the owner would), then walk over and lay the tile. The finished home still
+        goes to its owner. Yields to idle if the site is gone/finished or its next tile needs a
+        material this helper can't fetch."""
         site = next((s for s in self.sites if s["id"] == site_id and not s.get("done")), None)
         if site is None:
             return self._idle(p)
         task = self._site_next_task(site)
         if task is None:
             return self._idle(p)
-        tx, ty = task["x"], task["y"]
-        if max(abs(tx - p["x"]), abs(ty - p["y"])) > 1:
-            return "wander", (int(np.sign(tx - p["x"])), int(np.sign(ty - p["y"])))
         item, qty = task["cost"]
-        if p["inv"].get(item, 0) < qty:                  # can't help this tile — no use loitering
-            return self._idle(p)
+        x, y = p["x"], p["y"]
+        if p["inv"].get(item, 0) < qty:                  # short the makings — go gather them
+            getters = {
+                "wood":   lambda: self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly, "wood", "chop", "seek_wood"),
+                "fiber":  lambda: self._seek(p, x, y, bool(fiber[ly, lx]), fiber, lx, ly, "fiber", "gather_fiber", "seek_fiber"),
+                "leaves": lambda: self._seek(p, x, y, bool(leaf[ly, lx]), leaf, lx, ly, "leaves", "gather_leaves", "seek_leaves"),
+                "stone":  lambda: self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly, "stone", "mine", "seek_stone"),
+            }
+            g = getters.get(item)
+            return g() if g else self._idle(p)
+        tx, ty = task["x"], task["y"]
+        if max(abs(tx - x), abs(ty - y)) > 1:
+            return "wander", (int(np.sign(tx - x)), int(np.sign(ty - y)))
         before = sum(1 for t in site["tasks"] if t["done"])
         self._build_next_block(p, site=site)            # lay it (credits the owner on completion)
-        if sum(1 for t in site["tasks"] if t["done"]) > before and not site.get("done"):
-            self._earn_renown(p, RENOWN_GAIN.get("help", 0.3) * 0.4, "lent a hand on a neighbour's build")
+        if sum(1 for t in site["tasks"] if t["done"]) > before:
+            self._bump("help_block")
+            if not site.get("done"):
+                self._earn_renown(p, RENOWN_GAIN.get("help", 0.3) * 0.4, "lent a hand on a neighbour's build")
         return "build", None
 
     def _build_next_block(self, p, site=None):
@@ -3784,6 +3817,35 @@ class World:
                         hold[item] = n - lost
                         if hold[item] <= 0:
                             hold.pop(item, None)
+
+    def _tick_governance(self):
+        """The band's first NORM, judged once a game-day: pull your weight at the common granary.
+        Steady contributors earn standing; an ABLE soul who keeps drawing from the commons without
+        ever filling it draws quiet disapproval — a dip in their renown and in how bandmates regard
+        them. Soft enforcement through reputation alone (never punishment that could endanger a
+        life), on a rolling window so it's recent conduct that's weighed, not a lifetime ledger."""
+        if self.granary.get("x") is None:
+            return
+        adults = [q for q in self.people if q["age"] >= ADULT_AGE]
+        if len(adults) < GOV_MIN_BAND:
+            return
+        for p in self.people:
+            given, taken = p.get("gran_given", 0.0), p.get("gran_taken", 0.0)
+            able = p["age"] >= ADULT_AGE and not p.get("illness") and p.get("hp", 1.0) > 0.5
+            if given >= GOV_CONTRIB and given >= taken:
+                self._earn_renown(p, RENOWN_GAIN["contribute"],
+                                  "I give more to the commons than I take — the band leans on me")
+            elif able and taken >= GOV_FREERIDE and given <= taken * 0.25:
+                p["renown"] = max(0.0, p.get("renown", 0.0) - GOV_FREERIDE_COST)
+                self._note("norm", f"the band notes {p['name']} leans on the commons but rarely fills it.")
+                for q in self.people:
+                    if q is p:
+                        continue
+                    rel = (q.get("rel") or {}).get(p["id"])
+                    if rel:                                    # only those who actually know them judge
+                        rel["sentiment"] = max(-1.0, rel["sentiment"] - GOV_DISAPPROVAL)
+                self._bump("gov_judged")
+            p["gran_given"], p["gran_taken"] = given * GOV_LEDGER_DECAY, taken * GOV_LEDGER_DECAY
 
     def _tick_pests(self):
         """A fat larder of fresh food draws vermin. Each game-day, a store past the threshold
@@ -4694,6 +4756,9 @@ if __name__ == "__main__":
     deaths = [e["text"] for e in w.log if e["kind"] == "death"]
     print(f"  survival: {len(w.people)}/7 of the founding band alive; "
           f"deaths logged: {deaths if deaths else 'none'}")
+    beh = getattr(w, "_beh", {})
+    print(f"  behaviours fired: planned-foundings={beh.get('plan_found', 0)}, "
+          f"help-blocks-laid={beh.get('help_block', 0)}, craft-materials-gifted={beh.get('gift_material', 0)}")
     lore = sum(len(p.get("berry_lore", {})) for p in w.people)
     bad_lore = sum(1 for p in w.people for v in p.get("berry_lore", {}).values() if v == "bad")
     berry_ill = sum(1 for p in w.people if (p.get("illness") or {}).get("d") == "berry_sickness"

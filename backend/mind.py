@@ -553,8 +553,11 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         help_site = ctx.get("help_site")
         if help_site:
             comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
-            if comfort > 0.5:
-                out.append(("help", help_site, (0.20 + 0.16 * soc + 0.12 * amb) * comfort,
+            if comfort > 0.4:
+                # Pitched to OUT-rank a comfortable soul's own home-polishing project (~0.22), so a
+                # neighbour mid-build draws a willing hand instead of everyone puttering solo — but
+                # still below survival and below a roofless soul's own urgent first shelter.
+                out.append(("help", help_site, (0.34 + 0.20 * soc + 0.12 * amb) * comfort,
                             "I'll lend a hand on their build"))
 
     # Belonging — loneliness grows the longer since real contact; sociable souls feel it most.
