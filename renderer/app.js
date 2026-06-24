@@ -4395,18 +4395,27 @@ function renderWorld() {
       }
     }
   }
-  // Decor: flowers a soul planted to beautify its home — little bright clusters once zoomed in.
+  // Decor a soul placed to beautify (or mark) its home — flowers and standing-stone cairns.
   if (z >= 3) {
     const FLOWER = ['#e76ab0', '#f2c14e', '#8a6ad6', '#e8624a'];
     for (const dpt of (d.decor || [])) {
       const sx = (dpt[0] - cam.camX) * z, sy = (dpt[1] - cam.camY) * z;
       if (!onScreen(sx, sy, 1)) continue;
-      const cx = sx + z / 2, cy = sy + z / 2, r = Math.max(1, z * 0.13);
-      ctx.fillStyle = '#3f7a44';                              // a tuft of green
-      ctx.fillRect(cx - r * 0.3, cy, r * 0.6, r * 1.6);
-      ctx.fillStyle = FLOWER[(dpt[0] * 7 + dpt[1] * 3) % FLOWER.length];
-      for (const [ddx, ddy] of [[-1, -0.3], [1, -0.3], [0, -1.1], [0, 0.2]]) {
-        ctx.beginPath(); ctx.arc(cx + ddx * r, cy + ddy * r, r * 0.7, 0, 6.283); ctx.fill();
+      const cx = sx + z / 2, cy = sy + z / 2, r = Math.max(1, z * 0.16);
+      if (dpt[2] === 'cairn') {                               // a little stack of standing stones
+        ctx.fillStyle = '#9a9690';
+        ctx.beginPath(); ctx.ellipse(cx, cy + r * 0.9, r * 1.1, r * 0.7, 0, 0, 6.283); ctx.fill();
+        ctx.fillStyle = '#b4b0a8';
+        ctx.beginPath(); ctx.ellipse(cx, cy, r * 0.8, r * 0.6, 0, 0, 6.283); ctx.fill();
+        ctx.fillStyle = '#c9c5bd';
+        ctx.beginPath(); ctx.arc(cx, cy - r * 0.8, r * 0.5, 0, 6.283); ctx.fill();
+      } else {                                                // a tuft of flowers
+        ctx.fillStyle = '#3f7a44';
+        ctx.fillRect(cx - r * 0.25, cy, r * 0.5, r * 1.4);
+        ctx.fillStyle = FLOWER[(dpt[0] * 7 + dpt[1] * 3) % FLOWER.length];
+        for (const [ddx, ddy] of [[-1, -0.3], [1, -0.3], [0, -1.1], [0, 0.2]]) {
+          ctx.beginPath(); ctx.arc(cx + ddx * r * 0.85, cy + ddy * r, r * 0.6, 0, 6.283); ctx.fill();
+        }
       }
     }
   }

@@ -2673,13 +2673,31 @@ class World:
         overgrown = [(tx, ty) for tx, ty in ring if float(self.veg_growth[ty, tx]) > 0.3]
         bare = [(tx, ty) for tx, ty in ring
                 if (tx, ty) not in self.decor and float(self.veg_growth[ty, tx]) <= 0.3]
-        if overgrown and (amb >= cur or not bare):          # the orderly tidy the thicket back
-            return {"goal": "tend the ground around my home", "kind": "tidy",
-                    "steps": [["clear", tx, ty] for tx, ty in overgrown[:ASPIRE_MAX_STEPS]], "i": 0}
-        if bare:                                             # the rest plant something to look on
-            return {"goal": "plant a garden by my door", "kind": "garden",
-                    "steps": [["plant", tx, ty] for tx, ty in bare[:6]], "i": 0}
-        return None
+        corners = [(hx - ASPIRE_RING, hy - ASPIRE_RING), (hx + ASPIRE_RING, hy - ASPIRE_RING),
+                   (hx - ASPIRE_RING, hy + ASPIRE_RING), (hx + ASPIRE_RING, hy + ASPIRE_RING)]
+        art_tiles = [(tx, ty) for tx, ty in corners
+                     if (tx, ty) in bare and (tx, ty) not in self.decor]
+        # WHICH project a soul takes on is a matter of TASTE: the ambitious raise standing stones, a
+        # statement of self; the curious plant a garden for the beauty of it; the orderly tidy the
+        # thicket back. Each candidate is weighed by temperament and the best-fitting one chosen.
+        choices = []
+        if art_tiles:
+            choices.append((0.30 + 0.55 * amb, {
+                "goal": "raise a few standing stones — a mark that is mine", "kind": "art",
+                "steps": [["place", tx, ty, "cairn"] for tx, ty in art_tiles]}))
+        if bare:
+            choices.append((0.30 + 0.55 * cur, {
+                "goal": "plant a garden by my door", "kind": "garden",
+                "steps": [["place", tx, ty, "flower"] for tx, ty in bare[:6]]}))
+        if overgrown:
+            choices.append((0.30 + 0.35 * (1.0 - cur), {
+                "goal": "tend the ground around my home", "kind": "tidy",
+                "steps": [["clear", tx, ty] for tx, ty in overgrown[:ASPIRE_MAX_STEPS]]}))
+        if not choices:
+            return None
+        plan = max(choices, key=lambda c: c[0])[1]
+        plan["i"] = 0
+        return plan
 
     def _pursue_aspiration(self, p):
         """Actuate a self-authored project: form one if none, then run its next plan-step."""
@@ -2696,13 +2714,14 @@ class World:
         if i >= len(steps):
             self._complete_aspiration(p, plan)
             return self._idle(p)
-        skill, tx, ty = steps[i]
+        step = steps[i]
+        skill, tx, ty = step[0], step[1], step[2]
         if max(abs(tx - p["x"]), abs(ty - p["y"])) > 1:      # walk to the spot
             return "wander", (int(np.sign(tx - p["x"])), int(np.sign(ty - p["y"])))
         if skill == "clear":                                 # primitive skills the body composes
             self._clear_ground(tx, ty, 0)
-        elif skill == "plant":
-            self.decor[(tx, ty)] = "flower"
+        elif skill == "place":                               # plant a flower / raise a stone cairn
+            self.decor[(tx, ty)] = step[3] if len(step) > 3 else "flower"
             self.version += 1
         plan["i"] = i + 1
         self._bump("aspire_step")
@@ -2713,8 +2732,9 @@ class World:
         p.pop("plan", None)
         p["aspire_cd"] = self.clock + ASPIRE_COOLDOWN
         self._bump("aspire_done")
-        done = ("planted a garden by their door" if plan.get("kind") == "garden"
-                else "tidied the ground around their home")
+        done = {"garden": "planted a garden by their door",
+                "art": "raised standing stones — a work of their own",
+                "tidy": "tidied the ground around their home"}.get(plan.get("kind"), "made their home finer")
         mind.remember(p, f"I {plan['goal']} — my home is finer for it", 0.6, "pride", self.clock)
         mind.speak(p, "There — a finer place to call my own.", self.clock)
         self._note("life", f"{p['name']} {done}.")
