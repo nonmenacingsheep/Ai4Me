@@ -399,6 +399,7 @@ POWER_SOURCES = ("generator", "reactor")
 POWER_RADIUS = 7                   # tiles a fed power node energizes around itself
 POWER_LINK = 9                     # a pole within this of the fed grid joins it and relays onward
 POWER_SHELTER_BONUS = 0.35         # how much an electrified (wired) home adds to its shelter
+POWER_CRAFT_SPEED = 1.5            # electric tools: crafting in a powered area runs this much faster
 # Awe & wonder — a structure FAR beyond the band's craft (a generator/reactor) is perceived as the
 # sublime: the curious approach to STUDY it, the cautious recoil. Study slowly yields INSIGHT, and
 # enough insight lets a soul begin to puzzle out the first secret of the strangers' machines.
@@ -1501,8 +1502,9 @@ class World:
             guards = sum(1 for q in self.people if q is not best
                          and abs(q["x"] - best["x"]) + abs(q["y"] - best["y"]) <= WOLF_BAND_SAFETY)
             if guards >= WOLF_GUARDS_SAFE or self._shelter_factor(best) > 0.5 \
-                    or self._guardian_near(best["x"], best["y"], exclude=best):
-                continue                                 # band, roof, or a standing guardian — the wolf backs off
+                    or self._guardian_near(best["x"], best["y"], exclude=best) \
+                    or self._powered(best["x"], best["y"]):
+                continue                                 # band, roof, guardian, or ELECTRIC LIGHT — the wolf backs off
             if bd <= 1:                                  # in reach — strike
                 if self.rng.random() < ANIMALS["wolf"]["kill_chance"] * bold / (1 + guards):
                     best["hp"] = max(0.0, best["hp"] - WOLF_BITE)
@@ -4470,6 +4472,8 @@ class World:
         if not c:
             return False
         speed = WORKSHOP_CRAFT_SPEED if self._near_workshop(p) else 1.0
+        if self._powered(p["x"], p["y"]):                # electric tools speed every craft
+            speed *= POWER_CRAFT_SPEED
         c["left"] = max(0.0, c["left"] - dt_game_min * speed)
         if c["left"] > 0:
             return False
