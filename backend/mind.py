@@ -871,7 +871,12 @@ def deliberate_messages(p: dict, ctx: dict) -> tuple[str, str]:
         "your mind on now, and why it matters to you.\n"
         f"Reply ONLY as compact JSON: {{\"intention\": one of {list(INTENT_KINDS)} "
         "(append ':Name' for befriend/provide/avoid to aim at a person), "
-        '"why": a short first-person reason, "say": a brief line you\'d speak aloud or ""}.'
+        '"why": a short first-person reason, "say": a brief line you\'d speak aloud or ""'
+        + (", and IF you set your mind on bettering your own home (intention 'aspire'), add "
+           f"\"project\": {{\"kind\": one of {ctx.get('aspire_kinds', [])}, \"goal\": a short "
+           "first-person description of what you'll make and why}"
+           if ctx.get("can_aspire") else "")
+        + "}."
     )
     needs = _needs_phrase(p)
     pulls = "; ".join(f"{k}{':'+ctx.get('_names',{}).get(t,t) if t else ''} {u:.2f}"
@@ -927,6 +932,14 @@ def apply_deliberation(p: dict, data: dict, ctx: dict, clock: float) -> None:
                 break
     inten = {"kind": kind, "target": target, "u": 0.6, "why": why or kind}
     _set_intention(p, inten, ctx)
+    # The mind may AUTHOR its own home-bettering project in words — a goal beyond the fixed verbs.
+    # We record the chosen (executable) kind + its free-text goal; the body grounds it into a plan
+    # of skills (world._form_aspiration). Invalid/unknown kinds are ignored — the rule taste-pick
+    # then stands, so the model's reasoning enriches but never breaks the offline path.
+    proj = data.get("project")
+    if isinstance(proj, dict) and str(proj.get("kind", "")).strip().lower() in set(ctx.get("aspire_kinds", ())):
+        p["llm_project"] = {"kind": str(proj["kind"]).strip().lower(),
+                            "goal": str(proj.get("goal", "") or "")[:120]}
 
 
 def reflect_messages(p: dict, clock: float) -> tuple[str, str]:

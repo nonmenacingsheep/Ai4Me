@@ -425,6 +425,10 @@ HELP_RANGE = 30               # how near a band-mate's unfinished build a housed
 ASPIRE_COOLDOWN = 2880.0      # game-min before a soul takes on another beautify-project (~2 days)
 ASPIRE_RING = 2              # how far around home a tidy/garden project reaches
 ASPIRE_MAX_STEPS = 10        # cap a plan's length so a project is bounded work
+ASPIRE_KINDS = ("tidy", "garden", "art")   # the executable project vocabulary the LLM can author into
+DEFAULT_ASPIRE_GOAL = {"tidy": "tend the ground around my home",
+                       "garden": "plant a garden by my door",
+                       "art": "raise a few standing stones — a mark that is mine"}
 # Governance — the band's FIRST NORM: pull your weight at the common granary. Judged once a day on
 # a rolling window. Soft enforcement through reputation only (standing + how others regard you),
 # never punishment — it nudges conduct without ever endangering a life.
@@ -2379,6 +2383,7 @@ class World:
             "needs_hearth": needs_hearth,
             "help_site": help_site,
             "can_aspire": can_aspire,
+            "aspire_kinds": list(ASPIRE_KINDS),
             "aspiring": p.get("plan") is not None,
             "aspire_why": (p.get("plan") or {}).get("goal") or "make my home a finer place to look on",
             "project": proj,
@@ -2677,27 +2682,38 @@ class World:
                    (hx - ASPIRE_RING, hy + ASPIRE_RING), (hx + ASPIRE_RING, hy + ASPIRE_RING)]
         art_tiles = [(tx, ty) for tx, ty in corners
                      if (tx, ty) in bare and (tx, ty) not in self.decor]
-        # WHICH project a soul takes on is a matter of TASTE: the ambitious raise standing stones, a
-        # statement of self; the curious plant a garden for the beauty of it; the orderly tidy the
-        # thicket back. Each candidate is weighed by temperament and the best-fitting one chosen.
-        choices = []
-        if art_tiles:
-            choices.append((0.30 + 0.55 * amb, {
-                "goal": "raise a few standing stones — a mark that is mine", "kind": "art",
-                "steps": [["place", tx, ty, "cairn"] for tx, ty in art_tiles]}))
-        if bare:
-            choices.append((0.30 + 0.55 * cur, {
-                "goal": "plant a garden by my door", "kind": "garden",
-                "steps": [["place", tx, ty, "flower"] for tx, ty in bare[:6]]}))
-        if overgrown:
-            choices.append((0.30 + 0.35 * (1.0 - cur), {
-                "goal": "tend the ground around my home", "kind": "tidy",
-                "steps": [["clear", tx, ty] for tx, ty in overgrown[:ASPIRE_MAX_STEPS]]}))
-        if not choices:
+
+        def build(kind, goal):
+            """Ground a project KIND into an executable plan over the skill library — or None if
+            it can't be done here (no bare ground for a garden, etc.). This is what lets the LLM
+            author a goal in words: it picks the kind, the body composes the skills."""
+            goal = (goal or "").strip() or DEFAULT_ASPIRE_GOAL.get(kind, "make my home finer")
+            if kind == "art" and art_tiles:
+                return {"goal": goal, "kind": "art", "i": 0,
+                        "steps": [["place", tx, ty, "cairn"] for tx, ty in art_tiles]}
+            if kind == "garden" and bare:
+                return {"goal": goal, "kind": "garden", "i": 0,
+                        "steps": [["place", tx, ty, "flower"] for tx, ty in bare[:6]]}
+            if kind == "tidy" and overgrown:
+                return {"goal": goal, "kind": "tidy", "i": 0,
+                        "steps": [["clear", tx, ty] for tx, ty in overgrown[:ASPIRE_MAX_STEPS]]}
             return None
-        plan = max(choices, key=lambda c: c[0])[1]
-        plan["i"] = 0
-        return plan
+
+        # An LLM-AUTHORED project (the mind's own reasoned goal — see mind.apply_deliberation) takes
+        # precedence when the model has set one and it can actually be carried out here.
+        lp = p.pop("llm_project", None)
+        if isinstance(lp, dict):
+            plan = build(str(lp.get("kind", "")).strip().lower(), lp.get("goal"))
+            if plan:
+                return plan
+        # OFFLINE / fallback — choose by TASTE: ambitious raise standing stones, curious plant a
+        # garden, the orderly tidy the thicket. Each weighed by temperament, the best-fit chosen.
+        weights = {"art": 0.30 + 0.55 * amb, "garden": 0.30 + 0.55 * cur, "tidy": 0.30 + 0.35 * (1.0 - cur)}
+        for kind in sorted(weights, key=lambda k: -weights[k]):
+            plan = build(kind, None)
+            if plan:
+                return plan
+        return None
 
     def _pursue_aspiration(self, p):
         """Actuate a self-authored project: form one if none, then run its next plan-step."""
