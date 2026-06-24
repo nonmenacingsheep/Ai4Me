@@ -155,6 +155,7 @@ def need_urgency(comfort: float, reserve: float = 1.0) -> float:
 HYSTERESIS = 0.12            # an intention must be beaten by this margin to be dropped
 REST_BY_DAY_DAMP = 0.35      # daytime: ordinary drowsiness is damped to this fraction (keeps daylight hours)
 REST_BY_DAY_RESERVE = 0.35   # …but a stamina reserve at/below this is true exhaustion — rest pull stands
+NIGHT_RESTED = 0.12          # below this fatigue a soul is fully rested — the night-sleep pin lifts
 BUILD_MOMENTUM = 0.35       # sunk-cost pull: a fully-underway build adds this much to its drive,
                             # so a half-raised home is FINISHED rather than abandoned mid-wall for
                             # some lesser whim (the user's "houses never get done" complaint)
@@ -469,10 +470,12 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     fatigue_u = need_urgency(p.get("fatigue", 0), p.get("stamina", 1.0))
     night = ctx.get("night")
     exposed = _clamp01(ctx.get("exposed", 0.0))
-    if night:
-        # People sleep at night. Fatigue rises fast (~a full day's worth daily), so a nightly
-        # rest is non-negotiable — only a pressing thirst/hunger (whose danger ramp out-scores
-        # this) should wake them. Without this they socialize through the night and waste away.
+    if night and p.get("fatigue", 0) > NIGHT_RESTED:
+        # People sleep at night — but only while they still have sleep to catch up on. A nightly
+        # rest is non-negotiable when at all tired (otherwise they socialize through the night and
+        # waste away), but once a soul is FULLY rested (fatigue back near zero) the pin lifts, so a
+        # well-rested soul isn't left lying awake at 0% fatigue — it rises and quietly fills the
+        # rest of the night until drowsiness returns.
         fatigue_u = max(fatigue_u, 0.85)
     elif exposed <= 0.1 and p.get("stamina", 1.0) > REST_BY_DAY_RESERVE:
         # By DAY a soul pushes through ordinary drowsiness instead of napping — only genuine
