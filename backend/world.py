@@ -3207,12 +3207,16 @@ class World:
         hx, hy = p["home"]
         wood_ok = p["inv"].get("wood", 0) >= 4 or self._wood_within(hx, hy, WOOD_BUILD_RANGE)
         best, best_floor = None, None
+        roomy_cap = fam * 3 + 6                                 # a home shouldn't be MUCH bigger than the
+        # household needs — a family of two doesn't raise a 100-tile hall just because the god drew
+        # one. Templates wildly oversized for this soul are skipped; the parametric designer (which
+        # sizes to the household) then builds an appropriately modest home.
         for ub in self.user_blueprints:
             if ub.get("communal"):
                 continue
             layout = ub.get("layout") or []
             floor = sum(row.count("F") + row.count(GLYPH_CORE) for row in layout)
-            if floor < max(1, fam):                            # too small for this household
+            if floor < max(1, fam) or floor > roomy_cap:       # too small OR absurdly oversized
                 continue
             timber = any(("W" in r or "F" in r or "D" in r) for r in layout)
             if timber and not wood_ok:                         # a timber template but no wood to raise it
@@ -3814,6 +3818,9 @@ class World:
                 self._bump("plan_found")
                 verb = "began a" if communal else "marked out a"
                 self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
+                # Say WHAT they're raising, so a watcher can tell at a glance (a house? an inn? a well?).
+                what = bp["name"].split("'s")[-1].strip().lower() if "'s" in bp["name"] else bp["name"].lower()
+                mind.speak(p, f"I'll raise {'an' if what[:1] in 'aeiou' else 'a'} {what} here.", self.clock)
                 return
         # Nowhere fit the footprint — reason about WHY (it'd be in the water / among the trees /
         # no room) so the soul thinks it through rather than silently giving up, then waits.
