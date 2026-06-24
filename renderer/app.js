@@ -4743,6 +4743,10 @@ function renderPersonPanel(p) {
     standingLine(p.renown) +
     `<div class="wp-sec">Temperament <em>(born · lived drift)</em></div>` +
     `<div class="wp-traits">${['sociability', 'ambition', 'curiosity', 'caution'].map(trait).join('')}</div>` +
+    (p.skills && Object.keys(p.skills).length
+      ? `<div class="wp-sec">Skills <em>grown by doing</em></div>` +
+        Object.entries(p.skills).sort().map(([k, v]) => bar(k, v, '#c9a24a')).join('')
+      : '') +
     `<div class="wp-sec">Carrying</div><div class="wp-inv">${escapeHtml(inv)}</div>` +
     (store ? `<div class="wp-sec">Larder at home</div><div class="wp-inv">${escapeHtml(store)}</div>` : '') +
     (() => {
