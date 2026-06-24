@@ -346,6 +346,14 @@ BLUEPRINTS = {
         "WFFFW",
         "WWWWW",
     ]),
+    # A communal WORKSHOP — a specialized building (not a home): the band's shared bench. Crafting
+    # near it goes faster, so a toolmaker who raises one makes gear & tools quicker for everyone.
+    "workshop": dict(name="Workshop", roof=True, insulation=1.0, communal=True, layout=[
+        "WWDWW",
+        "WFFFW",
+        "WFFFW",
+        "WWWWW",
+    ]),
 }
 
 # The dwelling ladder — ascending comfort. Once a soul has any roof and is kitted out,
@@ -356,6 +364,9 @@ BLUEPRINTS = {
 # needs station-proximity; this is the foundation those layers build on.)
 DWELLING_LADDER = ["leaf_shelter", "hut", "cabin"]
 MONUMENT_BP = "gathering"          # the communal status build raised once a soul tops the ladder
+WORKSHOP_BP = "workshop"           # a communal specialized building that speeds nearby crafting
+WORKSHOP_RANGE = 6                 # tiles from a finished workshop within which crafting is faster
+WORKSHOP_CRAFT_SPEED = 1.7        # craft-progress multiplier when working by the bench
 
 # ─── Renown — social standing (Phase 2) ──────────────────────────────────────
 # A soul's STANDING in the band: it grows from socially-visible achievements (raising a fine
@@ -2844,10 +2855,22 @@ class World:
         if skill > 0.3 and Ht >= 4:                            # a skilled hand adds windows to the long walls
             rows[Ht // 2][0] = "O"
             rows[Ht // 2][Wt - 1] = "O"
+        # A roomier household earns a SECOND ROOM: a skilled builder partitions the interior with
+        # an inner wall and an interior doorway (a sleeping room off the hearth room), so big homes
+        # actually have rooms rather than one open hall.
+        rooms = 1
+        if fam >= 4 and ih >= 4 and skill > 0.25:
+            mid = Ht // 2
+            for rx in range(1, Wt - 1):
+                rows[mid][rx] = "W"                            # the partition wall
+            rows[mid][Wt // 2] = "D"                           # an inner doorway between the rooms
+            rows[0][Wt // 2] = "D"; rows[mid][0] = rows[mid][Wt - 1] = "W"  # keep the front door; no windows on the divider
+            rooms = 2
         layout = ["".join(r) for r in rows]
         kind = "Hut" if rung == "hut" else "Cabin"
+        nm = f"{p['name']}'s {kind}" + (" (2 rooms)" if rooms > 1 else "")
         bid = f"home_{p['id']}"
-        BLUEPRINTS[bid] = dict(name=f"{p['name']}'s {kind}", roof=True, insulation=1.0, layout=layout)
+        BLUEPRINTS[bid] = dict(name=nm, roof=True, insulation=1.0, layout=layout)
         return bid
 
     def _project_for(self, p):
@@ -2869,10 +2892,19 @@ class World:
         mon = {"kind": "monument", "bp": MONUMENT_BP,
                "why": "raise a gathering hall — a place for us all, and a name that lasts"}
         has_real_home = i >= DWELLING_LADDER.index("hut")
-        mine_inprog = any(s["id"] == p.get("site") and s["bp"] == MONUMENT_BP and not s["done"]
-                          for s in self.sites)
-        if mine_inprog:
-            return mon                                         # I'm the one building it — keep at it
+        # Already mid communal build (hall OR workshop)? Keep at it rather than switching projects.
+        my_site = next((s for s in self.sites if s["id"] == p.get("site") and not s.get("done")), None)
+        if my_site is not None and my_site.get("communal"):
+            return {"kind": "monument", "bp": my_site["bp"], "why": "finish what we're raising together"}
+        # A TOOLMAKER's specialty project: raise the communal WORKSHOP (the band's bench) if there
+        # isn't one yet — gear, tools and everyone's crafting go faster beside it. It's their
+        # answer to the ambitious soul's gathering hall.
+        voc = p.get("vocation") or mind.vocation(p)
+        band_has_shop = any(s["bp"] == WORKSHOP_BP and s["done"] for s in self.sites)
+        if (voc == "toolmaker" and has_real_home and not band_has_shop
+                and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
+            return {"kind": "monument", "bp": WORKSHOP_BP,
+                    "why": "raise a workshop — a bench for us all, and faster hands"}
         band_has_hall = any(s["bp"] == MONUMENT_BP and s["done"] for s in self.sites)
         # A communal build is a GROUP effort: an ambitious soul undertakes one, OR joins an
         # in-progress one whose crew isn't full — so the band's builders converge to raise it
@@ -4109,13 +4141,23 @@ class World:
         self.version += 1
         return True
 
+    def _near_workshop(self, p) -> bool:
+        """Is the soul working within reach of a finished communal workshop (the band's bench)?"""
+        x, y = p["x"], p["y"]
+        for s in self.sites:
+            if s.get("done") and s.get("bp") == WORKSHOP_BP \
+                    and abs(s["ox"] - x) + abs(s["oy"] - y) <= WORKSHOP_RANGE:
+                return True
+        return False
+
     def _advance_craft(self, p, dt_game_min: float) -> bool:
         """Tick an in-progress craft; grant the item and clear the state when it finishes.
-        Returns True on the tick it completes."""
+        Returns True on the tick it completes. Working by the communal workshop speeds it up."""
         c = p.get("craft")
         if not c:
             return False
-        c["left"] = max(0.0, c["left"] - dt_game_min)
+        speed = WORKSHOP_CRAFT_SPEED if self._near_workshop(p) else 1.0
+        c["left"] = max(0.0, c["left"] - dt_game_min * speed)
         if c["left"] > 0:
             return False
         p["inv"][c["out"]] = p["inv"].get(c["out"], 0) + c["qty"]
