@@ -362,7 +362,8 @@ MONUMENT_BP = "gathering"          # the communal status build raised once a sou
 # home, a communal monument, teaching a craft, giving freely) and fades slowly if not renewed,
 # so status must be earned and maintained. Ambition turns standing into a pursued goal — the
 # monument project — so settled, driven souls compete to leave a mark, not just nest.
-RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05)
+RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05, help=0.06)
+HELP_RANGE = 30               # how near a band-mate's unfinished build a housed soul will go to help
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
@@ -2172,9 +2173,29 @@ class World:
         p["vocation"] = voc
         needs_hearth = (not is_child and p.get("home_struct") is not None
                         and self._person_knows(p, "campfire") and not p.get("hearth"))
+        # A housed soul with materials to spare looks for a band-mate's unfinished build nearby to
+        # lend a hand on — the nearest site (not their own, not communal) whose next tile they can
+        # actually pay for from their pack. This is what turns "I'm done" into "who needs a hand?".
+        help_site = None
+        if not is_child and p.get("home_struct") is not None:
+            px, py, inv = p["x"], p["y"], p["inv"]
+            best_d = HELP_RANGE + 1
+            for s in self.sites:
+                if s.get("done") or s.get("communal") or s.get("owner") == p["id"]:
+                    continue
+                t = self._site_next_task(s)
+                if t is None:
+                    continue
+                item, qty = t["cost"]
+                if inv.get(item, 0) < qty:
+                    continue
+                d = abs(s["ox"] - px) + abs(s["oy"] - py)
+                if d < best_d:
+                    best_d, help_site = d, s["id"]
         return {
             "needs_gear": needs_gear,
             "needs_hearth": needs_hearth,
+            "help_site": help_site,
             "project": proj,
             "vocation": voc,
             "clock": self.clock, "night": night, "season": self.season(),
@@ -2321,6 +2342,10 @@ class World:
                 if move is not None:
                     return "socialize", move
             return self._idle(p)
+        if kind == "help":
+            # Lend a hand on a band-mate's unfinished build — go to it and lay a tile from one's
+            # own pack. The home still belongs to its owner (see _finish_site).
+            return self._help_build(p, target)
         if kind in ("socialize", "befriend"):
             move = self._seek_toward(p, target) if target else self._seek_person(p)
             if move is not None:
@@ -3194,7 +3219,7 @@ class World:
                     continue                             # this blueprint doesn't fit anywhere — try the next
                 _, ox, oy, tasks, core = best
                 site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
-                        "ox": int(ox), "oy": int(oy), "by": p["name"],
+                        "ox": int(ox), "oy": int(oy), "by": p["name"], "owner": p["id"],
                         "insul": float(bp.get("insulation", 1.0)),
                         "tasks": tasks, "done": False, "t": round(self.clock, 1)}
                 site["communal"] = bool(communal)
@@ -3216,9 +3241,32 @@ class World:
         mind.speak(p, f"Not here — {why}.", self.clock)
         p["build_cd"] = self.clock + 720.0      # nowhere to build here — try again later
 
-    def _build_next_block(self, p):
-        """Lay the next blueprint tile if the person is in range and carries the material."""
-        site = self._person_site(p)
+    def _help_build(self, p, site_id):
+        """Walk to a band-mate's unfinished site and lay a tile on it (helping). Yields to idle if
+        the site is gone/finished or the next tile needs a material this helper isn't carrying."""
+        site = next((s for s in self.sites if s["id"] == site_id and not s.get("done")), None)
+        if site is None:
+            return self._idle(p)
+        task = self._site_next_task(site)
+        if task is None:
+            return self._idle(p)
+        tx, ty = task["x"], task["y"]
+        if max(abs(tx - p["x"]), abs(ty - p["y"])) > 1:
+            return "wander", (int(np.sign(tx - p["x"])), int(np.sign(ty - p["y"])))
+        item, qty = task["cost"]
+        if p["inv"].get(item, 0) < qty:                  # can't help this tile — no use loitering
+            return self._idle(p)
+        before = sum(1 for t in site["tasks"] if t["done"])
+        self._build_next_block(p, site=site)            # lay it (credits the owner on completion)
+        if sum(1 for t in site["tasks"] if t["done"]) > before and not site.get("done"):
+            self._earn_renown(p, RENOWN_GAIN.get("help", 0.3) * 0.4, "lent a hand on a neighbour's build")
+        return "build", None
+
+    def _build_next_block(self, p, site=None):
+        """Lay the next blueprint tile if the person is in range and carries the material. With an
+        explicit `site` a soul lays a tile on SOMEONE ELSE's build (helping) — the finished home
+        still goes to its owner, not to whoever happened to place the last tile."""
+        site = site if site is not None else self._person_site(p)
         if not site:
             return
         task = self._site_next_task(site)
@@ -3285,19 +3333,26 @@ class World:
             self._earn_renown(p, RENOWN_GAIN["monument"],
                               f"raised a {site['name'].lower()} for us all — a name that will last")
             return
-        # Moving up the dwelling ladder: pull down the old, lesser home now that a finer one
-        # stands, so the settlement isn't littered with the husks of outgrown shelters.
-        old = p.get("home_struct")
+        # The HOME belongs to whoever raised it (the owner), not whoever happened to lay the last
+        # tile — so a band-mate who lent a hand finishing the walls doesn't end up claiming it.
+        owner = next((q for q in self.people if q["id"] == site.get("owner")), None) or p
+        # Moving up the dwelling ladder: pull down the owner's old, lesser home now that a finer
+        # one stands, so the settlement isn't littered with the husks of outgrown shelters.
+        old = owner.get("home_struct")
         if old and old != site["id"]:
             gone = self._dismantle_site(old)
             if gone:
-                self._note("build", f"{p['name']} pulled down their old {gone['name'].lower()}.")
-        p["home_struct"] = site["id"]
-        p["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
-        self._note("build", f"{p['name']} finished building a {site['name'].lower()}.")
-        mind.remember(p, f"raised my own {site['name'].lower()} — a home at last", 0.85,
+                self._note("build", f"{owner['name']} pulled down their old {gone['name'].lower()}.")
+        owner["home_struct"] = site["id"]
+        owner["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
+        self._note("build", f"{owner['name']} finished building a {site['name'].lower()}.")
+        mind.remember(owner, f"raised my own {site['name'].lower()} — a home at last", 0.85,
                       "build", self.clock)
-        self._earn_renown(p, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
+        self._earn_renown(owner, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
+        if p is not owner:                          # a band-mate lent the final hand — honour it
+            self._earn_renown(p, RENOWN_GAIN.get("help", 0.3),
+                              f"lent a hand raising {owner['name']}'s home")
+            mind.remember(p, f"helped {owner['name']} finish their home", 0.6, "renown", self.clock)
 
     # ── god-authored building templates (the Templates god-tool) ────────────────
     # The god designs buildings in a blank-grid editor and saves them as blueprints in the

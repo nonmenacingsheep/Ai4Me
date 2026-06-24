@@ -64,7 +64,7 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
-                "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard")
+                "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard", "help")
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 # Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
@@ -547,6 +547,15 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         if needy_id and inv.get("food", 0) > TRADE_SURPLUS:
             out.append(("provide", needy_id, 0.25 * amb + 0.2 * soc,
                         f"I have plenty — {needy_name} does not"))
+        # Done with their own roof and carrying materials to spare — a soul lends a hand on a
+        # band-mate's unfinished build. Comfort-gated (a needy soul tends itself first); keenest
+        # in sociable, ambitious folk. The shared labour is a thread of interdependence.
+        help_site = ctx.get("help_site")
+        if help_site:
+            comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+            if comfort > 0.5:
+                out.append(("help", help_site, (0.20 + 0.16 * soc + 0.12 * amb) * comfort,
+                            "I'll lend a hand on their build"))
 
     # Belonging — loneliness grows the longer since real contact; sociable souls feel it most.
     # Hushed at night, when the world sleeps.
