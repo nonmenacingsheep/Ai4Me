@@ -1890,6 +1890,11 @@ class World:
                                 if ev:
                                     self._note("social", ev)
                                 break
+                        # Help someone CRAFT: a band-mate who's worked out a piece of gear but is
+                        # short the makings gets the missing material from someone who has it to
+                        # spare — so the craft can go ahead. The other half of helping: not just
+                        # lending labour on a build, but sharing the stuff a maker needs.
+                        self._maybe_gift_craft_material(giver, taker)
                         # A toolmaker hands a spare TOOL to a band-mate who has none — how a
                         # builder gets their axe and a hunter their spear (tool-gating's payoff).
                         for _rid, key in self._TOOLS:
@@ -2845,6 +2850,33 @@ class World:
         depends on them — a builder chops bare-handed (slower) until gifted an axe, a hunter needs
         a spear from the maker's bench. This is what makes the toolmaker's calling matter."""
         return (p.get("vocation") or mind.vocation(p)) == "toolmaker"
+
+    MATERIAL_GIFT_SPARE = 3      # raw a giver keeps for itself before handing the surplus to a maker
+
+    def _maybe_gift_craft_material(self, giver, taker):
+        """If `taker` knows a piece of gear but lacks it AND is short a raw material that `giver`
+        has to spare, hand a unit over so the maker can get on with it. One gift per contact."""
+        tinv = taker.get("inv", {})
+        ginv = giver.get("inv", {})
+        for rid, _have_key, _raw in self._GEAR:
+            if not self._person_knows(taker, rid):
+                continue
+            if rid == "leaf_flask" and tinv.get("leaf_flask", 0) >= 1:
+                continue
+            if rid in ("forage_sack", "sleeping_mat") and tinv.get(rid, 0) >= 1:
+                continue
+            need = crafting.missing(tinv, rid)
+            for mat, qn in need.items():
+                if mat == "rope":                          # an intermediate — the maker spins it themselves
+                    continue
+                if ginv.get(mat, 0) >= qn + self.MATERIAL_GIFT_SPARE:
+                    ev = mind.give(giver, taker, mat, self.clock)
+                    if ev:
+                        self._note("social", ev)
+                        self._earn_renown(giver, RENOWN_GAIN["gift"],
+                                          f"shared {mat} so {taker['name']} could make a {rid.replace('_', ' ')}")
+                    return
+        return
 
     def _survival_craft_decide(self, p, fiber, leaf, getters):
         """If the band knows a make-shift craft this person lacks, gather its materials and
