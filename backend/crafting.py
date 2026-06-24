@@ -53,7 +53,8 @@ RAW = {
 # ════════════════════════════════════════════════════════════════════════════
 STATION_KINDS = ("workbench", "campfire", "furnace", "kiln", "forge",
                  "loom", "tannery", "anvil", "well")
-STRUCTURE_KINDS = ("shelter", "stone_wall", "brick_house", "stone_house", "windmill")
+STRUCTURE_KINDS = ("shelter", "stone_wall", "brick_house", "stone_house", "windmill",
+                   "generator", "power_pole")
 
 # Tools provide CAPABILITIES; a recipe that needs e.g. "hammer" is satisfied by any
 # held item that provides it (so a steel hammer works wherever a crude one would).
@@ -231,6 +232,18 @@ _RECIPE_ROWS = [
     ("book",           1, {"paper": 5, "leather": 1},         "workbench", None, 3),
     ("wheel",          1, {"plank": 4, "iron_ingot": 1},      "workbench", "saw", 3),
     ("windmill",       1, {"plank": 12, "cloth": 4, "gear": 2, "iron_ingot": 3}, "workbench", "hammer", 5),  # structure
+
+    # ── I. Electricity — wiring, power & light (the first rung of the MODERN era, tier 4-5) ──
+    #    Built at the smithy's forge/furnace from metal stock. The generator is a power SOURCE,
+    #    poles+wire conduct it, and the light/motor are the first things it runs. This is where a
+    #    band crosses from craft into industry — the foundation the reactor era will build on.
+    ("magnet",         1, {"iron_ingot": 1, "coal": 1},        "furnace", None, 4),
+    ("copper_coil",    1, {"copper_wire": 3},                  "workbench", None, 4),
+    ("generator",      1, {"copper_coil": 2, "magnet": 2, "iron_ingot": 2, "plank": 2}, "forge", "hammer", 5),  # structure: power source
+    ("battery",        1, {"copper_plate": 2, "iron_plate": 1, "glass": 1}, "forge", None, 5),
+    ("power_pole",     2, {"plank": 2, "copper_wire": 1},       "workbench", None, 5),  # structure: conductor
+    ("light_bulb",     2, {"glass": 1, "copper_wire": 1},       "forge", None, 5),
+    ("electric_motor", 1, {"copper_coil": 1, "magnet": 1, "iron_ingot": 1}, "forge", "hammer", 5),
 ]
 
 # Categorise outputs so callers (UI, world.py, future minds) know how to treat each.
@@ -298,6 +311,8 @@ ICONS = {  # a few hand-picked glyphs so the UI isn't all blanks (rest fall back
     "bronze_ingot": "🟫", "cloth": "🧶", "leather": "🟫", "book": "📖", "bed": "🛏️",
     "table": "🪑", "chair": "🪑", "lantern": "🏮", "iron_sword": "⚔️", "steel_sword": "⚔️",
     "iron_shield": "🛡️", "windmill": "🌬️", "brick_house": "🏠", "stone_house": "🏘️",
+    "generator": "🔌", "battery": "🔋", "power_pole": "🗼", "light_bulb": "💡",
+    "electric_motor": "⚙️", "magnet": "🧲", "copper_coil": "🌀",
 }
 for _id, _ic in ICONS.items():
     if _id in ITEMS:
@@ -476,6 +491,8 @@ TECH_LADDER = [
     "copper_ingot", "copper_axe", "tin_ingot", "bronze_ingot", "bronze_axe",
     "forge", "iron_ingot", "iron_axe", "iron_pickaxe", "loom", "thread", "cloth",
     "tannery", "leather", "steel_ingot", "steel_axe", "brick_house", "windmill",
+    # The modern era's first rung — electricity (needs a smithy's forge + a hammer):
+    "magnet", "copper_coil", "generator", "power_pole", "light_bulb", "electric_motor",
 ]
 
 
@@ -484,7 +501,7 @@ TECH_LADDER = [
 # ════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print(f"recipes: {len(RECIPES)}  |  items: {len(ITEMS)}  |  raw: {len(RAW)}")
-    assert len(RECIPES) == 132, f"expected 132 recipes, got {len(RECIPES)}"
+    assert len(RECIPES) == 139, f"expected 139 recipes, got {len(RECIPES)}"
 
     # Discovery: a correct ingredient guess identifies a hidden survival craft; a wrong one
     # doesn't; and each discoverable recipe has a UNIQUE ingredient-type set (so a right
