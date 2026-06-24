@@ -399,6 +399,13 @@ POWER_SOURCES = ("generator", "reactor")
 POWER_RADIUS = 7                   # tiles a fed power node energizes around itself
 POWER_LINK = 9                     # a pole within this of the fed grid joins it and relays onward
 POWER_SHELTER_BONUS = 0.35         # how much an electrified (wired) home adds to its shelter
+# Awe & wonder — a structure FAR beyond the band's craft (a generator/reactor) is perceived as the
+# sublime: the curious approach to STUDY it, the cautious recoil. Study slowly yields INSIGHT, and
+# enough insight lets a soul begin to puzzle out the first secret of the strangers' machines.
+WONDER_KINDS = ("generator", "reactor")
+WONDER_VISION = 18                 # tiles within which a wondrous structure is perceived
+WONDER_INSIGHT_TO_LEARN = 24.0     # study-beats of insight before the first electricity craft is grasped
+WONDER_RECIPE = "copper_coil"      # the first secret reverse-engineered from beholding the machine
 STOREHOUSE_BP = "storehouse"       # a communal specialized building that protects the band's stored food
 STORE_SPOIL_FACTOR = 0.5          # a storehouse halves how fast STORED food spoils
 STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
@@ -1396,6 +1403,60 @@ class World:
         self._ensure_power()
         return any(abs(x - e[0]) + abs(y - e[1]) <= POWER_RADIUS for e in self._powered_nodes)
 
+    def _nearest_wonder(self, p):
+        """The nearest structure FAR beyond the band's craft (a generator/reactor) within sight,
+        or None — the sublime thing a soul marvels at or recoils from. Returns (x, y, dist, kind)."""
+        x, y = p["x"], p["y"]
+        best, bd = None, WONDER_VISION + 1
+        for s in self.structures:
+            if s.get("kind") in WONDER_KINDS:
+                d = abs(s["x"] - x) + abs(s["y"] - y)
+                if d < bd:
+                    best, bd = s, d
+        return None if best is None else (best["x"], best["y"], bd, best["kind"])
+
+    def _awe_react(self, p):
+        """A soul's first sight of the sublime — wonder for the curious, dread for the cautious —
+        burned as a vivid memory and spoken once. (Only the first beholding; later sights are quiet.)"""
+        if p.get("_awed"):
+            return
+        p["_awed"] = True
+        dread = mind._trait(p, "caution") > mind._trait(p, "curiosity")
+        text = ("I have never seen the like — it fills me with dread." if dread
+                else "I have never seen the like — what wonder is this?")
+        mind.remember(p, text, 0.85, "awe", self.clock)
+        mind.speak(p, text, self.clock)
+        self._note("awe", f"{p['name']} beheld the strange machine in {'fear' if dread else 'wonder'}.")
+
+    def _study_wonder(self, p):
+        """Standing before the machine, a curious soul STUDIES it — slowly gathering insight until
+        the first secret of the strangers' craft comes clear (reverse-engineering the modern tree)."""
+        p["insight"] = p.get("insight", 0.0) + 1.0
+        if p["insight"] % 8 < 1:
+            mind.remember(p, "I study the strangers' machine, trying to grasp how it is wrought",
+                          0.5, "study", self.clock)
+        if p["insight"] >= WONDER_INSIGHT_TO_LEARN and not self._person_knows(p, WONDER_RECIPE):
+            self._grant_recipe(p, WONDER_RECIPE, via="puzzled out from the strangers' machine",
+                               rationale="studied the god's wondrous device until its first secret came clear")
+            self._note("discovery", f"{p['name']} began to grasp how the strange machines are made.")
+
+    def _marvel(self, p):
+        """React to the sublime: the curious approach to STUDY it (and slowly learn), the cautious
+        back away toward home. Either way they're awed. Returns a body action."""
+        w = self._nearest_wonder(p)
+        if w is None:
+            return self._idle(p)
+        wx, wy, dist, _kind = w
+        self._awe_react(p)
+        x, y = p["x"], p["y"]
+        if mind._trait(p, "caution") > mind._trait(p, "curiosity") and dist < 7:
+            hx, hy = p["home"]                                # recoil — keep clear of the thing
+            return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+        if dist > 2:                                          # curious — go closer to see
+            return "wander", (int(np.sign(wx - x)), int(np.sign(wy - y)))
+        self._study_wonder(p)                                # at its foot — study it
+        return "rest", None
+
     def place_power(self, kind: str, x: int, y: int, by: str = "the god") -> str:
         """God tool: drop a generator, reactor or power pole into the world — the modern grid the
         wooden village can marvel at (and, in time, learn to build)."""
@@ -2323,6 +2384,11 @@ class World:
                                default=0.0),
             "exposed": p.get("_exposed", 0.0),
             "build_progress": build_progress,
+            # The sublime: a machine far beyond the band's craft in sight. `novelty` fades as the
+            # soul studies it, so awe gives way to understanding (then they go back to building).
+            "wonder": (lambda w: {"dist": w[2], "kind": w[3],
+                                  "novelty": max(0.1, 1.0 - p.get("insight", 0.0) / WONDER_INSIGHT_TO_LEARN)}
+                       if w else None)(self._nearest_wonder(p)),
         }
 
     def _person_decide(self, p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly):
@@ -2480,6 +2546,8 @@ class World:
             t = next((q for q in self.people if q["id"] == target), None)
             if t is not None and (t["x"] != x or t["y"] != y):
                 return "wander", (int(np.sign(x - t["x"])), int(np.sign(y - t["y"])))
+        if kind == "marvel":
+            return self._marvel(p)
         return self._idle(p)
 
     def _seek_toward(self, p, target_id):

@@ -65,7 +65,7 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
                 "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard", "help",
-                "forage", "whittle")
+                "forage", "whittle", "marvel")
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 # Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
@@ -577,6 +577,15 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     # Curiosity — the unknown tugs at restless minds that have lingered too long.
     bored = _clamp01((clock - p.get("last_explore_t", 0.0)) / SOCIAL_FORGET)
     out.append(("explore", None, (0.08 + cur * bored * 0.75) * night_damp, "the far country calls"))
+
+    # AWE — a machine far beyond the band's craft is in sight (the sublime). It pulls hard while
+    # NOVEL — the curious to approach and study, the cautious to recoil — then fades as the soul
+    # comes to understand it and returns to ordinary life. Below survival, but above idle work.
+    wonder = ctx.get("wonder")
+    if wonder:
+        nov = _clamp01(wonder.get("novelty", 1.0))
+        out.append(("marvel", None, (0.42 + 0.30 * cur + 0.18 * cau) * nov,
+                    "what manner of thing is THAT?"))
 
     # Apprenticeship — a soul still short on craft seeks out a markedly more-skilled band-mate to
     # learn from, keenest in the curious (the teaching itself happens when they're together).
