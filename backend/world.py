@@ -2988,6 +2988,10 @@ class World:
         if avoid:
             if self._water_within(tx, ty, avoid):
                 return "too close to the water"
+            # A soul PREFERS a natural clearing — open ground is a better homesite than the deep
+            # woods (proven: clearing-sited bands survive markedly better). It's only a preference:
+            # the relaxed fallback (avoid=0) still lets them build on wooded ground when no clearing
+            # is near, and whatever veg is under the footprint is CLEARED tile-by-tile as it's built.
             if self.veg_sp[ty, tx] in WOOD_IDS and self.veg_growth[ty, tx] > 0.2:
                 return "in among the trees"
         return None
@@ -3121,31 +3125,32 @@ class World:
         bx, by = p["home"]
         occupied = self._occupied_tiles()
         cands = [name] + (["leaf_shelter"] if name != "leaf_shelter" else [])
-        for cand in cands:
-            bp = BLUEPRINTS[cand]
-            bw, bh = len(bp["layout"][0]), len(bp["layout"])
-            for off in self._site_offsets():
-                ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
-                # Non-overlapping footprint, set back from the water (flood-shy) and off the
-                # trees — the spiral finds the nearest spot that satisfies all three, so homes
-                # cluster a short walk inland from the bank rather than right on the shore.
-                tasks, core = self._blueprint_tasks(cand, ox, oy, occupied, avoid=WATER_BUILD_BUFFER)
-                if not tasks:
-                    continue
-                site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
-                        "ox": int(ox), "oy": int(oy), "by": p["name"],
-                        "insul": float(bp.get("insulation", 1.0)),
-                        "tasks": tasks, "done": False, "t": round(self.clock, 1)}
-                site["communal"] = bool(communal)
-                self.sites.append(site)
-                p["site"] = site["id"]
-                if not communal:                         # a home moves the builder's anchor; a monument doesn't
-                    home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
-                    p["home"] = (int(home[0]), int(home[1]))
-                self.version += 1
-                verb = "began a" if communal else "marked out a"
-                self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
-                return
+        # Prefer a flood-shy, tree-free spot; but a ROOF beats a perfect site — if none is found
+        # nearby, relax to any dry, unclaimed ground (trees there get cleared as it's built) so a
+        # soul never ends up homeless, which is what truly kills (no shelter, no boiled water).
+        for avoid in (WATER_BUILD_BUFFER, 0):
+            for cand in cands:
+                bp = BLUEPRINTS[cand]
+                bw, bh = len(bp["layout"][0]), len(bp["layout"])
+                for off in self._site_offsets():
+                    ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
+                    tasks, core = self._blueprint_tasks(cand, ox, oy, occupied, avoid=avoid)
+                    if not tasks:
+                        continue
+                    site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
+                            "ox": int(ox), "oy": int(oy), "by": p["name"],
+                            "insul": float(bp.get("insulation", 1.0)),
+                            "tasks": tasks, "done": False, "t": round(self.clock, 1)}
+                    site["communal"] = bool(communal)
+                    self.sites.append(site)
+                    p["site"] = site["id"]
+                    if not communal:                     # a home moves the builder's anchor; a monument doesn't
+                        home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
+                        p["home"] = (int(home[0]), int(home[1]))
+                    self.version += 1
+                    verb = "began a" if communal else "marked out a"
+                    self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
+                    return
         # Nowhere fit the footprint — reason about WHY (it'd be in the water / among the trees /
         # no room) so the soul thinks it through rather than silently giving up, then waits.
         bw0, bh0 = len(BLUEPRINTS[name]["layout"][0]), len(BLUEPRINTS[name]["layout"])
@@ -5092,12 +5097,13 @@ if __name__ == "__main__":
                 and wsi.veg_sp[ly2, lx2] not in WOOD_IDS:
             dry = (int(lx2), int(ly2)); break
     dry_ok = dry and wsi._blueprint_tasks("leaf_shelter", dry[0], dry[1], avoid=WATER_BUILD_BUFFER)[0] is not None
-    # Now blanket that spot with trees: autonomous siting refuses it, the god still may.
+    # Blanket the spot with trees: a soul PREFERS a clearing (strict siting passes it over) but
+    # the relaxed fallback still builds there, and clearing the footprint wipes the trees off.
     for yy in range(dry[1] - 1, dry[1] + 4):
         for xx in range(dry[0] - 1, dry[0] + 4):
             if wsi._in(xx, yy):
                 wsi.veg_sp[yy, xx] = WOOD_IDS[0]; wsi.veg_growth[yy, xx] = 0.9
-    tree_rej = wsi._blueprint_tasks("leaf_shelter", dry[0], dry[1], avoid=WATER_BUILD_BUFFER)[0] is None
+    tree_preferred_away = wsi._blueprint_tasks("leaf_shelter", dry[0], dry[1], avoid=WATER_BUILD_BUFFER)[0] is None
     god_anywhere = wsi._blueprint_tasks("leaf_shelter", dry[0], dry[1], avoid=0)[0] is not None
     wsi._clear_ground(dry[0], dry[1])
     sp_cleared = int(wsi.veg_sp[dry[1], dry[0]]) == VEG_NONE
@@ -5120,10 +5126,10 @@ if __name__ == "__main__":
         gxn, gyn = wsi.granary["x"], wsi.granary["y"]
         relocated = (wsi.water[gyn, gxn] == WATER_NONE and (gxn, gyn) != wet_xy
                      and any(s["kind"] == "granary" and (s["x"], s["y"]) == (gxn, gyn) for s in wsi.structures))
-    siting_ok = bool(near_rej and dry_ok and tree_rej and god_anywhere and sp_cleared
+    siting_ok = bool(near_rej and dry_ok and tree_preferred_away and god_anywhere and sp_cleared
                      and reason_ok and relocated)
     print(f"  siting test: near-water-refused={bool(near_rej)}, inland-ok={bool(dry_ok)}, "
-          f"tree-refused={tree_rej}, god-anywhere={god_anywhere}, species-cleared={sp_cleared}, "
+          f"tree-preferred-away={tree_preferred_away}, god-anywhere={god_anywhere}, species-cleared={sp_cleared}, "
           f"reason=\"{reason_water}\", granary-relocated={relocated} "
           f"-> {'OK' if siting_ok else 'FAILED'}")
 
