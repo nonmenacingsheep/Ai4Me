@@ -2888,11 +2888,41 @@ class World:
                                roof_cost=("leaves", 1), layout=layout)
         return bid
 
+    def _home_template_for(self, p):
+        """A god-authored home template to raise as a PRIOR — so the band builds the GOD's designs,
+        not just the parametric default. Picks the smallest non-communal template roomy enough for
+        the household; None when there's none suitable (or it's a timber design and no wood is to
+        hand). This is the long-promised 'templates as priors': the god's blueprints become the
+        forms a soul reaches for first."""
+        if not self.user_blueprints:
+            return None
+        fam = self._household_size(p)
+        hx, hy = p["home"]
+        wood_ok = p["inv"].get("wood", 0) >= 4 or self._wood_within(hx, hy, WOOD_BUILD_RANGE)
+        best, best_floor = None, None
+        for ub in self.user_blueprints:
+            if ub.get("communal"):
+                continue
+            layout = ub.get("layout") or []
+            floor = sum(row.count("F") + row.count(GLYPH_CORE) for row in layout)
+            if floor < max(1, fam):                            # too small for this household
+                continue
+            timber = any(("W" in r or "F" in r or "D" in r) for r in layout)
+            if timber and not wood_ok:                         # a timber template but no wood to raise it
+                continue
+            if best is None or floor < best_floor:
+                best, best_floor = ub["id"], floor
+        return best
+
     def _design_dwelling(self, p, rung: str) -> str:
-        """A soul DESIGNS its own home: a timber room sized to its household and shaped by its
-        building skill (bigger and finer the more it has of each), validated later by the same
-        placement logic as any blueprint. Registered under a per-soul id and returned. This is
-        the parametric v1 — a real layout the soul authored, not a one-size-fits-all blueprint."""
+        """A soul DESIGNS its own home. If the god has drawn a fitting blueprint it builds THAT (a
+        template prior); otherwise it generates one parametrically — a timber room sized to its
+        household and shaped by its building skill (bigger and finer the more of each), or an
+        all-leaf house when wood is scarce. Validated later by the same placement logic."""
+        prior = self._home_template_for(p)
+        if prior:
+            self._bump("template_prior")
+            return prior
         fam = self._household_size(p)
         skill = (p.get("skills") or {}).get("building", 0.0)
         # Material is chosen for the WHOLE house, never mixed: build in timber only when wood is
