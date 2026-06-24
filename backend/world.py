@@ -390,6 +390,8 @@ PLY_WOOD_STOCK = 14                # a woodcutter plying their trade stocks timb
 # and a share of a parent's standing. This is where character becomes lineage and lineage,
 # slowly, becomes culture. Ages are in game-days (DAYS_PER_YEAR == 60).
 ADULT_AGE = 16 * DAYS_PER_YEAR     # childhood ends ~16 yrs: full capability + a vocation
+CHILD_SKILL_GAIN = 0.00006         # skill a youngling earns per beat of practice (grows over a childhood)
+ARROWS_PER_WHITTLE = 2             # arrows a child shapes from one length of wood
 BREED_MIN_AGE = 18 * DAYS_PER_YEAR
 BREED_MAX_AGE = 45 * DAYS_PER_YEAR
 BREED_COOLDOWN_DAYS = 14.0         # game-days between a mother's children (births must outpace attrition)
@@ -2204,6 +2206,7 @@ class World:
                 if d < best_d:
                     best_d, help_site = d, s["id"]
         return {
+            "is_child": is_child,
             "needs_gear": needs_gear,
             "needs_hearth": needs_hearth,
             "help_site": help_site,
@@ -2357,6 +2360,12 @@ class World:
             # Lend a hand on a band-mate's unfinished build — gather its makings and lay a tile.
             # The home still belongs to its owner (see _finish_site).
             return self._help_build(p, target, tree, stone, fiber, leaf, lx, ly)
+        if kind == "forage":
+            # A youngling gathers what little hands can, growing its foraging skill by doing.
+            return self._child_forage(p, edible, lx, ly)
+        if kind == "whittle":
+            # A youngling whittles arrows and practises — growing a young crafter's skill.
+            return self._child_whittle(p, tree, lx, ly)
         if kind in ("socialize", "befriend"):
             move = self._seek_toward(p, target) if target else self._seek_person(p)
             if move is not None:
@@ -3287,6 +3296,35 @@ class World:
         mind.remember(p, f"I can't raise it here — it'd be {why}.", 0.4, "build", self.clock)
         mind.speak(p, f"Not here — {why}.", self.clock)
         p["build_cd"] = self.clock + 720.0      # nowhere to build here — try again later
+
+    def _grow_skill(self, p, name, amt=CHILD_SKILL_GAIN):
+        """Nudge a soul's hands-on skill upward (capped). How a youngling who keeps at a thing
+        slowly gets good at it — the seed of competent adulthood."""
+        sk = p.setdefault("skills", {})
+        sk[name] = min(1.0, sk.get(name, 0.0) + amt)
+
+    def _child_forage(self, p, edible, lx, ly):
+        """A youngling forages food — useful work small hands CAN do, and practice that grows
+        their foraging skill a little each beat. Surplus banks at home like anyone's (kids help
+        feed the band too), but they never range as a provisioner would."""
+        self._grow_skill(p, "foraging")
+        x, y = p["x"], p["y"]
+        return self._seek(p, x, y, bool(edible[ly, lx]), edible, lx, ly, "food", "eat", "seek_food")
+
+    def _child_whittle(self, p, tree, lx, ly):
+        """A youngling whittles arrows from a length of wood — safe handiwork that grows a young
+        crafter's skill. With no wood to hand they go gather some first."""
+        inv = p["inv"]
+        if inv.get("wood", 0) >= 1:
+            inv["wood"] -= 1
+            if inv["wood"] <= 0:
+                inv.pop("wood", None)
+            inv["arrows"] = inv.get("arrows", 0) + ARROWS_PER_WHITTLE
+            self._grow_skill(p, "crafting", CHILD_SKILL_GAIN * 1.5)
+            self._bump("child_whittle")
+            return "whittle", None
+        x, y = p["x"], p["y"]
+        return self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly, "wood", "chop", "seek_wood")
 
     def _bump(self, key):
         """Tiny behaviour counter so a canary can confirm a new behaviour actually FIRES live
@@ -4759,6 +4797,10 @@ if __name__ == "__main__":
     beh = getattr(w, "_beh", {})
     print(f"  behaviours fired: planned-foundings={beh.get('plan_found', 0)}, "
           f"help-blocks-laid={beh.get('help_block', 0)}, craft-materials-gifted={beh.get('gift_material', 0)}")
+    kids = [q for q in w.people if q["age"] < ADULT_AGE]
+    ksk = {k: round(v, 2) for k, v in (kids[0].get("skills", {}) if kids else {}).items()}
+    print(f"  younglings: {len(kids)} children; arrows-whittled={beh.get('child_whittle', 0)}; "
+          f"sample child skills={ksk or 'n/a'}")
     lore = sum(len(p.get("berry_lore", {})) for p in w.people)
     bad_lore = sum(1 for p in w.people for v in p.get("berry_lore", {}).values() if v == "bad")
     berry_ill = sum(1 for p in w.people if (p.get("illness") or {}).get("d") == "berry_sickness"

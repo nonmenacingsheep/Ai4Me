@@ -64,7 +64,8 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
-                "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard", "help")
+                "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard", "help",
+                "forage", "whittle")
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 # Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
@@ -644,6 +645,25 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
 
     # A low baseline of just tending one's own patch, so an idle mind has somewhere to rest.
     out.append(("tend", None, 0.07, "tend to my own"))
+
+    # YOUNGLINGS — a child's hands aren't ready for the hard or dangerous work (raising buildings,
+    # crafting gear, standing a watch, plying a trade). Strip those pulls and give them a child's
+    # life instead: forage what they can, whittle and practice, and learn from their elders —
+    # growing the very skills that will make them capable adults. Survival, play, wonder and fear
+    # all still apply (those drives are left untouched above).
+    if ctx.get("is_child"):
+        BLOCKED = {"build", "ply", "guard", "provide", "provision", "help", "tinker"}
+        out = [d for d in out if d[0] not in BLOCKED]
+        comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+        # Forage what little hands can — and learn by doing (grows their foraging skill). The pull
+        # EASES once their pack holds food, so a fed child turns to practising a craft instead of
+        # endlessly gathering.
+        forage_u = (0.22 + 0.12 * cur) * comfort
+        if inv.get("food", 0) >= 3:
+            forage_u *= 0.35
+        out.append(("forage", None, forage_u, "I'll gather what I can and learn how"))
+        # Whittle arrows and practice — small, safe handiwork that grows a young crafter's skill.
+        out.append(("whittle", None, (0.20 + 0.14 * cur) * comfort, "I'll whittle arrows and get better"))
     return out
 
 
