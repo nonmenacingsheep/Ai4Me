@@ -4861,12 +4861,17 @@ function renderPersonPanel(p) {
       `${p.crafting.left_min != null ? ` (${Math.round(p.crafting.left_min)} game-min left)` : ''}</div>` : '';
   const illLine = (p.illness && p.illness.known)
     ? `<div class="wp-ill">🤒 ailing — ${escapeHtml((p.illness.d || '').replace(/_/g, ' '))}</div>` : '';
+  // A soul's own self-authored project (an aspiration it set its mind on) + how far along it is.
+  const planLine = (p.plan && p.plan.steps && p.plan.steps.length)
+    ? `<div class="wp-craft">✨ project <b>${escapeHtml(p.plan.goal || 'a project of my own')}</b> — ` +
+      `${Math.min(p.plan.i || 0, p.plan.steps.length)}/${p.plan.steps.length}</div>` : '';
   if (title) title.textContent = p.name || 'Soul';
   const age = p.age != null ? `${p.age.toFixed(1)} days` : '—';
   body.innerHTML =
     `<div class="wp-sub">${escapeHtml(p.action || 'idle')} · ${p.stage ? escapeHtml(p.stage) + ' ' : ''}age ${age}${p.vocation ? ' · ' + escapeHtml(p.vocation) : ''}</div>` +
     kinLine(p.kin) +
     craftLine +
+    planLine +
     illLine +
     (p.intent ? `<div class="wp-intent">“${escapeHtml(p.intent)}”</div>` : '') +
     (p.say ? `<div class="wp-say">💬 ${escapeHtml(p.say)}</div>` : '') +
