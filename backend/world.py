@@ -269,6 +269,14 @@ FLEE_TRIGGER       = 0.55     # cached danger at/above which the BODY reflexivel
 GUARD_RANGE        = 7        # a guardian shields band-mates (and faces down wolves) within this range
 REST_HOMEWARD_MAX  = 8        # at rest, a soul walks home to sleep only if home is within this many tiles
                               # (farther off it sleeps where it stands — no fatal all-night march home)
+# Cost-aware walking: each step is scored as (progress toward the goal × MOVE_PROGRESS_W) minus the
+# tile's travel cost. Open ground is free; wading a river/shallow is slow; tiles near a prowling wolf
+# carry a danger cost that falls off with distance — so a soul prefers dry, safe ground but still
+# fords or braves danger when that's clearly the way to its goal.
+MOVE_PROGRESS_W    = 3.0      # how strongly a step's headway toward the goal outweighs its cost
+WADE_COST          = 2.0      # extra cost of stepping into a river/shallow (on top of half-speed wading)
+DANGER_AVOID_R     = 4        # tiles from a wolf at which danger starts to bend a path away
+DANGER_AVOID_COST  = 1.6      # danger cost per tile closer than DANGER_AVOID_R to a wolf
 
 # ─── Tile building (Phase 3.5) — top-down "blocks" ───────────────────────────
 # People raise REAL buildings the Minecraft way: a building is a footprint of
@@ -1578,6 +1586,7 @@ class World:
         hod = self.time_of_day()
         night = hod < 6 or hod >= 21
         wolf_pos = [(a["x"], a["y"]) for a in self.animals if a["sp"] == "wolf"]
+        self._wolf_pos = wolf_pos                          # cached for the danger-aware walker
 
         dead = []
         for p in self.people:
@@ -3366,42 +3375,49 @@ class World:
                 and self.blocks.get((nx, ny)) not in SOLID_BLOCKS)
 
     def _step_to(self, p, nx, ny):
-        """Commit a step, wetting the soul if the tile is water it had to wade through."""
+        """Commit a step. Wading water wets the soul AND slows them: stepping into a river/shallow
+        sets a flag that costs them their next move beat (half-speed through water)."""
         if self.water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
             p["wet_until"] = self.clock + WET_DURATION
+            p["_wade"] = True
         p["x"], p["y"] = nx, ny
 
+    def _tile_travel_cost(self, nx, ny) -> float:
+        """What it costs to walk onto (nx,ny): cheap on open ground, dearer through water, and
+        dearer still the closer it lies to a prowling wolf — so a path bends toward dry, safe
+        ground without forbidding a ford or a dash past danger when that's the way through."""
+        cost = 1.0
+        if self.water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
+            cost += WADE_COST
+        for wx, wy in getattr(self, "_wolf_pos", ()):  # danger falls off with distance
+            d = abs(wx - nx) + abs(wy - ny)
+            if d < DANGER_AVOID_R:
+                cost += (DANGER_AVOID_R - d) * DANGER_AVOID_COST
+        return cost
+
     def _move_person(self, p, direction):
-        """One step toward `direction`, sliding AROUND barriers instead of freezing against them:
-        try the heading, then the nearest sideways alternatives (so a soul rounds a lake or a wall
-        rather than standing nose-to-the-water forever). None → amble to a random open tile."""
+        """One cost-aware step. Each open neighbour is scored by how much HEADWAY it makes toward
+        the goal (weighted) minus its travel cost (slow water, nearby danger). The best wins — so
+        a soul rounds lakes and walls instead of freezing against them, skirts wolves, and prefers
+        dry ground, while still fording or braving danger when that's plainly the way. With no
+        heading it just ambles to the cheapest open tile nearby."""
         x, y = p["x"], p["y"]
-        if not direction or (direction[0] == 0 and direction[1] == 0):
-            opts = [(dx, dy) for dx, dy in _STEP_DIRS if self._passable(x + dx, y + dy)]
-            if opts:
-                dx, dy = opts[int(self.rng.integers(len(opts)))]
-                self._step_to(p, x + dx, y + dy)
+        if p.pop("_wade", False):                          # slogging through water — lose this beat
             return
-        sx, sy = int(np.sign(direction[0])), int(np.sign(direction[1]))
-        # Candidates ordered by how closely they keep to the heading; only those that don't move
-        # AWAY from the goal (dot >= 0), so a blocked soul detours sideways but never backtracks
-        # into a jitter. First passable one wins.
-        order = sorted(_STEP_DIRS, key=lambda d: -(d[0] * sx + d[1] * sy))
-        for dx, dy in order:
-            if dx * sx + dy * sy < 0:
-                break                                    # the rest only lead away — try the detour pass
-            if self._passable(x + dx, y + dy):
-                self._step_to(p, x + dx, y + dy)
-                return
-        # Boxed in by a CONCAVE barrier (a lake bay, a U-shaped wall): the greedy slide above
-        # found nothing forward, so don't freeze nose-to-the-water — round it. Take the best step
-        # that still makes some headway sideways, else any open step at all, so the soul escapes
-        # the pocket and tries again rather than starving where it stands. (This is the cheap fix
-        # for the local-minimum trap; a full flow-field comes next.)
-        for dx, dy in order:
-            if self._passable(x + dx, y + dy):
-                self._step_to(p, x + dx, y + dy)
-                return
+        sx = int(np.sign(direction[0])) if direction else 0
+        sy = int(np.sign(direction[1])) if direction else 0
+        best, best_score = None, -1e9
+        for dx, dy in _STEP_DIRS:
+            nx, ny = x + dx, y + dy
+            if not self._passable(nx, ny):
+                continue
+            progress = dx * sx + dy * sy                   # -2..2 (0 when ambling — cost decides)
+            score = (progress * MOVE_PROGRESS_W - self._tile_travel_cost(nx, ny)
+                     + float(self.rng.random()) * 0.5)     # tiny jitter: organic wander, breaks ties
+            if score > best_score:
+                best, best_score = (nx, ny), score
+        if best is not None:
+            self._step_to(p, best[0], best[1])
 
     # ── physiological reserves (the body layer beneath comfort) ──────────────────
     def _ensure_body(self, p):
