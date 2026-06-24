@@ -4409,9 +4409,35 @@ function renderWorld() {
   };
   for (const b of (d.blocks || [])) if (b[2] === 1) drawBlock(b[0], b[1], b[2]);
   for (const b of (d.blocks || [])) if (b[2] !== 1) drawBlock(b[0], b[1], b[2]);
-  // Legacy point-shelters (pre tile-building saves): a small hut under people.
+  // Structures: the modern power grid (generator/reactor + poles, with an energized glow) and,
+  // for legacy point-shelters, a small hut.
   for (const st of (d.structures || [])) {
     const sx = (st.x - cam.camX) * z, sy = (st.y - cam.camY) * z;
+    const k = st.kind || '';
+    if (k === 'generator' || k === 'reactor') {
+      const cx = sx + z / 2, cy = sy + z / 2, R = 8 * z;       // the energized field it lights
+      if (onScreen(sx, sy, 8)) {
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+        g.addColorStop(0, 'rgba(120,220,255,0.20)'); g.addColorStop(1, 'rgba(120,220,255,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 6.283); ctx.fill();
+        const s = Math.max(7, z * 1.2), ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;
+        ctx.fillStyle = k === 'reactor' ? '#39505c' : '#5b6b78'; ctx.fillRect(ox, oy, s, s);
+        ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1; ctx.strokeRect(ox + 0.5, oy + 0.5, s - 1, s - 1);
+        ctx.fillStyle = '#ffe27a'; ctx.font = `${Math.round(s * 0.72)}px serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(k === 'reactor' ? '☢' : '⚡', ox + s / 2, oy + s / 2);
+        ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+      }
+      continue;
+    }
+    if (k === 'power_pole') {
+      if (!onScreen(sx, sy, 1)) continue;
+      const cx = sx + z / 2;
+      ctx.strokeStyle = '#9a7a52'; ctx.lineWidth = Math.max(1, z * 0.14);
+      ctx.beginPath(); ctx.moveTo(cx, sy + z * 0.08); ctx.lineTo(cx, sy + z * 0.96); ctx.stroke();       // post
+      ctx.beginPath(); ctx.moveTo(cx - z * 0.32, sy + z * 0.26); ctx.lineTo(cx + z * 0.32, sy + z * 0.26); ctx.stroke(); // crossarm
+      continue;
+    }
+    if (k === 'generator' || k === 'reactor' || k === 'power_pole') continue;
     if (!onScreen(sx, sy, 1)) continue;
     const s = Math.max(4, z * 0.92);
     const ox = sx + (z - s) / 2, oy = sy + (z - s) / 2;
@@ -4852,6 +4878,7 @@ async function worldPaint(x, y) {
     case 'plant': body.tool = 'plant'; body.species = WORLD.arg; break;
     case 'spawn': body.tool = 'spawn'; body.species = WORLD.arg; body.n = 1; break;
     case 'person': body.tool = 'person'; body.n = +(WORLD.arg || 1); break;
+    case 'power': body.tool = 'place_power'; body.kind = WORLD.arg || 'generator'; break;
     default: return;
   }
   try {

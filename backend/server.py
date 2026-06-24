@@ -2062,6 +2062,8 @@ def _apply_world_action(spec: dict, by: str) -> str:
             res = w.place_template(str(spec.get("id", "")).strip(), x, y,
                                    instant=bool(spec.get("instant", True)), by=by)
             return res.get("result", "") if res.get("ok") else ""
+        if tool == "place_power":
+            return w.place_power(str(spec.get("kind", "generator")).strip().lower(), x, y, by=by)
     except Exception as e:
         print(f"[world] action {tool!r} failed: {e}")
     return ""
@@ -2076,6 +2078,7 @@ _WORLD_ARGS = {
     "plant":  ("x", "y", "species", "r"),
     "person": ("x", "y", "n"),
     "whisper": ("x", "y", "text"),
+    "place_power": ("x", "y", "kind"),
 }
 
 

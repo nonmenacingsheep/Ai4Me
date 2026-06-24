@@ -393,6 +393,12 @@ CRAFT_BUILDING_STATIONS = {
     "smithy":    ("furnace", "forge", "anvil"),
 }
 CRAFT_STATION_RANGE = 6            # tiles from a craft-building within which its stations are usable
+# Electricity (modern era) — a generator/reactor powers tiles within POWER_RADIUS; a power pole
+# within POWER_LINK of the fed grid relays it onward (a line of poles carries it across a village).
+POWER_SOURCES = ("generator", "reactor")
+POWER_RADIUS = 7                   # tiles a fed power node energizes around itself
+POWER_LINK = 9                     # a pole within this of the fed grid joins it and relays onward
+POWER_SHELTER_BONUS = 0.35         # how much an electrified (wired) home adds to its shelter
 STOREHOUSE_BP = "storehouse"       # a communal specialized building that protects the band's stored food
 STORE_SPOIL_FACTOR = 0.5          # a storehouse halves how fast STORED food spoils
 STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
@@ -1364,12 +1370,50 @@ class World:
             t *= 0.7 + 0.3 * float(getattr(self, "weather_intensity", 1.0))
         return min(1.0, t)
 
+    def _ensure_power(self):
+        """(Re)build the set of ENERGIZED power nodes — generators/reactors and every pole the
+        current keeps fed — whenever the structures change. A generator is a source; a power_pole
+        within POWER_LINK of any energized node relays the current onward, so a line of poles
+        carries power across the village. Cheap: there are only ever a handful of these."""
+        if getattr(self, "_power_v", None) == self.version and hasattr(self, "_powered_nodes"):
+            return
+        sources = [(s["x"], s["y"]) for s in self.structures if s.get("kind") in POWER_SOURCES]
+        poles = [(s["x"], s["y"]) for s in self.structures if s.get("kind") == "power_pole"]
+        energized = set(sources)
+        changed = True
+        while changed:
+            changed = False
+            for pp in poles:
+                if pp in energized:
+                    continue
+                if any(abs(pp[0] - e[0]) + abs(pp[1] - e[1]) <= POWER_LINK for e in energized):
+                    energized.add(pp); changed = True
+        self._powered_nodes = energized
+        self._power_v = self.version
+
+    def _powered(self, x, y) -> bool:
+        """Is tile (x,y) within reach of the electrical grid (a generator or a fed pole)?"""
+        self._ensure_power()
+        return any(abs(x - e[0]) + abs(y - e[1]) <= POWER_RADIUS for e in self._powered_nodes)
+
+    def place_power(self, kind: str, x: int, y: int, by: str = "the god") -> str:
+        """God tool: drop a generator, reactor or power pole into the world — the modern grid the
+        wooden village can marvel at (and, in time, learn to build)."""
+        if kind not in POWER_SOURCES and kind != "power_pole":
+            return ""
+        self._add_structure(kind, int(x), int(y), by=by)
+        return f"{by} raised a {kind.replace('_', ' ')} at ({int(x)},{int(y)})"
+
     def _shelter_factor(self, p) -> float:
         """How well a soul is shielded from the open right now (0..1). Only a roof over one's
         OWN home tile shields — its strength is the home's insulation. A portable mat does
-        not (it keeps no weather off), so a real, well-built roof is what actually protects."""
+        not (it keeps no weather off). A home wired to the POWER grid shields better still — light
+        and warmth against the night — so an electrified house is a real comfort and safety gain."""
         if p.get("home_struct") and (p["x"], p["y"]) == tuple(p["home"]):
-            return max(0.0, min(1.0, p.get("insul", 1.0)))
+            base = max(0.0, min(1.0, p.get("insul", 1.0)))
+            if self._powered(p["home"][0], p["home"][1]):
+                base = min(1.0, base + POWER_SHELTER_BONUS)
+            return base
         return 0.0
 
     def _wolves_menace_people(self, dt_game_min: float, night: bool) -> list:
