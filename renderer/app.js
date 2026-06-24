@@ -880,6 +880,8 @@ function handleMessage(data) {
       break;
     case 'world_speed':
       setActiveSpeed(data.speed);   // fast-forward multiplier changed (maybe by the other god)
+      if (data.day_speed != null) setDaySpeed(data.day_speed);
+      if (data.night_speed != null) setNightSpeed(data.night_speed);
       break;
     case 'room_changed':
       if (activeView === 'room') loadRoom();   // she reshaped her space — refresh it live
@@ -4021,7 +4023,7 @@ function setWorld(s) {
     people: s.people || [], structures: s.structures || [],
     blocks: s.blocks || [], roofs: s.roofs || [], sites: s.sites || [],
     ore: s.ore || [], berries: s.berries || [], blockNames: s.block_names || {},
-    stone: s.stone || [], stockpiles: s.stockpiles || [],
+    stone: s.stone || [], stockpiles: s.stockpiles || [], decor: s.decor || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -4037,6 +4039,8 @@ function setWorld(s) {
   refreshWorldDetail();
   updateWorldHud();
   setActiveSpeed(s.speed || 1);             // reflect the saved fast-forward multiplier
+  setDaySpeed(s.day_speed || 1);            // and the day/night length settings
+  setNightSpeed(s.night_speed || 1);
   startWorldAnim();                         // continuous, interpolated rendering loop
 }
 
@@ -4391,6 +4395,21 @@ function renderWorld() {
       }
     }
   }
+  // Decor: flowers a soul planted to beautify its home — little bright clusters once zoomed in.
+  if (z >= 3) {
+    const FLOWER = ['#e76ab0', '#f2c14e', '#8a6ad6', '#e8624a'];
+    for (const dpt of (d.decor || [])) {
+      const sx = (dpt[0] - cam.camX) * z, sy = (dpt[1] - cam.camY) * z;
+      if (!onScreen(sx, sy, 1)) continue;
+      const cx = sx + z / 2, cy = sy + z / 2, r = Math.max(1, z * 0.13);
+      ctx.fillStyle = '#3f7a44';                              // a tuft of green
+      ctx.fillRect(cx - r * 0.3, cy, r * 0.6, r * 1.6);
+      ctx.fillStyle = FLOWER[(dpt[0] * 7 + dpt[1] * 3) % FLOWER.length];
+      for (const [ddx, ddy] of [[-1, -0.3], [1, -0.3], [0, -1.1], [0, 0.2]]) {
+        ctx.beginPath(); ctx.arc(cx + ddx * r, cy + ddy * r, r * 0.7, 0, 6.283); ctx.fill();
+      }
+    }
+  }
   // Placed building tiles: floors first (so walls/doors sit on top), then the shell.
   const drawBlock = (bx, by, code) => {
     const sx = (bx - cam.camX) * z, sy = (by - cam.camY) * z;
@@ -4585,6 +4604,26 @@ async function applyWorldSpeed(speed) {
     await fetch('/api/world/speed', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ speed }),
+    });
+  } catch (_) {}
+}
+
+// Day / night length — how much faster each part of the day runs in real time (1× = normal).
+// Lives in World Settings; reflects into its sliders + labels.
+function _setDayNightSlider(which, val) {
+  val = Math.max(1, Math.min(60, Math.round(val || 1)));
+  WORLD['_' + which + 'Speed'] = val;
+  const r = document.getElementById('wai-' + which + 'speed');
+  const v = document.getElementById('wai-' + which + 'speed-val');
+  if (r && document.activeElement !== r) r.value = val;
+  if (v) v.textContent = val > 1 ? val + '×' : 'off';
+}
+function setDaySpeed(v) { _setDayNightSlider('day', v); }
+function setNightSpeed(v) { _setDayNightSlider('night', v); }
+async function applyDayNightSpeed(body) {
+  try {
+    await fetch('/api/world/speed', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
   } catch (_) {}
 }
@@ -5130,6 +5169,11 @@ function bindWorld() {
     if (!btn) return;
     applyWorldSpeed(+btn.dataset.speed);
   });
+  const dr = document.getElementById('wai-dayspeed'), ngr = document.getElementById('wai-nightspeed');
+  dr?.addEventListener('input', () => setDaySpeed(+dr.value));          // live label while dragging
+  dr?.addEventListener('change', () => applyDayNightSpeed({ day_speed: +dr.value }));
+  ngr?.addEventListener('input', () => setNightSpeed(+ngr.value));
+  ngr?.addEventListener('change', () => applyDayNightSpeed({ night_speed: +ngr.value }));
   cv?.addEventListener('pointerleave', () => {
     const co = document.getElementById('whud-coords'); if (co) co.textContent = '';
   });

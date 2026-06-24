@@ -1134,15 +1134,21 @@ async def api_world_speed(req: Request):
     if not (settings.get("capabilities") or {}).get("world", False):
         return {"ok": False}
     body = await req.json()
-    speed = float(body.get("speed", 1.0))
+    w = await asyncio.to_thread(world_store.get_world)
+    # `day_speed`/`night_speed` (optional) — extra fast-forward applied only during day/night (1..60).
+    if "day_speed" in body:
+        w.day_speed = min(60.0, max(1.0, float(body.get("day_speed") or 1.0)))
+    if "night_speed" in body:
+        w.night_speed = min(60.0, max(1.0, float(body.get("night_speed") or 1.0)))
+    speed = w.speed if "speed" not in body else float(body.get("speed", 1.0))
     # 0 = PAUSE (hold the world still); otherwise clamp to the fast-forward range.
     speed = 0.0 if speed <= 0 else min(WORLD_SPEEDS[-1], max(WORLD_SPEEDS[0], speed))
     _WORLD_SPEED = speed
-    w = await asyncio.to_thread(world_store.get_world)
     w.speed = speed
     await asyncio.to_thread(w.save)
-    await broadcast({"type": "world_speed", "speed": speed})
-    return {"ok": True, "speed": speed}
+    await broadcast({"type": "world_speed", "speed": speed,
+                     "day_speed": w.day_speed, "night_speed": w.night_speed})
+    return {"ok": True, "speed": speed, "day_speed": w.day_speed, "night_speed": w.night_speed}
 
 
 @app.get("/api/world/ledger")

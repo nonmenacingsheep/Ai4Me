@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=70" />
+  <link rel="stylesheet" href="style.css?v=72" />
 </head>
 <body>
 
@@ -147,12 +147,18 @@
       <div class="modal">
         <div class="modal-glow"></div>
         <div class="modal-header">
-          <h2>World AI</h2>
+          <h2>World Settings</h2>
           <button class="modal-close" id="wai-close" title="Close">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
         <div class="modal-body">
+          <div class="field">
+            <label>Day &amp; night length</label>
+            <div class="field-hint">How fast each part of the day runs in REAL time — independently. Leave Day at 1× and crank Night to make the dark hours flash by (they're still fully simulated, just quicker). Higher = shorter.</div>
+            <label class="wopt">☀️ Day speed <input type="range" id="wai-dayspeed" min="1" max="60" step="1" value="1"><span id="wai-dayspeed-val" style="min-width:34px;text-align:right">off</span></label>
+            <label class="wopt">🌙 Night speed <input type="range" id="wai-nightspeed" min="1" max="60" step="1" value="1"><span id="wai-nightspeed-val" style="min-width:34px;text-align:right">off</span></label>
+          </div>
           <div class="field">
             <label for="wai-model">World mind model</label>
             <div class="field-hint">The model the god-sim's people think on — separate from chat, so you can give the world a cheap/fast local model while chat runs on a big one. “Use main model” shares the chat model.</div>
@@ -1040,6 +1046,6 @@
     <div class="pt-hint" id="pt-hint">double-click her to hide the conversation</div>
   </div>
 
-  <script src="app.js?v=70"></script>
+  <script src="app.js?v=72"></script>
 </body>
 </html>

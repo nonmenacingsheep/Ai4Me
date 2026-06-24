@@ -418,6 +418,13 @@ STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
 # monument project — so settled, driven souls compete to leave a mark, not just nest.
 RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05, help=0.06, contribute=0.05)
 HELP_RANGE = 30               # how near a band-mate's unfinished build a housed soul will go to help
+# Self-authored projects ("aspirations") — a settled, content soul forms its OWN goal beyond mere
+# survival (tidy the ground round its home, plant a garden by the door) and a PLAN of primitive
+# skills carries it out. This is the open-vocabulary layer: the rule body seeds a few projects so
+# it works offline; the LLM mind can later fill the same plan structure with richer goals.
+ASPIRE_COOLDOWN = 2880.0      # game-min before a soul takes on another beautify-project (~2 days)
+ASPIRE_RING = 2              # how far around home a tidy/garden project reaches
+ASPIRE_MAX_STEPS = 10        # cap a plan's length so a project is bounded work
 # Governance — the band's FIRST NORM: pull your weight at the common granary. Judged once a day on
 # a rolling window. Soft enforcement through reputation only (standing + how others regard you),
 # never punishment — it nudges conduct without ever endangering a life.
@@ -649,6 +656,7 @@ class World:
         self.berry_bushes: list[dict] = []  # scattered berry bushes (some poisonous), P3
         self._berry_index: dict[tuple[int, int], dict] = {}  # (x,y)->bush, rebuilt on load/seed
         self.granary: dict = {"store": {}, "x": None, "y": None}  # the band's shared common store
+        self.decor: dict = {}            # (x,y) -> kind: flowers/art a soul plants to beautify its home
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
         self._load_templates()                    # pull the library off disk + register it for placement
         self.log: list[dict] = []        # recent god actions / notable events
@@ -660,6 +668,8 @@ class World:
         self.known_recipes: set[str] = set(crafting.STARTER_RECIPES)
         self.ledger: list[dict] = []     # the Ledger of Making — discoveries + dead ends
         self.speed = 1.0                 # fast-forward multiplier (1×/2×/4×), set from the UI
+        self.day_speed = 1.0             # extra fast-forward applied only during DAY hours (≥1)
+        self.night_speed = 1.0           # extra fast-forward applied only during NIGHT hours (≥1)
         self.version = 0                 # bumped on any mutation, for render diffing
         self.rng = np.random.default_rng()
         self._origin = (W // 2, H // 2)  # founding-valley centre
@@ -1176,6 +1186,14 @@ class World:
         every call (bounded by entity count); ecology runs once per game-hour and ONLY
         inside the active region around the people, so the 4M-tile map stays cheap."""
         dt_game_min = dt_real_sec * GAME_SEC_PER_REAL_SEC / 60.0
+        # Day/night compression: the clock can run faster during the day and/or night independently
+        # (set from World Settings), so a god can keep days as they are but make nights flash by (or
+        # vice-versa). The hours are still FULLY simulated — souls sleep, fatigue recovers, ecology
+        # ticks by game-time — they just take less REAL time.
+        hod = self.time_of_day()
+        warp = getattr(self, "night_speed", 1.0) if (hod < 6 or hod >= 21) else getattr(self, "day_speed", 1.0)
+        if warp > 1.0:
+            dt_game_min *= warp
         self.clock += dt_game_min
         self._update_weather()
         self._tick_wildlife(dt_game_min)
@@ -2353,11 +2371,16 @@ class World:
                 d = abs(s["ox"] - px) + abs(s["oy"] - py)   # near enough to lend a hand (we'll gather the makings)
                 if d < best_d:
                     best_d, help_site = d, s["id"]
+        can_aspire = (not is_child and p.get("home_struct") is not None
+                      and (p.get("plan") is not None or self.clock >= p.get("aspire_cd", 0.0)))
         return {
             "is_child": is_child,
             "needs_gear": needs_gear,
             "needs_hearth": needs_hearth,
             "help_site": help_site,
+            "can_aspire": can_aspire,
+            "aspiring": p.get("plan") is not None,
+            "aspire_why": (p.get("plan") or {}).get("goal") or "make my home a finer place to look on",
             "project": proj,
             "vocation": voc,
             "clock": self.clock, "night": night, "season": self.season(),
@@ -2550,6 +2573,9 @@ class World:
                 return "wander", (int(np.sign(x - t["x"])), int(np.sign(y - t["y"])))
         if kind == "marvel":
             return self._marvel(p)
+        if kind == "aspire":
+            # A self-authored project beyond survival — beautify one's own home (tidy / garden).
+            return self._pursue_aspiration(p)
         return self._idle(p)
 
     def _seek_toward(self, p, target_id):
@@ -2624,6 +2650,75 @@ class World:
         if self.rng.random() < 0.15:
             return "wander", None
         return "rest", None
+
+    # ── Self-authored projects: open-ended goals + a plan over composable skills ──────────────
+    def _form_aspiration(self, p):
+        """A settled, content soul DREAMS UP its own project — tidy the overgrown ground around its
+        home, or plant a flower garden by the door — and lays a PLAN of primitive skill-steps to
+        carry it out. Returns the plan dict, or None if there's nothing worth doing. (The rule body
+        seeds these so it works with no model; the LLM mind can author richer ones into this shape.)"""
+        hx, hy = p["home"]
+        cur, amb = mind._trait(p, "curiosity"), mind._trait(p, "ambition")
+        occ = self._occupied_tiles()
+        ring = []
+        for dy in range(-ASPIRE_RING, ASPIRE_RING + 1):
+            for dx in range(-ASPIRE_RING, ASPIRE_RING + 1):
+                tx, ty = hx + dx, hy + dy
+                if (dx == 0 and dy == 0) or not self._in(tx, ty) \
+                        or self.water[ty, tx] != WATER_NONE or (tx, ty) in occ:
+                    continue
+                ring.append((tx, ty))
+        if not ring:
+            return None
+        overgrown = [(tx, ty) for tx, ty in ring if float(self.veg_growth[ty, tx]) > 0.3]
+        bare = [(tx, ty) for tx, ty in ring
+                if (tx, ty) not in self.decor and float(self.veg_growth[ty, tx]) <= 0.3]
+        if overgrown and (amb >= cur or not bare):          # the orderly tidy the thicket back
+            return {"goal": "tend the ground around my home", "kind": "tidy",
+                    "steps": [["clear", tx, ty] for tx, ty in overgrown[:ASPIRE_MAX_STEPS]], "i": 0}
+        if bare:                                             # the rest plant something to look on
+            return {"goal": "plant a garden by my door", "kind": "garden",
+                    "steps": [["plant", tx, ty] for tx, ty in bare[:6]], "i": 0}
+        return None
+
+    def _pursue_aspiration(self, p):
+        """Actuate a self-authored project: form one if none, then run its next plan-step."""
+        plan = p.get("plan")
+        if not plan or plan.get("done"):
+            plan = self._form_aspiration(p)
+            if not plan:
+                p["aspire_cd"] = self.clock + ASPIRE_COOLDOWN
+                p.pop("plan", None)
+                return self._idle(p)
+            p["plan"] = plan
+            mind.remember(p, f"I've a mind to {plan['goal']}", 0.4, "intent", self.clock)
+        steps, i = plan["steps"], plan.get("i", 0)
+        if i >= len(steps):
+            self._complete_aspiration(p, plan)
+            return self._idle(p)
+        skill, tx, ty = steps[i]
+        if max(abs(tx - p["x"]), abs(ty - p["y"])) > 1:      # walk to the spot
+            return "wander", (int(np.sign(tx - p["x"])), int(np.sign(ty - p["y"])))
+        if skill == "clear":                                 # primitive skills the body composes
+            self._clear_ground(tx, ty, 0)
+        elif skill == "plant":
+            self.decor[(tx, ty)] = "flower"
+            self.version += 1
+        plan["i"] = i + 1
+        self._bump("aspire_step")
+        return "tend", None
+
+    def _complete_aspiration(self, p, plan):
+        """A finished project — a small pride, a finer home, and a cooldown before the next."""
+        p.pop("plan", None)
+        p["aspire_cd"] = self.clock + ASPIRE_COOLDOWN
+        self._bump("aspire_done")
+        done = ("planted a garden by their door" if plan.get("kind") == "garden"
+                else "tidied the ground around their home")
+        mind.remember(p, f"I {plan['goal']} — my home is finer for it", 0.6, "pride", self.clock)
+        mind.speak(p, "There — a finer place to call my own.", self.clock)
+        self._note("life", f"{p['name']} {done}.")
+        self._earn_renown(p, RENOWN_GAIN.get("gift", 0.05) * 0.5, "made a finer home — a quiet pride")
 
     def _homeward_if_away(self, p, reach: int = 4):
         """A step toward home if a SETTLED soul has strayed from it — so making and puzzling-out
@@ -4848,6 +4943,7 @@ class World:
             "version": self.version, "seed": self.seed,
             "clock": round(self.clock, 1), "day": self.day(), "time": round(self.time_of_day(), 2),
             "season": self.season(), "weather": self.weather, "speed": self.speed,
+            "day_speed": self.day_speed, "night_speed": self.night_speed,
             "biomes": BIOMES, "sea_level": int(SEA_LEVEL * 255),
             "plants": {sp: PLANTS[sp]["name"] for sp in PLANTS},
             "block_names": BLOCK_NAMES,
@@ -4862,6 +4958,7 @@ class World:
             "stone": [[n["x"], n["y"]] for n in self.stone_nodes],
             "berries": [{"x": b["x"], "y": b["y"], "ripe": self._bush_ripe(b)} for b in self.berry_bushes],
             "stockpiles": self._stockpiles_payload(),
+            "decor": [[x, y, k] for (x, y), k in self.decor.items()],
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -5045,10 +5142,11 @@ class World:
                 "sites": self.sites, "ore_nodes": self.ore_nodes,
                 "stone_nodes": self.stone_nodes,
                 "berry_bushes": self.berry_bushes, "granary": self.granary,
+                "decor": [[x, y, k] for (x, y), k in self.decor.items()],
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
-                "speed": self.speed,
+                "speed": self.speed, "day_speed": self.day_speed, "night_speed": self.night_speed,
             }
             tmp = PATH_META + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -5102,6 +5200,7 @@ class World:
             if not self.stone_nodes:                      # older saves predate boulders — scatter them now
                 self._seed_stone_nodes()
             self.granary = meta.get("granary") or {"store": {}, "x": None, "y": None}
+            self.decor = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("decor") or [])}
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:
@@ -5113,6 +5212,8 @@ class World:
             self.known_recipes = set(meta.get("known_recipes") or crafting.STARTER_RECIPES)
             self.ledger = meta.get("ledger") or []
             self.speed = float(meta.get("speed") or 1.0)
+            self.day_speed = float(meta.get("day_speed") or 1.0)
+            self.night_speed = float(meta.get("night_speed") or 1.0)
             self.version = meta.get("version", 0)
             self.rng = np.random.default_rng()
             return True
@@ -5208,6 +5309,8 @@ if __name__ == "__main__":
                    for r in [crafting.recipe(it)] if r and r["tier"] >= 1})
     print(f"  craft tree: deep-crafts fired={beh.get('tech_craft', 0)}; communal builds={sorted(cbuildings) or 'none'}; "
           f"tier1+ goods on hand={deep[:8] or 'none'}")
+    print(f"  self-authored projects: aspirations finished={beh.get('aspire_done', 0)}, "
+          f"plan-steps done={beh.get('aspire_step', 0)}, flowers/decor placed={len(w.decor)}")
     lore = sum(len(p.get("berry_lore", {})) for p in w.people)
     bad_lore = sum(1 for p in w.people for v in p.get("berry_lore", {}).values() if v == "bad")
     berry_ill = sum(1 for p in w.people if (p.get("illness") or {}).get("d") == "berry_sickness"

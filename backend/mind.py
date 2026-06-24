@@ -65,7 +65,7 @@ TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
                 "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard", "help",
-                "forage", "whittle", "marvel")
+                "forage", "whittle", "marvel", "aspire")
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 # Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
@@ -550,6 +550,20 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         if needy_id and inv.get("food", 0) > TRADE_SURPLUS:
             out.append(("provide", needy_id, 0.25 * amb + 0.2 * soc,
                         f"I have plenty — {needy_name} does not"))
+        # ASPIRATION — a settled, content soul authors its OWN project beyond survival: tidy the
+        # ground round its home, plant a garden to look on. A life with taste and self-expression,
+        # not just upkeep. Comfort-gated (a needy soul has no time for it), keenest in the curious
+        # and ambitious. The OPEN-VOCABULARY drive: the body seeds the project, the mind can enrich.
+        if ctx.get("can_aspire"):
+            comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+            if comfort > 0.55:
+                # Pitched so a content, curious/ambitious soul will sometimes choose to beautify
+                # over merely polishing its home — beauty as a real rival to utility — and momentum
+                # carries a started project to completion.
+                u = (0.30 + 0.20 * cur + 0.12 * amb) * comfort
+                if ctx.get("aspiring"):
+                    u += 0.20
+                out.append(("aspire", None, u, ctx.get("aspire_why", "I'd make my home a finer place")))
         # Done with their own roof and carrying materials to spare — a soul lends a hand on a
         # band-mate's unfinished build. Comfort-gated (a needy soul tends itself first); keenest
         # in sociable, ambitious folk. The shared labour is a thread of interdependence.
