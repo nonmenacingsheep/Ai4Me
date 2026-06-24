@@ -362,6 +362,14 @@ BLUEPRINTS = {
         "WFFFW",
         "WWWWW",
     ]),
+    # A communal SMITHY — the metalworking shop (furnace + forge + anvil): standing beside it
+    # unlocks smelting ore into ingots and forging metal tools/weapons — the deep crafting tree.
+    "smithy": dict(name="Smithy", roof=True, insulation=1.0, communal=True, layout=[
+        "WWDWW",
+        "WFFFW",
+        "WFFFW",
+        "WWWWW",
+    ]),
 }
 
 # The dwelling ladder — ascending comfort. Once a soul has any roof and is kitted out,
@@ -376,6 +384,15 @@ WORKSHOP_BP = "workshop"           # a communal specialized building that speeds
 WORKSHOP_RANGE = 6                 # tiles from a finished workshop within which crafting is faster
 WORKSHOP_CRAFT_SPEED = 1.7        # craft-progress multiplier when working by the bench
 WOOD_BUILD_RANGE = 22              # trees within this of home → a soul builds in TIMBER; else a leaf house
+SMITHY_BP = "smithy"               # the communal metalworking shop (furnace+forge+anvil)
+# A communal craft-building puts its STATIONS within reach of anyone working beside it — this is
+# what opens the deep crafting tree to the band: a workshop is the bench/kiln/loom/tannery, a
+# smithy is the furnace/forge/anvil, and a home hearth is the campfire.
+CRAFT_BUILDING_STATIONS = {
+    "workshop":  ("workbench", "kiln", "loom", "tannery"),
+    "smithy":    ("furnace", "forge", "anvil"),
+}
+CRAFT_STATION_RANGE = 6            # tiles from a craft-building within which its stations are usable
 STOREHOUSE_BP = "storehouse"       # a communal specialized building that protects the band's stored food
 STORE_SPOIL_FACTOR = 0.5          # a storehouse halves how fast STORED food spoils
 STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
@@ -2580,6 +2597,13 @@ class World:
             if act:
                 return act
 
+        # With home, gear, hearth and dwelling all handled, a settled soul beside a station turns
+        # to the DEEP craft tree — planks, tools, cooking, pottery, and (with ore to hand) metal.
+        # The whole tree is now open to the band, gated by stations/tools/materials, not knowledge.
+        tech = self._tech_craft_decide(p, getters)
+        if tech:
+            return tech
+
         # Otherwise lay in stone for the next slice (stone houses, workshops).
         if inv.get("stone", 0) < BUILD["stone_stock"]:
             return self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly,
@@ -2941,6 +2965,12 @@ class World:
                 and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
             return {"kind": "monument", "bp": WORKSHOP_BP,
                     "why": "raise a workshop — a bench for us all, and faster hands"}
+        # Once the band has a workshop, a toolmaker raises the SMITHY — the metalworking shop that
+        # opens smelting and metal tools (the deep tree). Their crowning specialty build.
+        if (voc == "toolmaker" and has_real_home and band_has_shop and not self._has_building(SMITHY_BP)
+                and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
+            return {"kind": "monument", "bp": SMITHY_BP,
+                    "why": "raise a smithy — to smelt ore and forge true metal tools"}
         # A FORAGER's specialty: raise the communal STOREHOUSE so the band's food keeps against
         # lean days (slower spoilage, fewer vermin) — their answer to the bench and the hall.
         if (voc == "forager" and has_real_home and not self._has_building(STOREHOUSE_BP)
@@ -4175,9 +4205,11 @@ class World:
         "sleeping_mat": "wove a mat to rest well anywhere",
     }
 
-    def _begin_craft(self, p, rid: str) -> bool:
+    def _begin_craft(self, p, rid: str, stations=()) -> bool:
         """Start crafting `rid` if nothing's already underway: pay the inputs now and set a
-        timer. Returns True if a craft is active afterwards (so the caller holds position)."""
+        timer. Returns True if a craft is active afterwards (so the caller holds position).
+        `stations` are the crafting stations in reach (from a nearby workshop/smithy/hearth) —
+        what unlocks the deeper tree beyond bare-handed work."""
         if p.get("craft"):
             return True
         inv = p["inv"]
@@ -4189,7 +4221,7 @@ class World:
         else:
             if rid in crafting.SURVIVAL_DISCOVERIES and not self._person_knows(p, rid):
                 return False                                     # can't make what they haven't worked out
-            if not crafting.can_craft(inv, rid, stations=(), tools=None):
+            if not crafting.can_craft(inv, rid, stations=stations, tools=None):
                 return False
             r = crafting.RECIPES[rid]
             for k, n in r["inp"].items():                       # reserve inputs up front
@@ -4210,6 +4242,58 @@ class World:
                     and abs(s["ox"] - x) + abs(s["oy"] - y) <= WORKSHOP_RANGE:
                 return True
         return False
+
+    def _stations_for(self, p) -> set:
+        """The crafting STATIONS a soul can use right now: the campfire of its own hearth, plus
+        any communal craft-building (workshop → bench/kiln/loom/tannery, smithy → furnace/forge/
+        anvil) it's standing near. This is the gate that opens the deep crafting tree."""
+        st = set()
+        if p.get("hearth"):
+            st.add("campfire")
+        x, y = p["x"], p["y"]
+        for s in self.sites:
+            if not s.get("done"):
+                continue
+            kinds = CRAFT_BUILDING_STATIONS.get(s.get("bp"))
+            if kinds and abs(s["ox"] - x) + abs(s["oy"] - y) <= CRAFT_STATION_RANGE:
+                st.update(kinds)
+        return st
+
+    def _tech_craft_decide(self, p, getters):
+        """Climb the DEEP crafting tree when settled and beside a station. The whole 130-recipe
+        tree is now ACCESSIBLE — gated only by the stations in reach (from the workshop/smithy/
+        hearth), the tools held, and the materials to hand, not by secret knowledge. Walks the
+        ordered TECH_LADDER and makes the first thing it usefully can; gathers a missing common
+        raw (wood/stone/fiber/leaves) to get there. Metal waits on ore the soul actually has — no
+        far expeditions that would strand it. Returns a body action, or None if nothing to do here."""
+        if p.get("craft"):
+            return "craft", None
+        stations = self._stations_for(p)
+        if not stations:
+            return None                                        # no bench/forge/fire in reach — nothing deeper
+        inv = p["inv"]
+        SAFE_RAWS = {"wood", "stone", "fiber", "leaves"}
+        for rid in crafting.TECH_LADDER:
+            r = crafting.recipe(rid)
+            if not r or r["out"] in crafting.STATION_KINDS or r["out"] in crafting.STRUCTURE_KINDS:
+                continue                                        # souls don't auto-place stations/structures here
+            cap = 3 if r["tier"] <= 1 else 1                    # keep a few staples; one of the finer goods
+            if inv.get(rid, 0) >= cap:
+                continue
+            if r["station"] and r["station"] not in stations:
+                continue
+            if r["tool"] and r["tool"] not in crafting.tool_caps(inv):
+                continue
+            if crafting.can_craft(inv, rid, stations=stations):
+                if self._begin_craft(p, rid, stations=stations):
+                    self._bump("tech_craft")
+                    return "craft", None
+            # Can't yet — fetch ONE missing COMMON raw to move toward it; anything needing ore/
+            # clay/sand or an intermediate we lack is left for an earlier ladder rung (or a god).
+            for mat in crafting.missing(inv, rid):
+                if mat in SAFE_RAWS and mat in getters:
+                    return getters[mat]()
+        return None
 
     def _advance_craft(self, p, dt_game_min: float) -> bool:
         """Tick an in-progress craft; grant the item and clear the state when it finishes.
@@ -4947,6 +5031,11 @@ if __name__ == "__main__":
     ksk = {k: round(v, 2) for k, v in (kids[0].get("skills", {}) if kids else {}).items()}
     print(f"  younglings: {len(kids)} children; arrows-whittled={beh.get('child_whittle', 0)}; "
           f"sample child skills={ksk or 'n/a'}")
+    cbuildings = {s["bp"] for s in w.sites if s.get("done") and s.get("communal")}
+    deep = sorted({r["out"] for q in w.people for it in q.get("inv", {})
+                   for r in [crafting.recipe(it)] if r and r["tier"] >= 1})
+    print(f"  craft tree: deep-crafts fired={beh.get('tech_craft', 0)}; communal builds={sorted(cbuildings) or 'none'}; "
+          f"tier1+ goods on hand={deep[:8] or 'none'}")
     lore = sum(len(p.get("berry_lore", {})) for p in w.people)
     bad_lore = sum(1 for p in w.people for v in p.get("berry_lore", {}).values() if v == "bad")
     berry_ill = sum(1 for p in w.people if (p.get("illness") or {}).get("d") == "berry_sickness"
