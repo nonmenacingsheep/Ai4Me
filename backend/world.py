@@ -370,6 +370,31 @@ BLUEPRINTS = {
         "WFFFW",
         "WWWWW",
     ]),
+    # ── Community public works — the band's growing repertoire of buildings-with-a-PURPOSE,
+    #    raised when a NEED arises (not pre-scripted). Each does something real once it stands. ──
+    # A WELL: a stone shaft (its centre becomes a drinkable water source on completion) so the band
+    # can settle away from the river and still drink — raised when home sits far from water.
+    "well": dict(name="Well", roof=False, insulation=1.0, communal=True, layout=[
+        "WFW",
+        "FCF",
+        "WFW",
+    ]),
+    # An INN: communal lodging — its roof shelters the unhoused & wanderers nearby, so a soul
+    # without a home of its own isn't left to the cold. Raised when folk go unhoused.
+    "inn": dict(name="Inn", roof=True, insulation=1.0, communal=True, layout=[
+        "WWDWW",
+        "WFFFW",
+        "WFFFW",
+        "WFFFW",
+        "WWWWW",
+    ]),
+    # A WATCHTOWER: a high lookout that keeps wolves off the band within sight of it — raised
+    # after the wolves have drawn blood.
+    "watchtower": dict(name="Watchtower", roof=True, insulation=1.0, communal=True, layout=[
+        "WWW",
+        "WFW",
+        "WDW",
+    ]),
 }
 
 # The dwelling ladder — ascending comfort. Once a soul has any roof and is kitted out,
@@ -384,6 +409,12 @@ WORKSHOP_BP = "workshop"           # a communal specialized building that speeds
 WORKSHOP_RANGE = 6                 # tiles from a finished workshop within which crafting is faster
 WORKSHOP_CRAFT_SPEED = 1.7        # craft-progress multiplier when working by the bench
 WOOD_BUILD_RANGE = 22              # trees within this of home → a soul builds in TIMBER; else a leaf house
+# Community public works — functional communal buildings the band raises when a NEED arises.
+WELL_NEED_DIST    = 12            # settlement centroid farther than this from water → the band wants a well
+INN_NEED_UNHOUSED = 2            # this many adults without a home → the band wants an inn
+INN_RADIUS        = 5            # tiles from a finished inn within which an unhoused soul is sheltered
+INN_SHELTER       = 0.55         # how well an inn shelters those nearby (vs an own roof's full insul)
+WATCH_RADIUS      = 9            # tiles from a finished watchtower within which wolves are kept off
 SMITHY_BP = "smithy"               # the communal metalworking shop (furnace+forge+anvil)
 # A communal craft-building puts its STATIONS within reach of anyone working beside it — this is
 # what opens the deep crafting tree to the band: a workshop is the bench/kiln/loom/tannery, a
@@ -1498,6 +1529,9 @@ class World:
             if self._powered(p["home"][0], p["home"][1]):
                 base = min(1.0, base + POWER_SHELTER_BONUS)
             return base
+        # No roof of one's own — but a communal INN shelters the unhoused & wanderers who keep near it.
+        if self._near_building("inn", INN_RADIUS, p["x"], p["y"]):
+            return INN_SHELTER
         return 0.0
 
     def _wolves_menace_people(self, dt_game_min: float, night: bool) -> list:
@@ -1525,8 +1559,9 @@ class World:
                          and abs(q["x"] - best["x"]) + abs(q["y"] - best["y"]) <= WOLF_BAND_SAFETY)
             if guards >= WOLF_GUARDS_SAFE or self._shelter_factor(best) > 0.5 \
                     or self._guardian_near(best["x"], best["y"], exclude=best) \
-                    or self._powered(best["x"], best["y"]):
-                continue                                 # band, roof, guardian, or ELECTRIC LIGHT — the wolf backs off
+                    or self._powered(best["x"], best["y"]) \
+                    or self._near_building("watchtower", WATCH_RADIUS, best["x"], best["y"]):
+                continue                                 # band, roof, guardian, light, or WATCHTOWER — the wolf backs off
             if bd <= 1:                                  # in reach — strike
                 if self.rng.random() < ANIMALS["wolf"]["kill_chance"] * bold / (1 + guards):
                     best["hp"] = max(0.0, best["hp"] - WOLF_BITE)
@@ -1537,6 +1572,7 @@ class World:
                     mind.remember(best, "a wolf set on me out in the open", 0.9, "danger", self.clock)
                     mind.speak(best, "Wolf! Get back!", self.clock)
                     self._note("danger", f"A wolf attacked {best['name']}.")
+                    self._wolf_blooded = True             # the band now has cause to raise a watchtower
                     if best["hp"] <= 0:
                         killed.append(best)
             else:                                        # close the distance
@@ -3278,6 +3314,12 @@ class World:
                 and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
             return {"kind": "monument", "bp": STOREHOUSE_BP,
                     "why": "raise a storehouse — to keep our food against lean days"}
+        # PUBLIC WORKS — a settled soul turns its hand to whatever the band most needs built (a well,
+        # an inn, a watchtower). Same co-op gating as any monument: a real home first, and a crew.
+        if has_real_home and (self._communal_build_to_join(p) is not None or not self._communal_in_progress()):
+            wants = self._community_wants(p)
+            if wants:
+                return wants[0]
         band_has_hall = any(s["bp"] == MONUMENT_BP and s["done"] for s in self.sites)
         # A communal build is a GROUP effort: an ambitious soul undertakes one, OR joins an
         # in-progress one whose crew isn't full — so the band's builders converge to raise it
@@ -3528,6 +3570,31 @@ class World:
         """Does a finished building of this blueprint stand anywhere (e.g. a communal storehouse)?"""
         return any(s.get("done") and s.get("bp") == bp for s in self.sites)
 
+    def _near_building(self, bp: str, r: int, x: int, y: int) -> bool:
+        """Is (x,y) within r of a FINISHED building of this blueprint (an inn, a watchtower, …)?"""
+        for s in self.sites:
+            if s.get("done") and s.get("bp") == bp and abs(s["ox"] - x) + abs(s["oy"] - y) <= r:
+                return True
+        return False
+
+    def _community_wants(self, p):
+        """The PUBLIC WORKS the band needs but hasn't raised — its growing repertoire of functional
+        buildings, each triggered by a real shortfall (not a script). Returns communal-build
+        projects, best-need first; the co-op machinery raises them like any monument."""
+        out = []
+        homes = [(int(q["home"][0]), int(q["home"][1])) for q in self.people if q.get("home_struct")]
+        if homes and not self._has_building("well"):
+            cx = sum(h[0] for h in homes) // len(homes)
+            cy = sum(h[1] for h in homes) // len(homes)
+            if not self._water_within(cx, cy, WELL_NEED_DIST):          # settled far from water
+                out.append(("well", "dig a well — water close to home at last"))
+        unhoused = sum(1 for q in self.people if q["age"] >= ADULT_AGE and not q.get("home_struct"))
+        if unhoused >= INN_NEED_UNHOUSED and not self._has_building("inn"):
+            out.append(("inn", "raise an inn — a roof for those who have none"))
+        if getattr(self, "_wolf_blooded", False) and not self._has_building("watchtower"):
+            out.append(("watchtower", "raise a watchtower — to keep the wolves off us"))
+        return [{"kind": "monument", "bp": b, "why": w} for b, w in out]
+
     def _tile_unbuildable(self, tx, ty, occupied, avoid: int):
         """Why a tile can't take a building tile (a short, human reason), or None if it can — so
         the same check both rejects a footprint AND lets a soul SAY why it won't build there."""
@@ -3734,6 +3801,7 @@ class World:
                 site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
                         "ox": int(ox), "oy": int(oy), "by": p["name"], "owner": p["id"],
                         "rung": rung if (rung and cand == name) else cand,   # ladder rung (custom homes still track; leaf fallback stays leaf)
+                        "core": [int(core[0]), int(core[1])] if core else None,  # the heart tile (a well's shaft, a home's hearth)
                         "insul": float(bp.get("insulation", 1.0)),
                         "tasks": tasks, "done": False, "t": round(self.clock, 1)}
                 site["communal"] = bool(communal)
@@ -3890,8 +3958,14 @@ class World:
         site["done"] = True
         self.version += 1
         if BLUEPRINTS.get(site["bp"], {}).get("communal"):
-            # A monument, not a home: it doesn't house the builder, but it crowns them — the
-            # band now has a shared landmark and its raiser wins lasting renown.
+            # A WELL's shaft fills with water on completion — a real drinking source the band can
+            # gather at, so it can live away from the river (the building's PURPOSE made real).
+            if site["bp"] == "well" and site.get("core"):
+                cx, cy = site["core"]
+                if self._in(cx, cy):
+                    self.water[cy, cx] = WATER_RIVER
+            # A monument/public work: it doesn't house the builder, but it crowns them — the band
+            # gains a shared landmark with a purpose, and its raiser wins lasting renown.
             self._note("build", f"{p['name']} finished a {site['name'].lower()} for the band.")
             self._earn_renown(p, RENOWN_GAIN["monument"],
                               f"raised a {site['name'].lower()} for us all — a name that will last")
