@@ -354,6 +354,14 @@ BLUEPRINTS = {
         "WFFFW",
         "WWWWW",
     ]),
+    # A communal STOREHOUSE — a specialized building: while one stands, the band's STORED food
+    # keeps better (slower spoilage) and is safer from vermin. A forager's answer to the hall.
+    "storehouse": dict(name="Storehouse", roof=True, insulation=1.0, communal=True, layout=[
+        "WWDWW",
+        "WFFFW",
+        "WFFFW",
+        "WWWWW",
+    ]),
 }
 
 # The dwelling ladder — ascending comfort. Once a soul has any roof and is kitted out,
@@ -367,6 +375,10 @@ MONUMENT_BP = "gathering"          # the communal status build raised once a sou
 WORKSHOP_BP = "workshop"           # a communal specialized building that speeds nearby crafting
 WORKSHOP_RANGE = 6                 # tiles from a finished workshop within which crafting is faster
 WORKSHOP_CRAFT_SPEED = 1.7        # craft-progress multiplier when working by the bench
+WOOD_BUILD_RANGE = 22              # trees within this of home → a soul builds in TIMBER; else a leaf house
+STOREHOUSE_BP = "storehouse"       # a communal specialized building that protects the band's stored food
+STORE_SPOIL_FACTOR = 0.5          # a storehouse halves how fast STORED food spoils
+STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
 
 # ─── Renown — social standing (Phase 2) ──────────────────────────────────────
 # A soul's STANDING in the band: it grows from socially-visible achievements (raising a fine
@@ -2835,6 +2847,23 @@ class World:
             n += sum(1 for c in kids if ages.get(c, ADULT_AGE) < ADULT_AGE)
         return n
 
+    def _design_leaf_home(self, p, fam: int) -> str:
+        """An all-LEAF home — leaf-panel walls round a roofed core, no wood at all. What a soul
+        raises when timber is out of reach (or simply preferred): humble and draughtier than a
+        timber house, but a real, coherent home built entirely from leaves."""
+        iw = max(1, min(3, 1 + fam // 2))
+        ih = max(1, min(3, 1 + fam // 2))
+        Wt, Ht = iw + 2, ih + 2
+        rows = [["L" if (rx in (0, Wt - 1) or ry in (0, Ht - 1)) else "."
+                 for rx in range(Wt)] for ry in range(Ht)]
+        rows[Ht // 2][Wt // 2] = "C"                           # the roofed home core
+        rows[0][Wt // 2] = "."                                 # an open doorway in the leaf wall
+        layout = ["".join(r) for r in rows]
+        bid = f"home_{p['id']}"
+        BLUEPRINTS[bid] = dict(name=f"{p['name']}'s Leaf House", roof=True, insulation=0.45,
+                               roof_cost=("leaves", 1), layout=layout)
+        return bid
+
     def _design_dwelling(self, p, rung: str) -> str:
         """A soul DESIGNS its own home: a timber room sized to its household and shaped by its
         building skill (bigger and finer the more it has of each), validated later by the same
@@ -2842,6 +2871,13 @@ class World:
         the parametric v1 — a real layout the soul authored, not a one-size-fits-all blueprint."""
         fam = self._household_size(p)
         skill = (p.get("skills") or {}).get("building", 0.0)
+        # Material is chosen for the WHOLE house, never mixed: build in timber only when wood is
+        # actually to hand (carried, or trees near home); otherwise raise a coherent all-LEAF house
+        # rather than a half-finished timber one waiting on wood that isn't coming.
+        hx, hy = p["home"]
+        timber = p["inv"].get("wood", 0) >= 4 or self._wood_within(hx, hy, WOOD_BUILD_RANGE)
+        if not timber:
+            return self._design_leaf_home(p, fam)
         if rung == "hut":                                       # a modest first proper home
             iw = max(1, min(3, 1 + fam // 2))
             ih = max(1, min(3, 1 + fam // 2))
@@ -2905,6 +2941,12 @@ class World:
                 and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
             return {"kind": "monument", "bp": WORKSHOP_BP,
                     "why": "raise a workshop — a bench for us all, and faster hands"}
+        # A FORAGER's specialty: raise the communal STOREHOUSE so the band's food keeps against
+        # lean days (slower spoilage, fewer vermin) — their answer to the bench and the hall.
+        if (voc == "forager" and has_real_home and not self._has_building(STOREHOUSE_BP)
+                and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
+            return {"kind": "monument", "bp": STOREHOUSE_BP,
+                    "why": "raise a storehouse — to keep our food against lean days"}
         band_has_hall = any(s["bp"] == MONUMENT_BP and s["done"] for s in self.sites)
         # A communal build is a GROUP effort: an ambitious soul undertakes one, OR joins an
         # in-progress one whose crew isn't full — so the band's builders converge to raise it
@@ -3142,6 +3184,18 @@ class World:
         y0, y1 = max(0, y - r), min(H, y + r + 1)
         x0, x1 = max(0, x - r), min(W, x + r + 1)
         return bool(np.any(self.water[y0:y1, x0:x1] != WATER_NONE))
+
+    def _wood_within(self, x, y, r: int) -> bool:
+        """Is there standing timber (a grown tree) within r tiles of (x,y)? Decides whether a soul
+        can realistically build in TIMBER or must fall back to a leaf house."""
+        y0, y1 = max(0, y - r), min(H, y + r + 1)
+        x0, x1 = max(0, x - r), min(W, x + r + 1)
+        return bool(np.any(np.isin(self.veg_sp[y0:y1, x0:x1], WOOD_IDS)
+                           & (self.veg_growth[y0:y1, x0:x1] > 0.2)))
+
+    def _has_building(self, bp: str) -> bool:
+        """Does a finished building of this blueprint stand anywhere (e.g. a communal storehouse)?"""
+        return any(s.get("done") and s.get("bp") == bp for s in self.sites)
 
     def _tile_unbuildable(self, tx, ty, occupied, avoid: int):
         """Why a tile can't take a building tile (a short, human reason), or None if it can — so
@@ -3914,15 +3968,19 @@ class World:
         proportionally to elapsed time over its shelf life. Cheap: a few people × a few items."""
         if dt_days <= 0:
             return
+        has_store = self._has_building(STOREHOUSE_BP)              # the band's stores keep better with one
         for p in self.people:
             for hold in (p.get("inv"), p.get("store")):
                 if not hold:
                     continue
+                stored = hold is p.get("store")
                 for item, shelf in PERISHABLE.items():
                     n = hold.get(item, 0)
                     if n <= 0:
                         continue
                     rate = dt_days / shelf
+                    if stored and has_store:                       # a proper storehouse slows spoilage
+                        rate *= STORE_SPOIL_FACTOR
                     lost = int(n * rate)
                     if self.rng.random() < (n * rate - lost):
                         lost += 1
@@ -3964,6 +4022,7 @@ class World:
         """A fat larder of fresh food draws vermin. Each game-day, a store past the threshold
         risks a raid that carries off a chunk — the price of hoarding perishables in the open,
         and a nudge toward DRYING the surplus (preserved goods don't tempt them)."""
+        has_store = self._has_building(STOREHOUSE_BP)             # a storehouse keeps vermin off the stores
         for p in self.people:
             store = p.get("store")
             if not store:
@@ -3972,6 +4031,8 @@ class World:
             if food <= PEST_STORE_THRESHOLD:
                 continue
             chance = min(0.85, PEST_RAID_CHANCE * (food / PEST_STORE_THRESHOLD))
+            if has_store:
+                chance *= STORE_PEST_FACTOR
             if self.rng.random() < chance:
                 taken = max(1, int(food * PEST_RAID_LOSS))
                 store["food"] = food - taken
