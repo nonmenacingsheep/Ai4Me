@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=68" />
+  <link rel="stylesheet" href="style.css?v=69" />
 </head>
 <body>
 
@@ -195,11 +195,23 @@
             <div class="wtpl-palette" id="wtpl-palette"></div>
           </div>
           <div class="field">
+            <label>Tool</label>
+            <div class="wtpl-tools" id="wtpl-tools">
+              <button type="button" class="wtpl-tool active" data-tool="paint" title="Freehand — drag to paint">✏️ Paint</button>
+              <button type="button" class="wtpl-tool" data-tool="rect" title="Drag a wall-box outline">▭ Box</button>
+              <button type="button" class="wtpl-tool" data-tool="frect" title="Drag a filled rectangle">▰ Fill</button>
+              <button type="button" class="wtpl-tool" data-tool="line" title="Drag a straight line">╱ Line</button>
+              <button type="button" class="wtpl-tool" data-tool="bucket" title="Flood-fill a region">🪣 Bucket</button>
+              <button type="button" class="wtpl-tool" data-tool="room" title="Drag a finished room — walls, floor & a door">🏠 Room</button>
+            </div>
+          </div>
+          <div class="field">
             <label>Grid <span id="wtpl-dims" style="opacity:.7"></span></label>
             <div class="wtpl-sizerow">
               <label>cols <input type="number" id="wtpl-cols" min="1" max="16" value="5"></label>
               <label>rows <input type="number" id="wtpl-rows" min="1" max="16" value="5"></label>
               <button class="btn-secondary" id="wtpl-clear" type="button">Clear</button>
+              <button class="btn-secondary" id="wtpl-fill" type="button">Fill all</button>
             </div>
             <canvas id="wtpl-grid" class="wtpl-grid"></canvas>
           </div>
@@ -1016,6 +1028,6 @@
     <div class="pt-hint" id="pt-hint">double-click her to hide the conversation</div>
   </div>
 
-  <script src="app.js?v=68"></script>
+  <script src="app.js?v=69"></script>
 </body>
 </html>

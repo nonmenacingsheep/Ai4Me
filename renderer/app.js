@@ -386,7 +386,7 @@ const WTPL_PALETTE = [
 ];
 const WTPL_COLOR = Object.fromEntries(WTPL_PALETTE.map(p => [p.g, p.color]));
 const wtplModal = document.getElementById('wtpl-modal');
-const WTPL = { cols: 5, rows: 5, grid: [], paint: 'W', editId: null };
+const WTPL = { cols: 5, rows: 5, grid: [], paint: 'W', editId: null, tool: 'paint', start: null };
 
 function wtplBlankGrid(cols, rows, old) {
   const g = [];
@@ -410,33 +410,72 @@ function renderTplPalette() {
   }
 }
 
-function renderTplGrid() {
+function renderTplGrid(preview) {
   const cv = document.getElementById('wtpl-grid'); if (!cv) return;
-  const cell = Math.max(14, Math.min(34, Math.floor(340 / Math.max(WTPL.cols, WTPL.rows))));
+  const cell = Math.max(16, Math.min(48, Math.floor(560 / Math.max(WTPL.cols, WTPL.rows))));
   cv.width = WTPL.cols * cell; cv.height = WTPL.rows * cell;
   const ctx = cv.getContext('2d');
   ctx.fillStyle = '#0c0c10'; ctx.fillRect(0, 0, cv.width, cv.height);
+  const drawCell = (x, y, g, ghost) => {
+    if (g !== '.') {
+      ctx.globalAlpha = ghost ? 0.55 : 1;
+      ctx.fillStyle = WTPL_COLOR[g] || '#888'; ctx.fillRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
+      if (g === 'C') { ctx.fillStyle = '#1a1a1f'; ctx.font = `${cell * 0.6}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('C', x * cell + cell / 2, y * cell + cell / 2); }
+      ctx.globalAlpha = 1;
+    }
+  };
   for (let y = 0; y < WTPL.rows; y++) {
     for (let x = 0; x < WTPL.cols; x++) {
-      const g = WTPL.grid[y][x];
-      if (g !== '.') { ctx.fillStyle = WTPL_COLOR[g] || '#888'; ctx.fillRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2); }
-      if (g === 'C') { ctx.fillStyle = '#1a1a1f'; ctx.font = `${cell * 0.6}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('C', x * cell + cell / 2, y * cell + cell / 2); }
+      drawCell(x, y, WTPL.grid[y][x], false);
       ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.strokeRect(x * cell + 0.5, y * cell + 0.5, cell, cell);
     }
   }
+  if (preview) for (const [k, g] of preview) { const [px, py] = k.split(',').map(Number); drawCell(px, py, g, true); }
   cv._cell = cell;
   const dims = document.getElementById('wtpl-dims'); if (dims) dims.textContent = `${WTPL.cols}×${WTPL.rows}`;
 }
 
-function tplPaintAt(ev) {
+// ── Blueprint editing helpers — the cells a tool would touch, as a Map "x,y"→glyph.
+function tplCellAt(ev) {
   const cv = document.getElementById('wtpl-grid'); const cell = cv._cell || 20;
   const r = cv.getBoundingClientRect();
   const x = Math.floor((ev.clientX - r.left) * (cv.width / r.width) / cell);
   const y = Math.floor((ev.clientY - r.top) * (cv.height / r.height) / cell);
-  if (x < 0 || y < 0 || x >= WTPL.cols || y >= WTPL.rows) return;
-  const row = WTPL.grid[y];
-  WTPL.grid[y] = row.slice(0, x) + WTPL.paint + row.slice(x + 1);
-  renderTplGrid();
+  return (x < 0 || y < 0 || x >= WTPL.cols || y >= WTPL.rows) ? null : { x, y };
+}
+function tplToolCells(ax, ay, bx, by) {
+  const out = new Map(), g = WTPL.paint, tool = WTPL.tool;
+  const x0 = Math.min(ax, bx), x1 = Math.max(ax, bx), y0 = Math.min(ay, by), y1 = Math.max(ay, by);
+  const set = (x, y, gg) => { if (x >= 0 && y >= 0 && x < WTPL.cols && y < WTPL.rows) out.set(`${x},${y}`, gg); };
+  if (tool === 'line') {                                   // Bresenham
+    let dx = Math.abs(bx - ax), dy = -Math.abs(by - ay), sx = ax < bx ? 1 : -1, sy = ay < by ? 1 : -1, err = dx + dy, x = ax, y = ay;
+    for (; ;) { set(x, y, g); if (x === bx && y === by) break; const e2 = 2 * err; if (e2 >= dy) { err += dy; x += sx; } if (e2 <= dx) { err += dx; y += sy; } }
+  } else if (tool === 'frect') {
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) set(x, y, g);
+  } else if (tool === 'rect') {
+    for (let x = x0; x <= x1; x++) { set(x, y0, g); set(x, y1, g); }
+    for (let y = y0; y <= y1; y++) { set(x0, y, g); set(x1, y, g); }
+  } else if (tool === 'room') {                            // walls round a floor, with a door
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      const edge = (x === x0 || x === x1 || y === y0 || y === y1);
+      set(x, y, edge ? 'W' : 'F');
+    }
+    if (x1 > x0 && y1 > y0) set(Math.floor((x0 + x1) / 2), y0, 'D');   // a door in the top wall
+  } else { set(ax, ay, g); }                               // paint (single cell)
+  return out;
+}
+function tplCommit(cells) {
+  for (const [k, g] of cells) { const [x, y] = k.split(',').map(Number); WTPL.grid[y] = WTPL.grid[y].slice(0, x) + g + WTPL.grid[y].slice(x + 1); }
+}
+function tplFlood(sx, sy) {                                 // bucket: replace the contiguous same-glyph region
+  const target = WTPL.grid[sy][sx], g = WTPL.paint; if (target === g) return;
+  const stack = [[sx, sy]], seen = new Set();
+  while (stack.length) {
+    const [x, y] = stack.pop(), k = `${x},${y}`;
+    if (x < 0 || y < 0 || x >= WTPL.cols || y >= WTPL.rows || seen.has(k) || WTPL.grid[y][x] !== target) continue;
+    seen.add(k); WTPL.grid[y] = WTPL.grid[y].slice(0, x) + g + WTPL.grid[y].slice(x + 1);
+    stack.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+  }
 }
 
 function openTplEditor(existing) {
@@ -444,7 +483,8 @@ function openTplEditor(existing) {
   WTPL.cols = existing ? (existing.layout[0] || '').length : 5;
   WTPL.rows = existing ? existing.layout.length : 5;
   WTPL.grid = existing ? existing.layout.slice() : wtplBlankGrid(5, 5);
-  WTPL.paint = 'W';
+  WTPL.paint = 'W'; WTPL.tool = 'paint'; WTPL.start = null;
+  document.querySelectorAll('#wtpl-tools .wtpl-tool').forEach(t => t.classList.toggle('active', t.dataset.tool === 'paint'));
   document.getElementById('wtpl-name').value = existing ? existing.name : '';
   document.getElementById('wtpl-cols').value = WTPL.cols;
   document.getElementById('wtpl-rows').value = WTPL.rows;
@@ -535,11 +575,37 @@ document.getElementById('wtpl-palette')?.addEventListener('click', (e) => {
 });
 (() => {
   const cv = document.getElementById('wtpl-grid'); if (!cv) return;
-  let down = false;
-  cv.addEventListener('pointerdown', (e) => { down = true; cv.setPointerCapture(e.pointerId); tplPaintAt(e); });
-  cv.addEventListener('pointermove', (e) => { if (down) tplPaintAt(e); });
-  const up = () => { down = false; }; cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
+  cv.addEventListener('pointerdown', (e) => {
+    const c = tplCellAt(e); if (!c) return;
+    cv.setPointerCapture(e.pointerId);
+    if (WTPL.tool === 'bucket') { tplFlood(c.x, c.y); renderTplGrid(); return; }
+    WTPL.start = c;
+    if (WTPL.tool === 'paint') { tplCommit(tplToolCells(c.x, c.y, c.x, c.y)); renderTplGrid(); }
+    else { renderTplGrid(tplToolCells(c.x, c.y, c.x, c.y)); }     // drag tools: show a ghost preview
+  });
+  cv.addEventListener('pointermove', (e) => {
+    if (!WTPL.start) return;
+    const c = tplCellAt(e); if (!c) return;
+    if (WTPL.tool === 'paint') { tplCommit(tplToolCells(c.x, c.y, c.x, c.y)); renderTplGrid(); }
+    else { renderTplGrid(tplToolCells(WTPL.start.x, WTPL.start.y, c.x, c.y)); }
+  });
+  const finish = (e) => {
+    if (WTPL.start && WTPL.tool !== 'paint') {
+      const c = tplCellAt(e) || WTPL.start;
+      tplCommit(tplToolCells(WTPL.start.x, WTPL.start.y, c.x, c.y));
+    }
+    WTPL.start = null; renderTplGrid();
+  };
+  cv.addEventListener('pointerup', finish); cv.addEventListener('pointercancel', () => { WTPL.start = null; renderTplGrid(); });
 })();
+document.getElementById('wtpl-tools')?.addEventListener('click', (e) => {
+  const b = e.target.closest('.wtpl-tool'); if (!b) return;
+  WTPL.tool = b.dataset.tool;
+  document.querySelectorAll('#wtpl-tools .wtpl-tool').forEach(t => t.classList.toggle('active', t === b));
+});
+document.getElementById('wtpl-fill')?.addEventListener('click', () => {
+  WTPL.grid = WTPL.grid.map(row => WTPL.paint.repeat(WTPL.cols)); renderTplGrid();
+});
 const _tplResize = () => {
   WTPL.cols = Math.max(1, Math.min(16, parseInt(document.getElementById('wtpl-cols').value, 10) || 1));
   WTPL.rows = Math.max(1, Math.min(16, parseInt(document.getElementById('wtpl-rows').value, 10) || 1));
