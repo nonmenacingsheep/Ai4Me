@@ -3389,7 +3389,16 @@ class World:
         order = sorted(_STEP_DIRS, key=lambda d: -(d[0] * sx + d[1] * sy))
         for dx, dy in order:
             if dx * sx + dy * sy < 0:
-                break                                    # the rest only lead away — give up this beat
+                break                                    # the rest only lead away — try the detour pass
+            if self._passable(x + dx, y + dy):
+                self._step_to(p, x + dx, y + dy)
+                return
+        # Boxed in by a CONCAVE barrier (a lake bay, a U-shaped wall): the greedy slide above
+        # found nothing forward, so don't freeze nose-to-the-water — round it. Take the best step
+        # that still makes some headway sideways, else any open step at all, so the soul escapes
+        # the pocket and tries again rather than starving where it stands. (This is the cheap fix
+        # for the local-minimum trap; a full flow-field comes next.)
+        for dx, dy in order:
             if self._passable(x + dx, y + dy):
                 self._step_to(p, x + dx, y + dy)
                 return
