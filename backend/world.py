@@ -2465,10 +2465,32 @@ class World:
             return (int(np.sign(hx - x)), int(np.sign(hy - y)))
         return None
 
+    def _step_off_door(self, p):
+        """If a soul is loitering ON a doorway, a step out to the most OPEN neighbouring tile — so
+        idlers don't clog a building's single entrance (it just looks like they're blocking it,
+        since people share tiles, but a clear doorway reads far better). None if not on a door."""
+        x, y = p["x"], p["y"]
+        if self.blocks.get((x, y)) != BLOCK_DOOR:
+            return None
+        best = None
+        for dx, dy in _STEP_DIRS:
+            nx, ny = x + dx, y + dy
+            if not self._passable(nx, ny) or self.blocks.get((nx, ny)) == BLOCK_DOOR:
+                continue
+            score = 1 if self.blocks.get((nx, ny)) is None else 0   # open ground beats another tiled square
+            if best is None or score > best[0]:
+                best = (score, nx, ny)
+        if best is not None:
+            return "wander", (int(np.sign(best[1] - x)), int(np.sign(best[2] - y)))
+        return None
+
     def _idle(self, p):
         """Drift home if strayed, else gather toward company — the resting state of a mind
         between aims. Idle souls drift toward a nearby band-mate rather than scattering, so the
         village reads as a gathering of folk rather than figures milling alone (#4)."""
+        off = self._step_off_door(p)                       # never loiter in a doorway
+        if off:
+            return off
         hx, hy = p["home"]
         if abs(hx - p["x"]) + abs(hy - p["y"]) > 6:
             return "wander", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
@@ -2483,7 +2505,11 @@ class World:
                 best, bd = q, d
         if best is not None:
             return "wander", (int(np.sign(best["x"] - p["x"])), int(np.sign(best["y"] - p["y"])))
-        return "wander", None
+        # No one to drift toward and home is near — SETTLE in place (an occasional amble keeps it
+        # from looking frozen) instead of restlessly milling the village every single beat.
+        if self.rng.random() < 0.15:
+            return "wander", None
+        return "rest", None
 
     def _homeward_if_away(self, p, reach: int = 4):
         """A step toward home if a SETTLED soul has strayed from it — so making and puzzling-out
