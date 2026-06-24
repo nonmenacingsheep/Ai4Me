@@ -41,6 +41,7 @@ RAW = {
     "fish":       dict(name="Fish",        icon="🐟", tool="rod",     source="rivers, lakes & sea"),
     "hide":       dict(name="Hide",        icon="🟫", tool="knife",   source="hunted game"),
     "water":      dict(name="Water",       icon="💧", tool=None,      source="rivers, lakes & wells"),
+    "uranium_ore": dict(name="Uranium Ore", icon="🟢", tool="pickaxe", source="deep mountain veins"),
     "copper_ore": dict(name="Copper Ore",  icon="🟧", tool="pickaxe", source="surface veins in hills"),
     "tin_ore":    dict(name="Tin Ore",     icon="⬜", tool="pickaxe", source="hill & mountain veins"),
     "iron_ore":   dict(name="Iron Ore",    icon="⬛", tool="pickaxe", source="mountain rock"),
@@ -54,7 +55,7 @@ RAW = {
 STATION_KINDS = ("workbench", "campfire", "furnace", "kiln", "forge",
                  "loom", "tannery", "anvil", "well")
 STRUCTURE_KINDS = ("shelter", "stone_wall", "brick_house", "stone_house", "windmill",
-                   "generator", "power_pole")
+                   "generator", "power_pole", "reactor")
 
 # Tools provide CAPABILITIES; a recipe that needs e.g. "hammer" is satisfied by any
 # held item that provides it (so a steel hammer works wherever a crude one would).
@@ -244,6 +245,15 @@ _RECIPE_ROWS = [
     ("power_pole",     2, {"plank": 2, "copper_wire": 1},       "workbench", None, 5),  # structure: conductor
     ("light_bulb",     2, {"glass": 1, "copper_wire": 1},       "forge", None, 5),
     ("electric_motor", 1, {"copper_coil": 1, "magnet": 1, "iron_ingot": 1}, "forge", "hammer", 5),
+
+    # ── J. Industry & the NUCLEAR age — concrete, turbines, and a working reactor (tier 5-7) ──
+    #    The summit of the tree, and the literal end of the user's scene: a wooden band that climbs
+    #    this far can raise its own reactor. Needs the smithy's forge + furnace and a hammer.
+    ("concrete",       2, {"sand": 2, "stone": 2, "water": 1},  "kiln", None, 4),
+    ("steel_beam",     1, {"steel_ingot": 2},                   "forge", "hammer", 5),
+    ("turbine",        1, {"steel_beam": 2, "copper_coil": 2, "gear": 2}, "forge", "hammer", 6),
+    ("uranium_fuel",   1, {"uranium_ore": 3, "steel_plate": 1}, "furnace", None, 6),
+    ("reactor",        1, {"uranium_fuel": 2, "turbine": 1, "concrete": 8, "steel_beam": 4, "copper_coil": 4}, "forge", "hammer", 7),  # structure: the modern power source
 ]
 
 # Categorise outputs so callers (UI, world.py, future minds) know how to treat each.
@@ -313,6 +323,8 @@ ICONS = {  # a few hand-picked glyphs so the UI isn't all blanks (rest fall back
     "iron_shield": "🛡️", "windmill": "🌬️", "brick_house": "🏠", "stone_house": "🏘️",
     "generator": "🔌", "battery": "🔋", "power_pole": "🗼", "light_bulb": "💡",
     "electric_motor": "⚙️", "magnet": "🧲", "copper_coil": "🌀",
+    "reactor": "☢️", "uranium_ore": "🟢", "uranium_fuel": "🟩", "concrete": "🧱",
+    "steel_beam": "🏗️", "turbine": "🌀",
 }
 for _id, _ic in ICONS.items():
     if _id in ITEMS:
@@ -493,6 +505,8 @@ TECH_LADDER = [
     "tannery", "leather", "steel_ingot", "steel_axe", "brick_house", "windmill",
     # The modern era's first rung — electricity (needs a smithy's forge + a hammer):
     "magnet", "copper_coil", "generator", "power_pole", "light_bulb", "electric_motor",
+    # …and its summit — concrete, turbines and a working reactor:
+    "concrete", "steel_beam", "turbine", "uranium_fuel", "reactor",
 ]
 
 
@@ -501,7 +515,7 @@ TECH_LADDER = [
 # ════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print(f"recipes: {len(RECIPES)}  |  items: {len(ITEMS)}  |  raw: {len(RAW)}")
-    assert len(RECIPES) == 139, f"expected 139 recipes, got {len(RECIPES)}"
+    assert len(RECIPES) == 144, f"expected 144 recipes, got {len(RECIPES)}"
 
     # Discovery: a correct ingredient guess identifies a hidden survival craft; a wrong one
     # doesn't; and each discoverable recipe has a UNIQUE ingredient-type set (so a right
