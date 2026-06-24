@@ -1770,7 +1770,8 @@ class World:
                     self._begin_craft(p, "crude_axe")
                 self._advance_craft(p, dt_game_min)
             elif action == "found_site":
-                self._found_site(p, p.pop("next_bp", "leaf_shelter"), communal=p.pop("next_communal", False))
+                self._found_site(p, p.pop("next_bp", "leaf_shelter"),
+                                 communal=p.pop("next_communal", False), rung=p.pop("next_rung", None))
             elif action == "build_block":
                 # Laying a tile is real labour — dwell on it. (The cabin self-test calls
                 # _build_next_block directly, bypassing this timer, so it stays one-per-call.)
@@ -2539,7 +2540,7 @@ class World:
         # This is what fills the once-empty hours after survival is met — a real, visible goal.
         proj = p.get("project")
         if proj and proj.get("kind") == "dwelling":
-            act = self._pursue_building(p, proj["bp"], getters)
+            act = self._pursue_building(p, proj["bp"], getters, rung=proj.get("rung"))
             if act:
                 return act
         # The status project: an ambitious soul whose own home is fine raises a communal
@@ -2732,7 +2733,7 @@ class World:
                 return ("eat" if want == "food" else "drink_safe"), None
         return None
 
-    def _pursue_building(self, p, bp_name, getters, communal: bool = False):
+    def _pursue_building(self, p, bp_name, getters, communal: bool = False, rung=None):
         """Raise a building from a blueprint tile by tile: found the footprint at home, then
         forage each tile's material and lay it. Returns a body action, or None when there's
         nothing to do this beat (between steps, or just finished). Shared by the first
@@ -2747,6 +2748,7 @@ class World:
             if abs(hx - x) + abs(hy - y) <= 1:
                 p["next_bp"] = bp_name                          # the handler founds this blueprint
                 p["next_communal"] = communal
+                p["next_rung"] = rung
                 return "found_site", None
             return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         task = self._site_next_task(site)
@@ -2768,7 +2770,7 @@ class World:
             return None
         for s in self.sites:
             if s["id"] == sid:
-                return s.get("bp")
+                return s.get("rung") or s.get("bp")     # the ladder rung (a designed home reports its rung)
         return None
 
     def _orphaned_monument(self):
@@ -2812,6 +2814,42 @@ class World:
         return sum(1 for q in self._site_crew(site["id"])
                    if abs(q["x"] - ox) + abs(q["y"] - oy) <= CO_OP_RANGE)
 
+    def _household_size(self, p) -> int:
+        """How many mouths share this soul's home: themself, a partner, and any still-young
+        children — what a home needs to be sized for."""
+        n = 1 + (1 if p.get("partner") else 0)
+        kids = p.get("children", [])
+        if kids:
+            ages = {q["id"]: q["age"] for q in self.people}
+            n += sum(1 for c in kids if ages.get(c, ADULT_AGE) < ADULT_AGE)
+        return n
+
+    def _design_dwelling(self, p, rung: str) -> str:
+        """A soul DESIGNS its own home: a timber room sized to its household and shaped by its
+        building skill (bigger and finer the more it has of each), validated later by the same
+        placement logic as any blueprint. Registered under a per-soul id and returned. This is
+        the parametric v1 — a real layout the soul authored, not a one-size-fits-all blueprint."""
+        fam = self._household_size(p)
+        skill = (p.get("skills") or {}).get("building", 0.0)
+        if rung == "hut":                                       # a modest first proper home
+            iw = max(1, min(3, 1 + fam // 2))
+            ih = max(1, min(3, 1 + fam // 2))
+        else:                                                   # a cabin (or finer) — larger, roomier
+            iw = max(2, min(4, 2 + fam // 2 + int(skill * 1.5)))
+            ih = max(2, min(5, 2 + fam // 2 + int(skill * 2.0)))
+        Wt, Ht = iw + 2, ih + 2                                 # +2 for the wall ring
+        rows = [["W" if (rx in (0, Wt - 1) or ry in (0, Ht - 1)) else "F"
+                 for rx in range(Wt)] for ry in range(Ht)]
+        rows[0][Wt // 2] = "D"                                  # a door in the middle of the front wall
+        if skill > 0.3 and Ht >= 4:                            # a skilled hand adds windows to the long walls
+            rows[Ht // 2][0] = "O"
+            rows[Ht // 2][Wt - 1] = "O"
+        layout = ["".join(r) for r in rows]
+        kind = "Hut" if rung == "hut" else "Cabin"
+        bid = f"home_{p['id']}"
+        BLUEPRINTS[bid] = dict(name=f"{p['name']}'s {kind}", roof=True, insulation=1.0, layout=layout)
+        return bid
+
     def _project_for(self, p):
         """The soul's standing life-project once survival & first shelter are met: climb the
         dwelling ladder to a snugger home. Returns a project dict {kind, bp, why} or None
@@ -2847,11 +2885,14 @@ class World:
                 and mind._trait(p, "ambition") >= AMBITION_MONUMENT
                 and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
             return mon
-        # Otherwise keep climbing the dwelling ladder to a snugger home.
+        # Otherwise keep climbing the dwelling ladder to a snugger home — but the soul now DESIGNS
+        # that home itself, sized to its household and shaped by its building skill, rather than
+        # raising a one-size-fits-all blueprint.
         if i + 1 < len(DWELLING_LADDER):
             nxt = DWELLING_LADDER[i + 1]
-            return {"kind": "dwelling", "bp": nxt,
-                    "why": f"raise a finer home — a proper {BLUEPRINTS[nxt]['name'].lower()}"}
+            bp_id = self._design_dwelling(p, nxt)
+            return {"kind": "dwelling", "bp": bp_id, "rung": nxt,
+                    "why": f"design and raise a {BLUEPRINTS[bp_id]['name'].lower()} to fit my own"}
         return None
 
     # Survival gear the band has discovered, in priority order, with what each does and the
@@ -3242,7 +3283,7 @@ class World:
             score -= cdist * (0.16 if communal else 0.05)                         # cluster (hard for communal)
         return score
 
-    def _found_site(self, p, name: str = "leaf_shelter", communal: bool = False):
+    def _found_site(self, p, name: str = "leaf_shelter", communal: bool = False, rung=None):
         """PLAN a building footprint: rather than grabbing the first tile that fits, a soul weighs
         the candidate spots around its anchor and picks the BEST — near enough to water, on clear
         ground, clustered with the band but with room to breathe (`_score_site`). Falls back to the
@@ -3275,6 +3316,7 @@ class World:
                 _, ox, oy, tasks, core = best
                 site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
                         "ox": int(ox), "oy": int(oy), "by": p["name"], "owner": p["id"],
+                        "rung": rung if (rung and cand == name) else cand,   # ladder rung (custom homes still track; leaf fallback stays leaf)
                         "insul": float(bp.get("insulation", 1.0)),
                         "tasks": tasks, "done": False, "t": round(self.clock, 1)}
                 site["communal"] = bool(communal)
@@ -3395,6 +3437,7 @@ class World:
             self.blocks[(task["x"], task["y"])] = task["code"]
             self._clear_ground(task["x"], task["y"])     # trample the growth under & around the tile
         task["done"] = True
+        self._grow_skill(p, "building", CHILD_SKILL_GAIN)   # hands learn the trade by laying tile
         self.version += 1
         if self._site_next_task(site) is None:
             self._finish_site(p, site)
