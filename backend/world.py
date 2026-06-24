@@ -277,6 +277,11 @@ MOVE_PROGRESS_W    = 3.0      # how strongly a step's headway toward the goal ou
 WADE_COST          = 2.0      # extra cost of stepping into a river/shallow (on top of half-speed wading)
 DANGER_AVOID_R     = 4        # tiles from a wolf at which danger starts to bend a path away
 DANGER_AVOID_COST  = 1.6      # danger cost per tile closer than DANGER_AVOID_R to a wolf
+# Site PLANNING: a soul weighs candidate spots and picks the best rather than the first that fits —
+# near enough to water to drink, clear ground, clustered with the band but with room to breathe.
+SITE_WATER_IDEAL   = 14       # water within this many tiles is a comfortable walk to drink (rewarded)
+HOME_MIN_SPACING   = 3        # crowding an existing building closer than this is penalised (room for paths)
+SITE_CANDIDATES_CAP = 60      # how many fitting spots to weigh before committing (bounds the cost)
 
 # ─── Tile building (Phase 3.5) — top-down "blocks" ───────────────────────────
 # People raise REAL buildings the Minecraft way: a building is a footprint of
@@ -3126,40 +3131,82 @@ class World:
                         offs.append((dx, dy))
         return offs
 
+    def _settlement_anchors(self):
+        """The fixed points a soul plans around: every home, plus the common granary — the body
+        of the settlement a new building should sit WITH (clustered) but not ON (spaced)."""
+        anchors = [(int(q["home"][0]), int(q["home"][1])) for q in self.people if q.get("home_struct")]
+        g = self.granary
+        if g.get("x") is not None:
+            anchors.append((int(g["x"]), int(g["y"])))
+        return anchors
+
+    def _score_site(self, cx, cy, anchors, communal: bool, origin=None) -> float:
+        """How GOOD a homesite (cx,cy) is — the heart of planning. Rewards a comfortable walk to
+        water and clear ground; clusters near the band but penalises crowding a neighbour; a
+        communal building is pulled hard toward the centre so it sits among everyone. Crucially it
+        also favours building CLOSE to where the soul already is — a roof raised soon beats a finer
+        plot reached after a long, exposed trek (which was getting people killed by the cold)."""
+        score = 0.0
+        score += 3.0 if self._water_within(cx, cy, SITE_WATER_IDEAL) else -2.5   # don't strand from drink
+        if not (self.veg_sp[cy, cx] in WOOD_IDS and self.veg_growth[cy, cx] > 0.2):
+            score += 0.6                                                          # open ground reads better
+        if origin is not None:
+            score -= (abs(origin[0] - cx) + abs(origin[1] - cy)) * 0.35          # build near — don't trek far
+        if anchors:
+            nd = min(abs(ax - cx) + abs(ay - cy) for ax, ay in anchors)
+            if nd < HOME_MIN_SPACING:
+                score -= (HOME_MIN_SPACING - nd) * 2.0                            # too cramped — leave room
+            ccx = sum(a[0] for a in anchors) / len(anchors)
+            ccy = sum(a[1] for a in anchors) / len(anchors)
+            cdist = abs(ccx - cx) + abs(ccy - cy)
+            score -= cdist * (0.16 if communal else 0.05)                         # cluster (hard for communal)
+        return score
+
     def _found_site(self, p, name: str = "leaf_shelter", communal: bool = False):
-        """Reserve a building footprint near the person's home. Tries the chosen blueprint
-        (falling back to the always-cheap leaf shelter) over a few offsets so a tree/edge
-        doesn't block it forever; on failure sets a cooldown before retrying. A `communal`
-        site (a monument) is NOT the builder's home, so it doesn't move their home anchor."""
+        """PLAN a building footprint: rather than grabbing the first tile that fits, a soul weighs
+        the candidate spots around its anchor and picks the BEST — near enough to water, on clear
+        ground, clustered with the band but with room to breathe (`_score_site`). Falls back to the
+        cheap leaf shelter, then to any dry ground, so it never ends up homeless. A `communal` site
+        (a monument) is NOT the builder's home, so it doesn't move their home anchor."""
         bx, by = p["home"]
         occupied = self._occupied_tiles()
+        anchors = self._settlement_anchors()
         cands = [name] + (["leaf_shelter"] if name != "leaf_shelter" else [])
-        # Prefer a flood-shy, tree-free spot; but a ROOF beats a perfect site — if none is found
-        # nearby, relax to any dry, unclaimed ground (trees there get cleared as it's built) so a
-        # soul never ends up homeless, which is what truly kills (no shelter, no boiled water).
-        for avoid in (WATER_BUILD_BUFFER, 0):
+        for avoid in (WATER_BUILD_BUFFER, 0):            # prefer a flood-shy spot, else any dry ground
             for cand in cands:
                 bp = BLUEPRINTS[cand]
                 bw, bh = len(bp["layout"][0]), len(bp["layout"])
+                best = None                              # (score, ox, oy, tasks, core)
+                fits = 0
                 for off in self._site_offsets():
                     ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
                     tasks, core = self._blueprint_tasks(cand, ox, oy, occupied, avoid=avoid)
                     if not tasks:
                         continue
-                    site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
-                            "ox": int(ox), "oy": int(oy), "by": p["name"],
-                            "insul": float(bp.get("insulation", 1.0)),
-                            "tasks": tasks, "done": False, "t": round(self.clock, 1)}
-                    site["communal"] = bool(communal)
-                    self.sites.append(site)
-                    p["site"] = site["id"]
-                    if not communal:                     # a home moves the builder's anchor; a monument doesn't
-                        home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
-                        p["home"] = (int(home[0]), int(home[1]))
-                    self.version += 1
-                    verb = "began a" if communal else "marked out a"
-                    self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
-                    return
+                    cx, cy = core if core else (ox + bw // 2, oy + bh // 2)
+                    s = self._score_site(cx, cy, anchors, communal, origin=(bx, by))
+                    if best is None or s > best[0]:
+                        best = (s, ox, oy, tasks, core)
+                    fits += 1
+                    if fits >= SITE_CANDIDATES_CAP:      # weighed enough spots — commit to the best
+                        break
+                if best is None:
+                    continue                             # this blueprint doesn't fit anywhere — try the next
+                _, ox, oy, tasks, core = best
+                site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
+                        "ox": int(ox), "oy": int(oy), "by": p["name"],
+                        "insul": float(bp.get("insulation", 1.0)),
+                        "tasks": tasks, "done": False, "t": round(self.clock, 1)}
+                site["communal"] = bool(communal)
+                self.sites.append(site)
+                p["site"] = site["id"]
+                if not communal:                         # a home moves the builder's anchor; a monument doesn't
+                    home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
+                    p["home"] = (int(home[0]), int(home[1]))
+                self.version += 1
+                verb = "began a" if communal else "marked out a"
+                self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
+                return
         # Nowhere fit the footprint — reason about WHY (it'd be in the water / among the trees /
         # no room) so the soul thinks it through rather than silently giving up, then waits.
         bw0, bh0 = len(BLUEPRINTS[name]["layout"][0]), len(BLUEPRINTS[name]["layout"])
@@ -3215,6 +3262,19 @@ class World:
         p["renown"] = p.get("renown", 0.0) + amount
         mind.remember(p, why, min(0.95, 0.5 + amount), "renown", self.clock)
 
+    def _dismantle_site(self, site_id):
+        """Tear down a finished building: pull its blocks and roof off the map and drop the site —
+        used when a soul upgrades, so the old leaf shelter doesn't linger as an abandoned husk."""
+        s = next((q for q in self.sites if q["id"] == site_id), None)
+        if not s:
+            return None
+        for t in s["tasks"]:
+            self.blocks.pop((t["x"], t["y"]), None)
+            self.roofs.discard((t["x"], t["y"]))
+        self.sites = [q for q in self.sites if q is not s]
+        self.version += 1
+        return s
+
     def _finish_site(self, p, site):
         site["done"] = True
         self.version += 1
@@ -3225,6 +3285,13 @@ class World:
             self._earn_renown(p, RENOWN_GAIN["monument"],
                               f"raised a {site['name'].lower()} for us all — a name that will last")
             return
+        # Moving up the dwelling ladder: pull down the old, lesser home now that a finer one
+        # stands, so the settlement isn't littered with the husks of outgrown shelters.
+        old = p.get("home_struct")
+        if old and old != site["id"]:
+            gone = self._dismantle_site(old)
+            if gone:
+                self._note("build", f"{p['name']} pulled down their old {gone['name'].lower()}.")
         p["home_struct"] = site["id"]
         p["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
         self._note("build", f"{p['name']} finished building a {site['name'].lower()}.")
@@ -3382,38 +3449,39 @@ class World:
             p["_wade"] = True
         p["x"], p["y"] = nx, ny
 
-    def _tile_travel_cost(self, nx, ny) -> float:
-        """What it costs to walk onto (nx,ny): cheap on open ground, dearer through water, and
-        dearer still the closer it lies to a prowling wolf — so a path bends toward dry, safe
-        ground without forbidding a ford or a dash past danger when that's the way through."""
-        cost = 1.0
-        if self.water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
-            cost += WADE_COST
-        for wx, wy in getattr(self, "_wolf_pos", ()):  # danger falls off with distance
-            d = abs(wx - nx) + abs(wy - ny)
-            if d < DANGER_AVOID_R:
-                cost += (DANGER_AVOID_R - d) * DANGER_AVOID_COST
-        return cost
-
     def _move_person(self, p, direction):
         """One cost-aware step. Each open neighbour is scored by how much HEADWAY it makes toward
         the goal (weighted) minus its travel cost (slow water, nearby danger). The best wins — so
         a soul rounds lakes and walls instead of freezing against them, skirts wolves, and prefers
         dry ground, while still fording or braving danger when that's plainly the way. With no
-        heading it just ambles to the cheapest open tile nearby."""
+        heading it ROAMS along a persistent wander direction (re-rolled now and then) rather than
+        jittering back and forth between two tiles — so an idle soul actually covers ground."""
         x, y = p["x"], p["y"]
         if p.pop("_wade", False):                          # slogging through water — lose this beat
             return
+        if not direction or (direction[0] == 0 and direction[1] == 0):
+            direction = self._explore_dir(p)               # a steady wander heading, not a dither
         sx = int(np.sign(direction[0])) if direction else 0
         sy = int(np.sign(direction[1])) if direction else 0
+        # Danger only matters when a wolf is actually near THIS soul — resolve the short list ONCE
+        # (the common case is none), so the per-neighbour scoring stays cheap in the hot path.
+        near_wolves = [(wx, wy) for wx, wy in getattr(self, "_wolf_pos", ())
+                       if abs(wx - x) + abs(wy - y) <= DANGER_AVOID_R + 1]
+        water, rng = self.water, self.rng
         best, best_score = None, -1e9
         for dx, dy in _STEP_DIRS:
             nx, ny = x + dx, y + dy
             if not self._passable(nx, ny):
                 continue
-            progress = dx * sx + dy * sy                   # -2..2 (0 when ambling — cost decides)
-            score = (progress * MOVE_PROGRESS_W - self._tile_travel_cost(nx, ny)
-                     + float(self.rng.random()) * 0.5)     # tiny jitter: organic wander, breaks ties
+            cost = 1.0
+            if water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
+                cost += WADE_COST
+            for wx, wy in near_wolves:                      # usually empty → skipped
+                d = abs(wx - nx) + abs(wy - ny)
+                if d < DANGER_AVOID_R:
+                    cost += (DANGER_AVOID_R - d) * DANGER_AVOID_COST
+            progress = dx * sx + dy * sy                    # -2..2 (0 when ambling — cost decides)
+            score = progress * MOVE_PROGRESS_W - cost + float(rng.random()) * 0.5
             if score > best_score:
                 best, best_score = (nx, ny), score
         if best is not None:
@@ -5157,6 +5225,34 @@ if __name__ == "__main__":
           f"tree-preferred-away={tree_preferred_away}, god-anywhere={god_anywhere}, species-cleared={sp_cleared}, "
           f"reason=\"{reason_water}\", granary-relocated={relocated} "
           f"-> {'OK' if siting_ok else 'FAILED'}")
+
+    # PLANNING — a soul WEIGHS where to build: a spot by water beats a parched one, and a spot
+    # with room beats one crowding a neighbour (the scorer behind deliberate settlement layout).
+    parched = None
+    for idx in range(0, len(land), max(1, len(land) // 6000)):
+        ly3, lx3 = land[idx]
+        if not wsi._water_within(int(lx3), int(ly3), SITE_WATER_IDEAL):
+            parched = (int(lx3), int(ly3)); break
+    water_ok = bool(shore and parched
+                    and wsi._score_site(shore[0], shore[1], [], False)
+                    > wsi._score_site(parched[0], parched[1], [], False))
+    crowded = wsi._score_site(shore[0], shore[1], [(shore[0], shore[1])], False)   # nd=0, cramped
+    roomy = wsi._score_site(shore[0], shore[1], [(shore[0] + 10, shore[1])], False)  # spaced
+    spacing_ok = roomy > crowded
+    planning_ok = water_ok and spacing_ok
+    print(f"  planning test: prefers-water={water_ok}, prefers-room (roomy {roomy:.1f}>cramped {crowded:.1f})={spacing_ok} "
+          f"-> {'OK' if planning_ok else 'FAILED'}")
+
+    # DISMANTLE — upgrading pulls down the old home so no abandoned husks linger.
+    fake = {"id": "b_old", "bp": "leaf_shelter", "name": "Leaf Shelter", "ox": 0, "oy": 0, "by": "t",
+            "tasks": [{"x": 300, "y": 300, "code": 2, "layer": "block", "cost": ["leaves", 1], "done": True},
+                      {"x": 301, "y": 300, "code": 1, "layer": "roof", "cost": ["leaves", 1], "done": True}],
+            "done": True, "communal": False}
+    wsi.sites.append(fake); wsi.blocks[(300, 300)] = 2; wsi.roofs.add((301, 300))
+    wsi._dismantle_site("b_old")
+    dismantle_ok = ((300, 300) not in wsi.blocks and (301, 300) not in wsi.roofs
+                    and not any(s["id"] == "b_old" for s in wsi.sites))
+    print(f"  dismantle test: old-home-torn-down={dismantle_ok} -> {'OK' if dismantle_ok else 'FAILED'}")
 
     # Discovery + water bottle: once the band works out the leaf flask, a housed person makes
     # one, fills it at the water, and can then drink from the pack far from any river — the
