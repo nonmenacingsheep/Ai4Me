@@ -4409,6 +4409,11 @@ function renderWorld() {
         ctx.beginPath(); ctx.ellipse(cx, cy, r * 0.8, r * 0.6, 0, 0, 6.283); ctx.fill();
         ctx.fillStyle = '#c9c5bd';
         ctx.beginPath(); ctx.arc(cx, cy - r * 0.8, r * 0.5, 0, 6.283); ctx.fill();
+      } else if (dpt[2] === 'bed') {                          // a little bed (frame + pillow + blanket)
+        const bw = z * 0.7, bh = z * 0.42, bx = cx - bw / 2, by = cy - bh / 2;
+        ctx.fillStyle = '#7a5230'; ctx.fillRect(bx, by, bw, bh);          // wooden frame
+        ctx.fillStyle = '#c2563f'; ctx.fillRect(bx + bw * 0.12, by + bh * 0.18, bw * 0.76, bh * 0.66); // blanket
+        ctx.fillStyle = '#eee6d8'; ctx.fillRect(bx + bw * 0.12, by + bh * 0.18, bw * 0.26, bh * 0.66); // pillow
       } else {                                                // a tuft of flowers
         ctx.fillStyle = '#3f7a44';
         ctx.fillRect(cx - r * 0.25, cy, r * 0.5, r * 1.4);

@@ -460,10 +460,12 @@ COIN_MINT = 20               # coins the inventor of money strikes into being
 ASPIRE_COOLDOWN = 2880.0      # game-min before a soul takes on another beautify-project (~2 days)
 ASPIRE_RING = 2              # how far around home a tidy/garden project reaches
 ASPIRE_MAX_STEPS = 10        # cap a plan's length so a project is bounded work
-ASPIRE_KINDS = ("tidy", "garden", "art")   # the executable project vocabulary the LLM can author into
+ASPIRE_KINDS = ("tidy", "garden", "art", "furnish")   # the executable project vocabulary the LLM can author into
 DEFAULT_ASPIRE_GOAL = {"tidy": "tend the ground around my home",
                        "garden": "plant a garden by my door",
-                       "art": "raise a few standing stones — a mark that is mine"}
+                       "art": "raise a few standing stones — a mark that is mine",
+                       "furnish": "make beds for my family"}
+BED_REST_BONUS = 0.4         # how much resting in a proper BED speeds recovery (on top of the roof)
 # Governance — the band's FIRST NORM: pull your weight at the common granary. Judged once a day on
 # a rolling window. Soft enforcement through reputation only (standing + how others regard you),
 # never punishment — it nudges conduct without ever endangering a life.
@@ -1907,6 +1909,8 @@ class World:
                     mult = 1.0 + (BUILD["rest_sheltered_mult"] - 1.0) * insul
                 elif p["inv"].get("sleeping_mat", 0) > 0:    # a discovered mat helps anywhere
                     mult = 1.0 + (BUILD["rest_sheltered_mult"] - 1.0) * 0.5
+                if self.decor.get((x, y)) == "bed":          # a proper BED — sleep deeper, mend faster
+                    mult += BED_REST_BONUS
                 p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
                 self._refill(p, "stamina", PERSON["restore_rate"] * mult * dt_game_min)
                 if (x, y) == tuple(p["home"]):
@@ -2701,6 +2705,16 @@ class World:
         return "rest", None
 
     # ── Self-authored projects: open-ended goals + a plan over composable skills ──────────────
+    def _home_interior(self, p):
+        """The floor tiles inside a soul's home — where furniture (beds for the family) goes."""
+        s = next((q for q in self.sites if q["id"] == p.get("home_struct")), None)
+        if not s:
+            return []
+        tiles = [(t["x"], t["y"]) for t in s.get("tasks", []) if t.get("code") == BLOCK_FLOOR]
+        if not tiles and s.get("core"):                    # a leaf shelter has just its core
+            tiles = [tuple(s["core"])]
+        return tiles
+
     def _form_aspiration(self, p):
         """A settled, content soul DREAMS UP its own project — tidy the overgrown ground around its
         home, or plant a flower garden by the door — and lays a PLAN of primitive skill-steps to
@@ -2741,6 +2755,12 @@ class World:
             if kind == "tidy" and overgrown:
                 return {"goal": goal, "kind": "tidy", "i": 0,
                         "steps": [["clear", tx, ty] for tx, ty in overgrown[:ASPIRE_MAX_STEPS]]}
+            if kind == "furnish":                            # beds for the family, inside the home
+                bedless = [t for t in self._home_interior(p) if t not in self.decor]
+                if bedless:
+                    n = min(len(bedless), max(1, self._household_size(p)))
+                    return {"goal": goal, "kind": "furnish", "i": 0,
+                            "steps": [["place", tx, ty, "bed"] for tx, ty in bedless[:n]]}
             return None
 
         # An LLM-AUTHORED project (the mind's own reasoned goal — see mind.apply_deliberation) takes
@@ -2752,7 +2772,8 @@ class World:
                 return plan
         # OFFLINE / fallback — choose by TASTE: ambitious raise standing stones, curious plant a
         # garden, the orderly tidy the thicket. Each weighed by temperament, the best-fit chosen.
-        weights = {"art": 0.30 + 0.55 * amb, "garden": 0.30 + 0.55 * cur, "tidy": 0.30 + 0.35 * (1.0 - cur)}
+        weights = {"furnish": 0.34 + 0.10 * self._household_size(p),   # a soul with family wants beds most
+                   "art": 0.30 + 0.55 * amb, "garden": 0.30 + 0.55 * cur, "tidy": 0.30 + 0.35 * (1.0 - cur)}
         for kind in sorted(weights, key=lambda k: -weights[k]):
             plan = build(kind, None)
             if plan:
@@ -2794,7 +2815,8 @@ class World:
         self._bump("aspire_done")
         done = {"garden": "planted a garden by their door",
                 "art": "raised standing stones — a work of their own",
-                "tidy": "tidied the ground around their home"}.get(plan.get("kind"), "made their home finer")
+                "tidy": "tidied the ground around their home",
+                "furnish": "made beds for their family"}.get(plan.get("kind"), "made their home finer")
         mind.remember(p, f"I {plan['goal']} — my home is finer for it", 0.6, "pride", self.clock)
         mind.speak(p, "There — a finer place to call my own.", self.clock)
         self._note("life", f"{p['name']} {done}.")
@@ -4722,6 +4744,12 @@ class World:
         if p.get("hearth"):
             st.add("campfire")
         x, y = p["x"], p["y"]
+        # PERSONAL stations a soul has built for itself (a workbench, then a furnace, …) — usable
+        # when it's home. This is how a soul climbs the tree WITHOUT waiting on a communal workshop:
+        # it makes its own bench first, and each station it builds unlocks the next.
+        if p.get("stations") and p.get("home") \
+                and abs(p["home"][0] - x) + abs(p["home"][1] - y) <= CRAFT_STATION_RANGE:
+            st.update(p["stations"])
         for s in self.sites:
             if not s.get("done"):
                 continue
@@ -4739,23 +4767,39 @@ class World:
         far expeditions that would strand it. Returns a body action, or None if nothing to do here."""
         if p.get("craft"):
             return "craft", None
+        # Climb the tree only from a position of REAL safety — well-watered, well-fed, well-rested.
+        # The tree is a luxury, never a need, so a fetch errand for raws can't strand a soul into
+        # thirst far from the river. (Survival lesson: an uncapped errand will kill — see the
+        # homeward-walk cap. This keeps deep-crafting strictly above the survival floor.)
+        if p.get("thirst", 0) > 0.25 or p.get("hunger", 0) > 0.25 or p.get("fatigue", 0) > 0.55:
+            return None
         stations = self._stations_for(p)
-        if not stations:
-            return None                                        # no bench/forge/fire in reach — nothing deeper
+        built = set(p.get("stations", []))
         inv = p["inv"]
+        tool_rids = {rid for rid, _ in self._TOOLS}
         SAFE_RAWS = {"wood", "stone", "fiber", "leaves"}
         for rid in crafting.TECH_LADDER:
             r = crafting.recipe(rid)
-            if not r or r["out"] in crafting.STATION_KINDS or r["out"] in crafting.STRUCTURE_KINDS:
-                continue                                        # souls don't auto-place stations/structures here
-            cap = 3 if r["tier"] <= 1 else 1                    # keep a few staples; one of the finer goods
-            if inv.get(rid, 0) >= cap:
+            if not r or r["out"] in crafting.STRUCTURE_KINDS:  # don't auto-raise big structures/homes
                 continue
+            if rid in tool_rids and not self._can_make_tools(p):
+                continue                                       # tools are the toolmaker's craft (tool-gating)
+            is_station = r["out"] in crafting.STATION_KINDS
+            if is_station:
+                if r["out"] in built or inv.get(rid, 0) >= 1:  # one of each station is enough — keep climbing
+                    continue
+            else:
+                cap = 3 if r["tier"] <= 1 else 1               # keep a few staples; one of the finer goods
+                if inv.get(rid, 0) >= cap:
+                    continue
             if r["station"] and r["station"] not in stations:
                 continue
             if r["tool"] and r["tool"] not in crafting.tool_caps(inv):
                 continue
             if crafting.can_craft(inv, rid, stations=stations):
+                # CRAFTING A STATION is how the climb begins: the first workbench needs no station,
+                # and once built it unlocks the workbench tier; then a furnace, a kiln, and so on —
+                # a soul builds its own way up the tree, no communal workshop required.
                 if self._begin_craft(p, rid, stations=stations):
                     self._bump("tech_craft")
                     return "craft", None
@@ -4779,6 +4823,12 @@ class World:
         if c["left"] > 0:
             return False
         p["inv"][c["out"]] = p["inv"].get(c["out"], 0) + c["qty"]
+        # A crafted STATION (workbench/furnace/kiln/forge/loom/tannery/anvil) is PLACED at the
+        # soul's home and thereafter opens its tier of the tree there — the soul's own climb.
+        if c["out"] in crafting.STATION_KINDS:
+            stations = p.setdefault("stations", [])
+            if c["out"] not in stations:
+                stations.append(c["out"])
         self.version += 1
         rid = c["rid"]
         p["craft"] = None
@@ -5624,7 +5674,10 @@ if __name__ == "__main__":
     bld["home_struct"] = "s"      # housed builder, knows the recipe, has wood — must NOT make an axe
     bld_makes = wtg._person_build_decide(bld, np.zeros((1, 1), bool), np.zeros((1, 1), bool),
                                          np.zeros((1, 1), bool), np.zeros((1, 1), bool), 0, 0)
-    builder_blocked = not bld.get("craft")        # a non-toolmaker never started an axe
+    craft_rid = (bld.get("craft") or {}).get("rid")
+    builder_blocked = craft_rid not in ("crude_axe", "crude_spear")   # never fashioned a TOOL
+    # (a non-toolmaker may still craft sticks/a workbench to climb the tree — that's intended;
+    #  tool-gating only forbids the toolmaker's own tools)
     tmk_can = wtg._can_make_tools(tmk) and not wtg._can_make_tools(bld)
     # The toolmaker carries two spare axes; standing beside the axe-less builder, one flows over.
     tmk["inv"]["axe"] = 2
