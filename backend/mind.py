@@ -516,6 +516,13 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     # Shelter & ambition — a home of one's own is half survival, half pride. A build already
     # underway adds sunk-cost MOMENTUM so it gets finished rather than dropped mid-wall.
     momentum = BUILD_MOMENTUM * _clamp01(ctx.get("build_progress", 0.0))
+    if p.get("craft"):
+        # A craft already on the bench is sunk-cost too: give it the same finishing pull as a
+        # half-raised build, so a soul SEES THE WORK THROUGH instead of drifting off to puzzle a
+        # new recipe (tinker) or chat and leaving it half-made — which is why a craft with "9 min
+        # of work left" seemed to take forever (the timer only ticks while actually crafting).
+        # Still additive & comfort-bounded below, so a real need preempts and the craft waits.
+        momentum = max(momentum, BUILD_MOMENTUM)
     if p.get("home_struct") is None:
         # A roofless soul out in foul weather feels the lack keenly — hurry the shelter up.
         out.append(("build", None, 0.5 + 0.18 * amb + 0.25 * exposed + momentum,
@@ -544,6 +551,12 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
             comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
             u = (0.22 + 0.22 * amb + 0.12 * cur) * comfort + momentum
             out.append(("build", None, u, proj.get("why") or "I'll make my home finer"))
+        elif p.get("craft"):
+            # No standing dwelling-project, but there's a craft on the bench — the momentum pull
+            # above carries it to completion rather than leaving it half-made for idle puttering.
+            comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+            out.append(("build", None, (0.22 + 0.18 * amb + 0.12 * cur) * comfort + momentum,
+                        "I'll finish what's on my bench"))
         else:
             out.append(("build", None, 0.10 * amb, "I could make my home finer"))
         needy_id, needy_name = ctx.get("needy_id"), ctx.get("needy_name")
@@ -1132,6 +1145,22 @@ if __name__ == "__main__":
     underway = next(u for kd, _, u, _ in drives(bm, {**proj_ctx, "build_progress": 0.9}) if kd == "build")
     assert underway > fresh + 0.2, (fresh, underway)
     print("momentum OK -> mid-build pull", round(fresh, 2), "->", round(underway, 2))
+
+    # CRAFT MOMENTUM — a craft already on the bench out-pulls idle puttering (tinker/socialize), so
+    # a started craft gets FINISHED instead of stalling while the soul wanders off to puzzle or chat.
+    cm = mk("Otta", 0); cm["home_struct"] = "s"
+    cm["traits"] = {"sociability": 0.4, "ambition": 0.4, "curiosity": 0.9, "caution": 0.3}
+    cm["last_social_t"] = 0.0                                  # lonely too — socialize is in play
+    craft_ctx = {**base, "unsolved": ["leaf_flask"], "hardship": 0.1, "others_exist": True}
+    idle_build = next(u for kd, _, u, _ in drives(cm, craft_ctx) if kd == "build")
+    cm["craft"] = {"rid": "plank", "out": "plank", "qty": 1, "left": 9.0, "total": 12.0}
+    busy_d = drives(cm, craft_ctx)
+    bu = next(u for kd, _, u, _ in busy_d if kd == "build")
+    tink = next((u for kd, _, u, _ in busy_d if kd == "tinker"), 0.0)
+    soc = next((u for kd, _, u, _ in busy_d if kd == "socialize"), 0.0)
+    assert bu > idle_build + 0.3 and bu > tink and bu > soc, (idle_build, bu, tink, soc)
+    print("craft-momentum OK -> finish-craft pull", round(bu, 2), "beats idle", round(idle_build, 2),
+          ", tinker", round(tink, 2), "& socialize", round(soc, 2))
 
     # identity crystallizes from what you do: a habitual builder grows ambitious
     builder = mk("Tam", 0)
