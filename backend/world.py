@@ -278,6 +278,9 @@ WADE_COST          = 2.0      # extra cost of stepping into a river/shallow (on 
 LEAF_BRUSH_COST    = 3.5      # leaf panels are passable but "collide": a soul routes round them on dry
                               # ground when it can, brushing through only when that's the easy way — never
                               # BLOCKED (hard-solid leaf forced long detours into water → fatal disease)
+PERSON_AVOID_COST  = 4.0      # souls don't walk INTO each other: a tile another soul stands on costs this
+                              # much more, so they route round one another — but it's soft (never a hard
+                              # block), so a crowd can't deadlock and no one is ever trapped by a neighbour
 # Desire-line PATHS — feet wear trails into the ground along the routes the band actually uses (home↔
 # water↔resources), so a cluster of huts reads as a real village. Purely COSMETIC (no movement effect).
 FOOTFALL_CAP       = 60.0     # most a single tile's wear can build to
@@ -1938,6 +1941,7 @@ class World:
         night = hod < 6 or hod >= 21
         wolf_pos = [(a["x"], a["y"]) for a in self.animals if a["sp"] == "wolf"]
         self._wolf_pos = wolf_pos                          # cached for the danger-aware walker
+        self._person_pos = {(q["x"], q["y"]) for q in self.people}   # so souls route around one another
 
         dead = []
         for p in self.people:
@@ -4755,6 +4759,8 @@ class World:
                 cost -= ROAD_PULL                           # a real ROAD is the easiest going — souls follow it
             elif self.footfall.get((nx, ny), 0.0) >= FOOTFALL_PATH_MIN:
                 cost -= PATH_PULL                           # a worn path is easy going — feet follow the beaten track
+            if (nx, ny) in getattr(self, "_person_pos", ()):
+                cost += PERSON_AVOID_COST                   # don't walk into another soul — route around them
             for wx, wy in near_wolves:                      # usually empty → skipped
                 d = abs(wx - nx) + abs(wy - ny)
                 if d < DANGER_AVOID_R:
