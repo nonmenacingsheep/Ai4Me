@@ -288,6 +288,13 @@ FOOTFALL_SEND_CAP  = 700      # most worn tiles streamed to the renderer (the bu
 PATH_PULL          = 0.4      # how much easier a worn path is to walk — souls FOLLOW the beaten track
                               # (a gentle cost cut: headway still dominates, so they only road-follow
                               # when it doesn't cost real ground — can't strand or force a detour)
+# ROADS — a desire-path trodden hard enough HARDENS into a persistent road (the slime-mold result:
+# near-optimal routes emerge from reinforce-on-use). Roads outlast the daily footfall fade, pull
+# harder than a soft path, and grass over only if abandoned for good — the seed of a road NETWORK.
+ROAD_HARDEN        = 40.0     # footfall wear at which a tile hardens into a road
+ROAD_PULL          = 0.65     # a road is easier going than a soft path (PATH_PULL) — souls follow it
+ROAD_DECAY         = 0.08     # condition a road loses per day when no longer trodden
+ROAD_PRUNE         = 0.15     # condition below which an abandoned road grasses back over
 DANGER_AVOID_R     = 4        # tiles from a wolf at which danger starts to bend a path away
 DANGER_AVOID_COST  = 1.6      # danger cost per tile closer than DANGER_AVOID_R to a wolf
 # Site PLANNING: a soul weighs candidate spots and picks the best rather than the first that fits —
@@ -740,6 +747,7 @@ class World:
         self.decor: dict = {}            # (x,y) -> kind: flowers/art/furniture a soul sets in/around its home
         self.station_objs: dict = {}     # (x,y) -> kind: a crafted workbench/furnace/kiln, PLACED & visible
         self.footfall: dict = {}         # (x,y) -> wear: where feet fall most, worn into visible PATHS (cosmetic)
+        self.roads: dict = {}            # (x,y) -> condition: paths trodden hard enough HARDEN into roads
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
@@ -4743,8 +4751,10 @@ class World:
             elif self.blocks.get((nx, ny)) == BLOCK_LEAF:
                 cost += LEAF_BRUSH_COST                     # soft collision: prefer going ROUND a leaf wall on dry
                                                             # ground; brush through only when that's the easy way
+            elif (nx, ny) in self.roads:
+                cost -= ROAD_PULL                           # a real ROAD is the easiest going — souls follow it
             elif self.footfall.get((nx, ny), 0.0) >= FOOTFALL_PATH_MIN:
-                cost -= PATH_PULL                           # a worn path is easy going — feet follow the road
+                cost -= PATH_PULL                           # a worn path is easy going — feet follow the beaten track
             for wx, wy in near_wolves:                      # usually empty → skipped
                 d = abs(wx - nx) + abs(wy - ny)
                 if d < DANGER_AVOID_R:
@@ -4757,12 +4767,23 @@ class World:
             self._step_to(p, best[0], best[1])
 
     def _decay_footfall(self):
-        """Once a day, worn paths fade a little; tiles trodden below FOOTFALL_PRUNE grass back over
-        and drop off the map — so the path network tracks where the band ACTUALLY goes now."""
+        """Once a day: worn paths fade and grass back over where feet stop falling, while the most
+        beaten tracks HARDEN into persistent ROADS. A road still trodden stays in good repair; an
+        abandoned one slowly grasses over — so the road network tracks where the band really goes."""
         ff = self.footfall
-        if not ff:
-            return
-        self.footfall = {t: w * FOOTFALL_DECAY for t, w in ff.items() if w * FOOTFALL_DECAY >= FOOTFALL_PRUNE}
+        # Harden heavily-trodden ground into roads, and keep trodden roads in repair.
+        for t, w in ff.items():
+            if w >= ROAD_HARDEN:
+                self.roads[t] = 1.0
+        if self.roads:
+            kept = {}
+            for t, cond in self.roads.items():
+                nc = min(1.0, cond + 0.3) if ff.get(t, 0.0) >= FOOTFALL_PATH_MIN else cond - ROAD_DECAY
+                if nc >= ROAD_PRUNE:
+                    kept[t] = nc
+            self.roads = kept
+        if ff:
+            self.footfall = {t: w * FOOTFALL_DECAY for t, w in ff.items() if w * FOOTFALL_DECAY >= FOOTFALL_PRUNE}
 
     def _paths_payload(self):
         """The worn tiles to draw as paths — those above FOOTFALL_PATH_MIN, busiest first, capped,
@@ -5712,6 +5733,7 @@ class World:
             "decor": [[x, y, k] for (x, y), k in self.decor.items()],
             "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
             "paths": self._paths_payload(),
+            "roads": [[x, y, round(c, 2)] for (x, y), c in self.roads.items()],
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -5898,6 +5920,7 @@ class World:
                 "decor": [[x, y, k] for (x, y), k in self.decor.items()],
                 "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
                 "footfall": [[x, y, round(w, 1)] for (x, y), w in self.footfall.items()],
+                "roads": [[x, y, round(c, 2)] for (x, y), c in self.roads.items()],
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -5959,6 +5982,7 @@ class World:
             self.decor = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("decor") or [])}
             self.station_objs = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("stations") or [])}
             self.footfall = {(int(d[0]), int(d[1])): float(d[2]) for d in (meta.get("footfall") or [])}
+            self.roads = {(int(d[0]), int(d[1])): float(d[2]) for d in (meta.get("roads") or [])}
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:

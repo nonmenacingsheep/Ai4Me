@@ -4026,6 +4026,7 @@ function setWorld(s) {
     stone: s.stone || [], stockpiles: s.stockpiles || [], decor: s.decor || [],
     stations: s.stations || [],
     paths: s.paths || [],
+    roads: s.roads || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -4406,6 +4407,17 @@ function renderWorld() {
       if (!onScreen(sx, sy, 1)) continue;
       ctx.fillStyle = `rgba(120,96,64,${0.12 + 0.45 * (pt[2] || 0)})`;   // fainter trail → beaten track
       ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
+    }
+    // ROADS — desire-paths hardened into packed earth; drawn solid over the faint trails so the
+    // band's real arteries read as roads, not just worn grass.
+    for (const rd of (d.roads || [])) {
+      const sx = (rd[0] - cam.camX) * z, sy = (rd[1] - cam.camY) * z;
+      if (!onScreen(sx, sy, 1)) continue;
+      const c = rd[2] || 1;
+      ctx.fillStyle = `rgba(150,124,86,${0.55 + 0.4 * c})`;             // packed-earth road
+      ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
+      ctx.fillStyle = `rgba(108,86,56,${0.3 * c})`;                     // a little edge texture
+      ctx.fillRect(sx, sy, z + 0.5, Math.max(1, z * 0.18));
     }
   }
   // Decor a soul placed to beautify (or mark) its home — flowers and standing-stone cairns.
