@@ -275,6 +275,9 @@ REST_HOMEWARD_MAX  = 8        # at rest, a soul walks home to sleep only if home
 # fords or braves danger when that's clearly the way to its goal.
 MOVE_PROGRESS_W    = 3.0      # how strongly a step's headway toward the goal outweighs its cost
 WADE_COST          = 2.0      # extra cost of stepping into a river/shallow (on top of half-speed wading)
+LEAF_BRUSH_COST    = 3.5      # leaf panels are passable but "collide": a soul routes round them on dry
+                              # ground when it can, brushing through only when that's the easy way — never
+                              # BLOCKED (hard-solid leaf forced long detours into water → fatal disease)
 DANGER_AVOID_R     = 4        # tiles from a wolf at which danger starts to bend a path away
 DANGER_AVOID_COST  = 1.6      # danger cost per tile closer than DANGER_AVOID_R to a wolf
 # Site PLANNING: a soul weighs candidate spots and picks the best rather than the first that fits —
@@ -463,7 +466,7 @@ ASPIRE_MAX_STEPS = 10        # cap a plan's length so a project is bounded work
 ASPIRE_KINDS = ("tidy", "garden", "art", "furnish")   # the executable project vocabulary the LLM can author into
 DEFAULT_ASPIRE_GOAL = {"tidy": "tend the ground around my home",
                        "garden": "plant a garden by my door",
-                       "art": "raise a few standing stones — a mark that is mine",
+                       "art": "raise a grand work the whole band will marvel at",
                        "furnish": "make beds for my family"}
 BED_REST_BONUS = 0.4         # how much resting in a proper BED speeds recovery (on top of the roof)
 # Governance — the band's FIRST NORM: pull your weight at the common granary. Judged once a day on
@@ -2747,9 +2750,17 @@ class World:
             it can't be done here (no bare ground for a garden, etc.). This is what lets the LLM
             author a goal in words: it picks the kind, the body composes the skills."""
             goal = (goal or "").strip() or DEFAULT_ASPIRE_GOAL.get(kind, "make my home finer")
-            if kind == "art" and art_tiles:
-                return {"goal": goal, "kind": "art", "i": 0,
-                        "steps": [["place", tx, ty, "cairn"] for tx, ty in art_tiles]}
+            if kind == "art" and (art_tiles or bare):
+                # A GRAND WORK, not a lone stone: a centrepiece chosen by temperament (the ambitious
+                # raise a soaring OBELISK, the curious carve a TOTEM, others a STATUE) ringed by
+                # standing stones — a little monument by the home for the band to marvel at.
+                spots = art_tiles or bare
+                cx0, cy0 = spots[0]
+                center = "obelisk" if amb >= 0.55 else ("totem" if cur >= 0.55 else "statue")
+                steps = [["place", cx0, cy0, center]]
+                ring = [t for t in bare if t != (cx0, cy0)][:4]
+                steps += [["place", rx, ry, "cairn"] for rx, ry in ring]
+                return {"goal": goal, "kind": "art", "i": 0, "steps": steps}
             if kind == "garden" and bare:
                 return {"goal": goal, "kind": "garden", "i": 0,
                         "steps": [["place", tx, ty, "flower"] for tx, ty in bare[:6]]}
@@ -2818,11 +2829,15 @@ class World:
         p["aspire_cd"] = self.clock + ASPIRE_COOLDOWN
         self._bump("aspire_done")
         done = {"garden": "planted a garden by their door",
-                "art": "raised standing stones — a work of their own",
+                "art": "raised a grand work — a wonder of their own making",
                 "tidy": "tidied the ground around their home",
                 "furnish": "made beds for their family"}.get(plan.get("kind"), "made their home finer")
         mind.remember(p, f"I {plan['goal']} — my home is finer for it", 0.6, "pride", self.clock)
-        mind.speak(p, "There — a finer place to call my own.", self.clock)
+        grand = plan.get("kind") == "art"
+        mind.speak(p, "Let them come and marvel at what I've raised!" if grand
+                   else "There — a finer place to call my own.", self.clock)
+        if grand:                                            # a wonder lifts standing more than tidying does
+            self._earn_renown(p, RENOWN_GAIN.get("build", 0.08), "raised a wonder the band admires")
         self._note("life", f"{p['name']} {done}.")
         self._earn_renown(p, RENOWN_GAIN.get("gift", 0.05) * 0.5, "made a finer home — a quiet pride")
 
@@ -4251,7 +4266,8 @@ class World:
 
     def _passable(self, nx, ny) -> bool:
         """A tile a person may step onto: in bounds, not deep water (rivers/shallows are fordable),
-        and not a solid wall."""
+        and not a solid wall. Leaf panels stay PASSABLE (a soul is never trapped behind flimsy
+        leaves) but the mover charges a brush cost so they're routed-around — soft collision."""
         return (self._in(nx, ny) and self.water[ny, nx] in FORDABLE_WATER
                 and self.blocks.get((nx, ny)) not in SOLID_BLOCKS)
 
@@ -4290,6 +4306,9 @@ class World:
             cost = 1.0
             if water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
                 cost += WADE_COST
+            elif self.blocks.get((nx, ny)) == BLOCK_LEAF:
+                cost += LEAF_BRUSH_COST                     # soft collision: prefer going ROUND a leaf wall on dry
+                                                            # ground; brush through only when that's the easy way
             for wx, wy in near_wolves:                      # usually empty → skipped
                 d = abs(wx - nx) + abs(wy - ny)
                 if d < DANGER_AVOID_R:

@@ -581,8 +581,9 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
             if comfort > 0.55:
                 # Pitched so a content, curious/ambitious soul will sometimes choose to beautify
                 # over merely polishing its home — beauty as a real rival to utility — and momentum
-                # carries a started project to completion.
-                u = (0.30 + 0.20 * cur + 0.12 * amb) * comfort
+                # carries a started project to completion. Ambition pulls as hard as curiosity now,
+                # so the ambitious reach to raise a GRAND WORK (an obelisk/totem/statue) of their own.
+                u = (0.30 + 0.18 * cur + 0.18 * amb) * comfort
                 if ctx.get("aspiring"):
                     u += 0.20
                 out.append(("aspire", None, u, ctx.get("aspire_why", "I'd make my home a finer place")))

@@ -4429,6 +4429,34 @@ function renderWorld() {
         ctx.fillStyle = '#6e4a26'; ctx.fillRect(wx, wy, ww, wh);                    // body
         ctx.fillStyle = '#8a6038'; ctx.fillRect(wx, wy, ww, wh * 0.4);              // domed lid
         ctx.fillStyle = '#d9c27a'; ctx.fillRect(cx - ww * 0.06, wy + wh * 0.34, ww * 0.12, wh * 0.3); // brass clasp
+      } else if (dpt[2] === 'obelisk') {                      // a grand work: a soaring stone spire
+        const w = z * 0.26, h = z * 0.95, bx = cx - w / 2, by = cy - h * 0.55;
+        ctx.fillStyle = '#b9b3a6';
+        ctx.beginPath(); ctx.moveTo(bx, by + h); ctx.lineTo(bx + w, by + h);
+        ctx.lineTo(cx + w * 0.2, by + h * 0.16); ctx.lineTo(cx, by); ctx.lineTo(cx - w * 0.2, by + h * 0.16);
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.stroke();
+      } else if (dpt[2] === 'totem') {                        // a carved, banded totem pole
+        const w = z * 0.34, h = z * 0.9, bx = cx - w / 2, by = cy - h * 0.55;
+        const bands = ['#9c4a2f', '#2f6f8c', '#c8a23a', '#3f7a44'];
+        for (let i = 0; i < 4; i++) { ctx.fillStyle = bands[i]; ctx.fillRect(bx, by + h * i / 4, w, h / 4); }
+        ctx.fillStyle = '#1c1c1c';                            // a little carved face
+        ctx.fillRect(bx + w * 0.2, by + h * 0.08, w * 0.18, h * 0.08);
+        ctx.fillRect(bx + w * 0.62, by + h * 0.08, w * 0.18, h * 0.08);
+      } else if (dpt[2] === 'statue') {                       // a figure on a pedestal
+        const w = z * 0.5, ph = z * 0.18, bx = cx - w / 2, by = cy + z * 0.2;
+        ctx.fillStyle = '#9a9388'; ctx.fillRect(bx, by, w, ph);                     // pedestal
+        ctx.fillStyle = '#c9c3b6';
+        ctx.beginPath(); ctx.arc(cx, by - z * 0.28, z * 0.12, 0, 6.283); ctx.fill();   // head
+        ctx.fillRect(cx - z * 0.12, by - z * 0.18, z * 0.24, z * 0.4);               // body
+      } else if (dpt[2] === 'fountain') {                     // a basin with a jet of water
+        const r2 = z * 0.4;
+        ctx.fillStyle = '#8f8a80';
+        ctx.beginPath(); ctx.ellipse(cx, cy + r2 * 0.3, r2, r2 * 0.55, 0, 0, 6.283); ctx.fill();
+        ctx.fillStyle = '#5fb6e6';
+        ctx.beginPath(); ctx.ellipse(cx, cy + r2 * 0.3, r2 * 0.7, r2 * 0.38, 0, 0, 6.283); ctx.fill();
+        ctx.strokeStyle = '#9fd8f5'; ctx.lineWidth = Math.max(1, z * 0.05);
+        ctx.beginPath(); ctx.moveTo(cx, cy + r2 * 0.1); ctx.lineTo(cx, cy - r2 * 0.5); ctx.stroke();
       } else {                                                // a tuft of flowers
         ctx.fillStyle = '#3f7a44';
         ctx.fillRect(cx - r * 0.25, cy, r * 0.5, r * 1.4);
