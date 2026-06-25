@@ -452,6 +452,17 @@ POWER_RADIUS = 7                   # tiles a fed power node energizes around its
 POWER_LINK = 9                     # a pole within this of the fed grid joins it and relays onward
 POWER_SHELTER_BONUS = 0.35         # how much an electrified (wired) home adds to its shelter
 POWER_CRAFT_SPEED = 1.5            # electric tools: crafting in a powered area runs this much faster
+# Reactor MELTDOWN (the modern era's stakes) — a reactor needs water within REACTOR_COOLING_RANGE to
+# stay cooled. Sited far from any, heat builds until it melts down in fire: it's destroyed, the ground
+# is scorched, and the band scatters in terror (the warned-of consequence made real). Only god-spawned
+# reactors exist, so this is entirely inert until a god places one carelessly — never touches the band.
+REACTOR_HEAT_RATE     = 0.02       # heat a dry (uncooled) reactor gains per game-minute
+REACTOR_COOL_RATE     = 0.06       # heat a water-cooled reactor sheds per game-minute (cools faster than heats)
+REACTOR_MELTDOWN_HEAT = 100.0      # heat at which an uncooled reactor melts down (~3.5 game-days dry)
+MELTDOWN_SCORCH_R     = 3          # tiles of ground scorched black around the ruin
+MELTDOWN_TERROR_R     = 9          # tiles within which souls are thrown into terror and flee
+MELTDOWN_SINGE_R      = 2          # tiles within which a soul is singed (a capped fright, never slain)
+MELTDOWN_SINGE        = 0.3        # hp a singed soul loses, floored so the blast can't kill outright
 # Awe & wonder — a structure FAR beyond the band's craft (a generator/reactor) is perceived as the
 # sublime: the curious approach to STUDY it, the cautious recoil. Study slowly yields INSIGHT, and
 # enough insight lets a soul begin to puzzle out the first secret of the strangers' machines.
@@ -1266,6 +1277,7 @@ class World:
         self._update_weather()
         self._tick_wildlife(dt_game_min)
         self._tick_people(dt_game_min)
+        self._tick_reactors(dt_game_min)                           # a carelessly-sited reactor heats toward meltdown
         if self.clock - self._last_eco >= 60.0:                    # one game-hour elapsed
             self._tick_ecology_active()
             self._last_eco = self.clock
@@ -1490,6 +1502,52 @@ class World:
         """Is tile (x,y) within reach of the electrical grid (a generator or a fed pole)?"""
         self._ensure_power()
         return any(abs(x - e[0]) + abs(y - e[1]) <= POWER_RADIUS for e in self._powered_nodes)
+
+    def _tick_reactors(self, dt_game_min: float):
+        """A god-spawned REACTOR runs hot. Within reach of water it stays cooled; sited far from any,
+        it has no cooling and HEAT builds until it MELTS DOWN. Entirely inert unless a god has placed
+        a reactor (none exist in a natural band), so it never touches survival — it's the stakes the
+        modern era brings when a machine is sited carelessly."""
+        structs = getattr(self, "structures", None)
+        if not structs:
+            return
+        melted = []
+        for s in structs:
+            if s.get("kind") != "reactor":
+                continue
+            if self._water_within(s["x"], s["y"], REACTOR_COOLING_RANGE):
+                s["heat"] = max(0.0, s.get("heat", 0.0) - dt_game_min * REACTOR_COOL_RATE)
+            else:
+                s["heat"] = s.get("heat", 0.0) + dt_game_min * REACTOR_HEAT_RATE
+                if s["heat"] >= REACTOR_MELTDOWN_HEAT:
+                    melted.append(s)
+        for s in melted:
+            self._reactor_meltdown(s)
+
+    def _reactor_meltdown(self, s):
+        """The uncooled reactor bursts: it is destroyed (and falls off the power grid), the ground
+        around it is scorched black, and every soul near it is thrown into terror — singed if very
+        close (a capped fright, never slain), and left certain they were RIGHT to fear the thing."""
+        rx, ry = s["x"], s["y"]
+        self.structures = [q for q in self.structures if q is not s]
+        self.version += 1                                    # drops it from the grid (_ensure_power rebuilds)
+        self._note("disaster", f"the reactor ran too hot with no water to cool it — it has MELTED DOWN "
+                               f"in fire and ruin at ({rx},{ry}).")
+        for dy in range(-MELTDOWN_SCORCH_R, MELTDOWN_SCORCH_R + 1):
+            for dx in range(-MELTDOWN_SCORCH_R, MELTDOWN_SCORCH_R + 1):
+                tx, ty = rx + dx, ry + dy
+                if self._in(tx, ty) and abs(dx) + abs(dy) <= MELTDOWN_SCORCH_R:
+                    self.decor[(tx, ty)] = "scorch"          # blackened earth where it stood
+        for p in self.people:
+            d = abs(p["x"] - rx) + abs(p["y"] - ry)
+            if d > MELTDOWN_TERROR_R:
+                continue
+            mind.remember(p, "the strangers' machine burst in fire — I was right to fear it",
+                          0.95, "danger", self.clock)
+            if d <= MELTDOWN_SINGE_R:
+                p["hp"] = max(0.3, p.get("hp", 1.0) - MELTDOWN_SINGE)   # singed, not slain
+            mind.speak(p, "The machine — it's burning! Run!", self.clock)
+        self._bump("meltdown")
 
     def _nearest_wonder(self, p):
         """The nearest structure FAR beyond the band's craft (a generator/reactor) within sight,

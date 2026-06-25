@@ -4415,7 +4415,12 @@ function renderWorld() {
       const sx = (dpt[0] - cam.camX) * z, sy = (dpt[1] - cam.camY) * z;
       if (!onScreen(sx, sy, 1)) continue;
       const cx = sx + z / 2, cy = sy + z / 2, r = Math.max(1, z * 0.16);
-      if (dpt[2] === 'cairn') {                               // a little stack of standing stones
+      if (dpt[2] === 'scorch') {                              // blackened earth where a reactor melted down
+        ctx.fillStyle = 'rgba(24,18,16,0.72)';
+        ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
+        ctx.fillStyle = 'rgba(80,40,20,0.35)';
+        ctx.beginPath(); ctx.arc(cx, cy, z * 0.3, 0, 6.283); ctx.fill();
+      } else if (dpt[2] === 'cairn') {                        // a little stack of standing stones
         ctx.fillStyle = '#9a9690';
         ctx.beginPath(); ctx.ellipse(cx, cy + r * 0.9, r * 1.1, r * 0.7, 0, 0, 6.283); ctx.fill();
         ctx.fillStyle = '#b4b0a8';
