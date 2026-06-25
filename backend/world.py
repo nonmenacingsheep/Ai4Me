@@ -278,6 +278,13 @@ WADE_COST          = 2.0      # extra cost of stepping into a river/shallow (on 
 LEAF_BRUSH_COST    = 3.5      # leaf panels are passable but "collide": a soul routes round them on dry
                               # ground when it can, brushing through only when that's the easy way — never
                               # BLOCKED (hard-solid leaf forced long detours into water → fatal disease)
+# Desire-line PATHS — feet wear trails into the ground along the routes the band actually uses (home↔
+# water↔resources), so a cluster of huts reads as a real village. Purely COSMETIC (no movement effect).
+FOOTFALL_CAP       = 60.0     # most a single tile's wear can build to
+FOOTFALL_DECAY     = 0.78     # daily fade, so abandoned routes grass back over
+FOOTFALL_PRUNE     = 1.5      # drop a tile from the map once its wear fades below this
+FOOTFALL_PATH_MIN  = 9.0      # wear at which a tile reads as a worn path (sent to the renderer)
+FOOTFALL_SEND_CAP  = 700      # most worn tiles streamed to the renderer (the busiest win)
 DANGER_AVOID_R     = 4        # tiles from a wolf at which danger starts to bend a path away
 DANGER_AVOID_COST  = 1.6      # danger cost per tile closer than DANGER_AVOID_R to a wolf
 # Site PLANNING: a soul weighs candidate spots and picks the best rather than the first that fits —
@@ -704,6 +711,7 @@ class World:
         self.granary: dict = {"store": {}, "x": None, "y": None}  # the band's shared common store
         self.decor: dict = {}            # (x,y) -> kind: flowers/art/furniture a soul sets in/around its home
         self.station_objs: dict = {}     # (x,y) -> kind: a crafted workbench/furnace/kiln, PLACED & visible
+        self.footfall: dict = {}         # (x,y) -> wear: where feet fall most, worn into visible PATHS (cosmetic)
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
@@ -1256,6 +1264,7 @@ class World:
         if self.clock - self._last_pest >= 1440.0:                 # vermin check once a game-day (P5)
             self._tick_pests()
             self._tick_governance()                                # judge the commons-norm once a day
+            self._decay_footfall()                                 # worn paths fade where feet stop falling
             self._last_pest = self.clock
         season_now = self.season()
         if season_now != getattr(self, "_last_season", season_now):
@@ -4430,10 +4439,15 @@ class World:
 
     def _step_to(self, p, nx, ny):
         """Commit a step. Wading water wets the soul AND slows them: stepping into a river/shallow
-        sets a flag that costs them their next move beat (half-speed through water)."""
+        sets a flag that costs them their next move beat (half-speed through water). Each footfall
+        on dry land wears the ground a little — the band treads its routes into visible paths."""
         if self.water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
             p["wet_until"] = self.clock + WET_DURATION
             p["_wade"] = True
+        else:                                                  # dry ground remembers where feet fall
+            ff = self.footfall
+            w = ff.get((nx, ny), 0.0) + 1.0
+            ff[(nx, ny)] = w if w < FOOTFALL_CAP else FOOTFALL_CAP
         p["x"], p["y"] = nx, ny
 
     def _move_person(self, p, direction):
@@ -4476,6 +4490,21 @@ class World:
                 best, best_score = (nx, ny), score
         if best is not None:
             self._step_to(p, best[0], best[1])
+
+    def _decay_footfall(self):
+        """Once a day, worn paths fade a little; tiles trodden below FOOTFALL_PRUNE grass back over
+        and drop off the map — so the path network tracks where the band ACTUALLY goes now."""
+        ff = self.footfall
+        if not ff:
+            return
+        self.footfall = {t: w * FOOTFALL_DECAY for t, w in ff.items() if w * FOOTFALL_DECAY >= FOOTFALL_PRUNE}
+
+    def _paths_payload(self):
+        """The worn tiles to draw as paths — those above FOOTFALL_PATH_MIN, busiest first, capped,
+        each with a 0..1 intensity so the renderer can fade a faint trail into a beaten track."""
+        worn = [(t, w) for t, w in self.footfall.items() if w >= FOOTFALL_PATH_MIN]
+        worn.sort(key=lambda kw: -kw[1])
+        return [[t[0], t[1], round(min(1.0, w / FOOTFALL_CAP), 2)] for t, w in worn[:FOOTFALL_SEND_CAP]]
 
     # ── physiological reserves (the body layer beneath comfort) ──────────────────
     def _ensure_body(self, p):
@@ -5417,6 +5446,7 @@ class World:
             "stockpiles": self._stockpiles_payload(),
             "decor": [[x, y, k] for (x, y), k in self.decor.items()],
             "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
+            "paths": self._paths_payload(),
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -5602,6 +5632,7 @@ class World:
                 "berry_bushes": self.berry_bushes, "granary": self.granary,
                 "decor": [[x, y, k] for (x, y), k in self.decor.items()],
                 "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
+                "footfall": [[x, y, round(w, 1)] for (x, y), w in self.footfall.items()],
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -5662,6 +5693,7 @@ class World:
             self.granary = meta.get("granary") or {"store": {}, "x": None, "y": None}
             self.decor = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("decor") or [])}
             self.station_objs = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("stations") or [])}
+            self.footfall = {(int(d[0]), int(d[1])): float(d[2]) for d in (meta.get("footfall") or [])}
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:

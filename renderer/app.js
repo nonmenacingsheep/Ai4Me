@@ -4025,6 +4025,7 @@ function setWorld(s) {
     ore: s.ore || [], berries: s.berries || [], blockNames: s.block_names || {},
     stone: s.stone || [], stockpiles: s.stockpiles || [], decor: s.decor || [],
     stations: s.stations || [],
+    paths: s.paths || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -4394,6 +4395,17 @@ function renderWorld() {
       for (const [ddx, ddy] of [[-1, -0.4], [1, -0.4], [0, 0.7]]) {
         ctx.beginPath(); ctx.arc(cx + ddx * r, cy + ddy * r, r, 0, 6.283); ctx.fill();
       }
+    }
+  }
+  // Desire-line PATHS — the ground worn bare along the routes the band actually treads (home,
+  // water, the fields). Drawn first, as a dirt tint under everything, so a settlement reads as a
+  // village laced by footpaths. Cosmetic only.
+  if (z >= 2) {
+    for (const pt of (d.paths || [])) {
+      const sx = (pt[0] - cam.camX) * z, sy = (pt[1] - cam.camY) * z;
+      if (!onScreen(sx, sy, 1)) continue;
+      ctx.fillStyle = `rgba(120,96,64,${0.12 + 0.45 * (pt[2] || 0)})`;   // fainter trail → beaten track
+      ctx.fillRect(sx, sy, z + 0.5, z + 0.5);
     }
   }
   // Decor a soul placed to beautify (or mark) its home — flowers and standing-stone cairns.
