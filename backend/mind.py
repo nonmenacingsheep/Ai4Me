@@ -53,6 +53,9 @@ STORY_CHANCE = 0.35          # prob. a meeting with a soul of standing passes on
 
 # Goods a person will barter, and which need each relieves (drives who wants what).
 TRADEABLE = ("food", "wood", "stone", "fiber", "leaves")
+# Once MONEY exists, a good can be BOUGHT for coin (its rough worth) instead of bartered like-for-
+# like — what gives coin somewhere to go. Scarcer goods (stone, mined) cost a little more.
+GOOD_PRICE = {"food": 1, "wood": 1, "leaves": 1, "fiber": 1, "stone": 2}
 
 # ─── the thinking-civilization core: drives, temperament, intentions ─────────────────
 # This is a "mind-first" sim: survival is not a hardcoded priority chain but ONE drive
@@ -357,6 +360,10 @@ def encounter(p: dict, other: dict, clock: float, rng) -> list[str]:
         trade = _try_trade(p, other, ra, rb, clock)
         if trade:
             events.append(trade)
+        else:                                            # no like-for-like swap — try a COIN sale
+            buy = _try_buy(p, other, ra, rb, clock) or _try_buy(other, p, ra, rb, clock)
+            if buy:
+                events.append(buy)
     return events
 
 
@@ -431,6 +438,35 @@ def _try_trade(p: dict, other: dict, ra: dict, rb: dict, clock: float) -> str | 
     remember(p, f"traded {give} to {other['name']} for {get}", 0.6, "trade", clock)
     remember(other, f"traded {get} to {p['name']} for {give}", 0.6, "trade", clock)
     return f"{p['name']} traded {give} with {other['name']} for {get}."
+
+
+def _try_buy(buyer: dict, seller: dict, ra: dict, rb: dict, clock: float) -> str | None:
+    """A coin SALE: once a soul holds money, it can BUY a good it lacks from a neighbour who has it
+    to spare, paying coin for it instead of swapping like-for-like. This is what gives money
+    somewhere to GO — a market in miniature, emerging wherever a coin-holder meets a surplus. (ra/rb
+    are buyer→seller / seller→buyer; coin presence implies money was already invented.)"""
+    bi = buyer.get("inv", {})
+    if bi.get("coin", 0) <= 0:                            # no coin, no market — inert until money exists
+        return None
+    if ra["trust"] < TRADE_TRUST_MIN or rb["trust"] < TRADE_TRUST_MIN:
+        return None
+    good = _surplus_the_other_wants(seller, buyer)        # seller has it spare; buyer is short of it
+    if not good:
+        return None
+    price = GOOD_PRICE.get(good, 1)
+    if bi.get("coin", 0) < price:
+        return None
+    bi["coin"] -= price
+    if bi["coin"] <= 0:
+        bi.pop("coin", None)
+    seller["inv"]["coin"] = seller["inv"].get("coin", 0) + price
+    seller["inv"][good] = seller["inv"].get(good, 0) - 1
+    buyer["inv"][good] = bi.get(good, 0) + 1
+    ra["trades"] += 1; rb["trades"] += 1
+    _adjust(ra, TRUST_TRADE_GAIN, 0.10); _adjust(rb, TRUST_TRADE_GAIN, 0.10)
+    remember(buyer, f"bought {good} from {seller['name']} for {price} coin", 0.6, "trade", clock)
+    remember(seller, f"sold {good} to {buyer['name']} for {price} coin", 0.62, "trade", clock)
+    return f"{buyer['name']} bought {good} from {seller['name']} for {price} coin."
 
 
 def _surplus_the_other_wants(giver: dict, taker: dict) -> str | None:
@@ -1102,6 +1138,24 @@ if __name__ == "__main__":
     assert b["inv"]["wood"] >= 1 and c["inv"]["food"] >= 1, (b["inv"], c["inv"])
     assert b["rel"][c["id"]]["trust"] > 0.5 and b["rel"][c["id"]]["trades"] >= 1
     print("trade OK ->", [e for e in evs if "traded" in e][:1])
+
+    # MARKET — once a soul holds COIN it can BUY a good it lacks for coin (money has somewhere to go);
+    # a soul with no coin buys nothing (the market is inert until money is invented).
+    buyer = mk("Buyer", 0, {"coin": 5}); seller = mk("Seller", 1, {"food": 8})
+    buyer["home_struct"] = seller["home_struct"] = "s_y"
+    rab = _rel(buyer, seller, clock); rba = _rel(seller, buyer, clock); rab["trust"] = rba["trust"] = 0.85
+    mevs = []
+    for _ in range(3):
+        mevs += encounter(buyer, seller, clock, rng)
+    assert buyer["inv"].get("food", 0) >= 1 and buyer["inv"].get("coin", 0) < 5, buyer["inv"]
+    assert seller["inv"].get("coin", 0) >= 1, seller["inv"]
+    poor = mk("Poor", 0, {}); selr = mk("Selr", 1, {"food": 8})
+    poor["home_struct"] = selr["home_struct"] = "s_z"
+    rp = _rel(poor, selr, clock); rs = _rel(selr, poor, clock); rp["trust"] = rs["trust"] = 0.85
+    for _ in range(3):
+        encounter(poor, selr, clock, rng)
+    assert poor["inv"].get("food", 0) == 0, "no coin -> no purchase"
+    print("market OK ->", [e for e in mevs if "bought" in e][:1])
 
     # gossip spreads a name to someone who never met the third party
     d = mk("Dara", 5)
