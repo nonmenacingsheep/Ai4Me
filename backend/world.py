@@ -485,6 +485,12 @@ RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05, help=0.0
 HELP_RANGE = 30               # how near a band-mate's unfinished build a housed soul will go to help
 COMMISSION_FEE = 4            # food a soul pays the builder who raised its home — the seed of a labor economy
 COMMISSION_COIN = 2          # …or, once money exists, this many coins instead
+# A CONTRACTOR'S commission: a builder who raises a WHOLE home for another (not just a lent hand) is
+# paid more — the deliberate "build a home for others for something in return". Bigger than the helper
+# fee; coin once money exists, else food.
+CONTRACTOR_FEE  = 12         # food a client pays the builder who raised their whole home
+CONTRACTOR_COIN = 6          # …or, once money exists, this many coins instead
+COMMISSION_RANGE = 16        # how near an unhoused soul must be for a settled builder to offer to build for them
 MONEY_TRADE_XP = 6           # trades under a soul's belt before it could conceive of MONEY
 COIN_MINT = 20               # coins the inventor of money strikes into being
 # Self-authored projects ("aspirations") — a settled, content soul forms its OWN goal beyond mere
@@ -2091,8 +2097,10 @@ class World:
                     self._begin_craft(p, "crude_axe")
                 self._advance_craft(p, dt_game_min)
             elif action == "found_site":
+                cli = next((q for q in self.people if q["id"] == p.pop("next_client", None)), None)
                 self._found_site(p, p.pop("next_bp", "leaf_shelter"),
-                                 communal=p.pop("next_communal", False), rung=p.pop("next_rung", None))
+                                 communal=p.pop("next_communal", False), rung=p.pop("next_rung", None),
+                                 client=cli)
             elif action == "build_block":
                 # Laying a tile is real labour — dwell on it. (The cabin self-test calls
                 # _build_next_block directly, bypassing this timer, so it stays one-per-call.)
@@ -3063,6 +3071,21 @@ class World:
             act = self._pursue_building(p, proj["bp"], getters, communal=True)
             if act:
                 return act
+        # A COMMISSION: the builder raises a whole home FOR a client (owner = the client), built in
+        # the builder's own settlement; the client moves in and pays the builder when it's done.
+        if proj and proj.get("kind") == "commission":
+            client = next((q for q in self.people if q["id"] == proj.get("client")), None)
+            # Client gone, or already housed properly some other way → abandon the job and release any
+            # half-built site, so the builder is never stuck forever on a commission it can't finish.
+            if client is None or self._current_dwelling_bp(client) in ("hut", "cabin"):
+                p.pop("project", None)
+                site = self._person_site(p)
+                if site is not None and site.get("commission"):
+                    p.pop("site", None)
+            else:
+                act = self._pursue_building(p, proj["bp"], getters, client=client)
+                if act:
+                    return act
 
         # With home, gear, hearth and dwelling all handled, a settled soul beside a station turns
         # to the DEEP craft tree — planks, tools, cooking, pottery, and (with ore to hand) metal.
@@ -3247,11 +3270,12 @@ class World:
                 return ("eat" if want == "food" else "drink_safe"), None
         return None
 
-    def _pursue_building(self, p, bp_name, getters, communal: bool = False, rung=None):
+    def _pursue_building(self, p, bp_name, getters, communal: bool = False, rung=None, client=None):
         """Raise a building from a blueprint tile by tile: found the footprint at home, then
         forage each tile's material and lay it. Returns a body action, or None when there's
         nothing to do this beat (between steps, or just finished). Shared by the first
-        lean-to, every dwelling-ladder upgrade, and the communal monument."""
+        lean-to, every dwelling-ladder upgrade, the communal monument, and a COMMISSION (a home
+        built for a `client`, who becomes its owner)."""
         x, y = p["x"], p["y"]
         inv = p["inv"]
         hx, hy = p["home"]
@@ -3263,6 +3287,7 @@ class World:
                 p["next_bp"] = bp_name                          # the handler founds this blueprint
                 p["next_communal"] = communal
                 p["next_rung"] = rung
+                p["next_client"] = client["id"] if client else None   # owner-to-be, for a commission
                 return "found_site", None
             return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         task = self._site_next_task(site)
@@ -3445,23 +3470,26 @@ class World:
             return a + b
         return 1
 
-    def _design_dwelling(self, p, rung: str) -> str:
-        """A soul DESIGNS its own home. If the god has drawn a fitting blueprint it builds THAT (a
-        template prior); otherwise it generates one parametrically — a timber room sized to its
-        household and shaped by its building skill (bigger and finer the more of each), or an
-        all-leaf house when wood is scarce. Validated later by the same placement logic."""
-        prior = self._home_template_for(p)
-        if prior:
-            self._bump("template_prior")
-            return prior
-        fam = self._household_size(p)
-        skill = (p.get("skills") or {}).get("building", 0.0)
+    def _design_dwelling(self, p, rung: str, client=None) -> str:
+        """A soul DESIGNS a home. For its OWN, a fitting god template is used if there is one;
+        otherwise it generates one parametrically — a timber room sized to the household and shaped
+        by the BUILDER's skill, or an all-leaf house when wood is scarce. With `client` set the home
+        is designed for THAT soul instead (a commission): sized to the client's household, keyed to
+        them, and always timber (a proper home is a real upgrade — the builder gathers the wood)."""
+        if client is None:
+            prior = self._home_template_for(p)
+            if prior:
+                self._bump("template_prior")
+                return prior
+        who = client if client is not None else p              # the home's future OWNER (sizes the household)
+        fam = self._household_size(who)
+        skill = (p.get("skills") or {}).get("building", 0.0)   # but the BUILDER's hands shape it
         # Material is chosen for the WHOLE house, never mixed: build in timber only when wood is
         # actually to hand (carried, or trees near home); otherwise raise a coherent all-LEAF house
         # rather than a half-finished timber one waiting on wood that isn't coming.
         hx, hy = p["home"]
         timber = p["inv"].get("wood", 0) >= 4 or self._wood_within(hx, hy, WOOD_BUILD_RANGE)
-        if not timber:
+        if not timber and client is None:
             return self._design_leaf_home(p, fam)
         if rung == "hut":                                       # a modest first proper home
             iw = max(1, min(3, 1 + fam // 2))
@@ -3489,10 +3517,28 @@ class World:
             rows[Ht // 2][Wt - 1] = "O"
         layout = ["".join(r) for r in rows]
         kind = "Hut" if rung == "hut" else "Cabin"
-        nm = f"{p['name']}'s {kind}" + (f" ({rooms} rooms)" if rooms > 1 else "")
-        bid = f"home_{p['id']}"
+        nm = f"{who['name']}'s {kind}" + (f" ({rooms} rooms)" if rooms > 1 else "")
+        bid = f"home_{who['id']}"                               # keyed to the OWNER (a commission won't clobber the builder's own)
         BLUEPRINTS[bid] = dict(name=nm, roof=True, insulation=1.0, layout=layout)
         return bid
+
+    def _commission_client(self, builder):
+        """The nearest leaf-sheltered adult a settled BUILDER could offer to raise a proper home
+        for — or None if there's no one to build for (or someone's already on it). Targets only
+        souls who've already got a humble shelter (never the homeless-survival path), so a
+        commission is a pure UPGRADE for a fee and can never leave a soul worse off."""
+        bx, by = builder["x"], builder["y"]
+        claimed = {s.get("owner") for s in self.sites if s.get("commission") and not s.get("done")}
+        best, best_d = None, COMMISSION_RANGE + 1
+        for q in self.people:
+            if q is builder or q["id"] in claimed or q.get("age", 0) < ADULT_AGE:
+                continue
+            if self._current_dwelling_bp(q) != "leaf_shelter":   # only upgrade a humble leaf shelter
+                continue
+            d = abs(q["x"] - bx) + abs(q["y"] - by)
+            if d < best_d:
+                best, best_d = q, d
+        return best
 
     def _project_for(self, p):
         """The soul's standing life-project once survival & first shelter are met: climb the
@@ -3517,6 +3563,10 @@ class World:
         my_site = next((s for s in self.sites if s["id"] == p.get("site") and not s.get("done")), None)
         if my_site is not None and my_site.get("communal"):
             return {"kind": "monument", "bp": my_site["bp"], "why": "finish what we're raising together"}
+        # Already raising a home FOR ANOTHER (a commission)? See it through.
+        if my_site is not None and my_site.get("commission"):
+            return {"kind": "commission", "bp": my_site["bp"], "client": my_site.get("owner"),
+                    "why": "finish the home I'm raising for them"}
         # A TOOLMAKER's specialty project: raise the communal WORKSHOP (the band's bench) if there
         # isn't one yet — gear, tools and everyone's crafting go faster beside it. It's their
         # answer to the ambitious soul's gathering hall.
@@ -3538,6 +3588,16 @@ class World:
                 and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
             return {"kind": "monument", "bp": STOREHOUSE_BP,
                     "why": "raise a storehouse — to keep our food against lean days"}
+        # A BUILDER's calling: OFFER to raise a proper home for a leaf-sheltered neighbour, paid a
+        # fee on completion — the deliberate labour market ("build a home for others for something in
+        # return"). Their answer to the toolmaker's bench and the forager's storehouse, and only when
+        # not tied up in a communal raise. Designed to the CLIENT's household, in the builder's skill.
+        if voc == "builder" and has_real_home and not self._communal_in_progress():
+            client = self._commission_client(p)
+            if client is not None:
+                bp_id = self._design_dwelling(p, "hut", client=client)
+                return {"kind": "commission", "bp": bp_id, "client": client["id"],
+                        "why": f"raise {client['name']} a proper home — for a fair price"}
         # PUBLIC WORKS — a settled soul turns its hand to whatever the band most needs built (a well,
         # an inn, a watchtower). Same co-op gating as any monument: a real home first, and a crew.
         if has_real_home and (self._communal_build_to_join(p) is not None or not self._communal_in_progress()):
@@ -4067,12 +4127,13 @@ class World:
                 return c
         return found[0]
 
-    def _found_site(self, p, name: str = "leaf_shelter", communal: bool = False, rung=None):
+    def _found_site(self, p, name: str = "leaf_shelter", communal: bool = False, rung=None, client=None):
         """PLAN a building footprint: rather than grabbing the first tile that fits, a soul weighs
         the candidate spots around its anchor and picks the BEST — near enough to water, on clear
         ground, clustered with the band but with room to breathe (`_score_site`). Falls back to the
         cheap leaf shelter, then to any dry ground, so it never ends up homeless. A `communal` site
-        (a monument) is NOT the builder's home, so it doesn't move their home anchor."""
+        (a monument) is NOT the builder's home, so it doesn't move their home anchor; a `client`
+        commission is OWNED by the client (it becomes their home) and likewise leaves the builder's."""
         bx, by = p["home"]
         occupied = self._occupied_tiles()
         anchors = self._settlement_anchors()
@@ -4100,19 +4161,29 @@ class World:
                 chosen = self._choose_reachable_site(found, communal)
                 _, ox, oy, tasks, core = chosen[:5]
                 site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
-                        "ox": int(ox), "oy": int(oy), "by": p["name"], "owner": p["id"],
+                        "ox": int(ox), "oy": int(oy), "by": p["name"],
+                        "owner": (client["id"] if client else p["id"]),   # a commission belongs to the CLIENT
                         "rung": rung if (rung and cand == name) else cand,   # ladder rung (custom homes still track; leaf fallback stays leaf)
                         "core": [int(core[0]), int(core[1])] if core else None,  # the heart tile (a well's shaft, a home's hearth)
                         "insul": float(bp.get("insulation", 1.0)),
                         "tasks": tasks, "done": False, "t": round(self.clock, 1)}
                 site["communal"] = bool(communal)
+                if client is not None:
+                    site["commission"] = True
+                    site["builder"] = p["id"]            # the contractor — paid by the client on completion
                 self.sites.append(site)
                 p["site"] = site["id"]
-                if not communal:                         # a home moves the builder's anchor; a monument doesn't
+                if not communal and client is None:      # only the builder's OWN home moves its anchor
                     home = core or next(((t["x"], t["y"]) for t in tasks if t["code"] == BLOCK_FLOOR), (bx, by))
                     p["home"] = (int(home[0]), int(home[1]))
                 self.version += 1
                 self._bump("plan_found")
+                if client is not None:                   # the ASK: a builder offers to raise a home for another
+                    self._bump("commission_started")
+                    self._note("build", f"{p['name']} took on raising a home for {client['name']}.")
+                    mind.speak(p, f"{client['name']} — I'll raise you a proper home, for a fair price.", self.clock)
+                    mind.remember(client, f"{p['name']} offered to build me a proper home", 0.7, "social", self.clock)
+                    return
                 verb = "began a" if communal else "marked out a"
                 self._note("build", f"{p['name']} {verb} {bp['name'].lower()}.")
                 # Say WHAT they're raising, so a watcher can tell at a glance (a house? an inn? a well?).
@@ -4332,8 +4403,16 @@ class World:
                               f"raised a {site['name'].lower()} for us all — a name that will last")
             return
         # The HOME belongs to whoever raised it (the owner), not whoever happened to lay the last
-        # tile — so a band-mate who lent a hand finishing the walls doesn't end up claiming it.
+        # tile — so a band-mate who lent a hand finishing the walls doesn't end up claiming it. For a
+        # COMMISSION the owner is the CLIENT it was built for; they move in (their anchor shifts here).
         owner = next((q for q in self.people if q["id"] == site.get("owner")), None) or p
+        commission = bool(site.get("commission"))
+        if commission:
+            core = site.get("core")
+            hxy = tuple(core) if core else next(((t["x"], t["y"]) for t in site["tasks"]
+                                                 if t["code"] == BLOCK_FLOOR), None)
+            if hxy:
+                owner["home"] = (int(hxy[0]), int(hxy[1]))
         # Moving up the dwelling ladder: pull down the owner's old, lesser home now that a finer
         # one stands, so the settlement isn't littered with the husks of outgrown shelters.
         old = owner.get("home_struct")
@@ -4343,14 +4422,24 @@ class World:
                 self._note("build", f"{owner['name']} pulled down their old {gone['name'].lower()}.")
         owner["home_struct"] = site["id"]
         owner["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
-        self._note("build", f"{owner['name']} finished building a {site['name'].lower()}.")
-        mind.remember(owner, f"raised my own {site['name'].lower()} — a home at last", 0.85,
-                      "build", self.clock)
-        self._earn_renown(owner, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
-        if p is not owner:                          # a band-mate laid the final hand — honour it
-            self._earn_renown(p, RENOWN_GAIN.get("help", 0.3),
-                              f"lent a hand raising {owner['name']}'s home")
-            mind.remember(p, f"helped {owner['name']} finish their home", 0.6, "renown", self.clock)
+        if commission:                              # the builder raised it FOR the client
+            builder = next((q for q in self.people if q["id"] == site.get("builder")), None)
+            bname = builder["name"] if builder else site.get("by", "a builder")
+            self._note("build", f"{bname} finished {owner['name']}'s new {site['name'].lower()}.")
+            mind.remember(owner, f"{bname} built me a fine {site['name'].lower()} — a proper home at last",
+                          0.85, "build", self.clock)
+            if builder is not None:
+                self._earn_renown(builder, RENOWN_GAIN["dwelling"],
+                                  f"built {owner['name']} a fine home — good paid work, well done")
+        else:
+            self._note("build", f"{owner['name']} finished building a {site['name'].lower()}.")
+            mind.remember(owner, f"raised my own {site['name'].lower()} — a home at last", 0.85,
+                          "build", self.clock)
+            self._earn_renown(owner, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
+            if p is not owner:                      # a band-mate laid the final hand — honour it
+                self._earn_renown(p, RENOWN_GAIN.get("help", 0.3),
+                                  f"lent a hand raising {owner['name']}'s home")
+                mind.remember(p, f"helped {owner['name']} finish their home", 0.6, "renown", self.clock)
         # COMMISSION — the owner PAYS everyone who built their home for them, as much as it can
         # spare: the first stir of a LABOUR ECONOMY (work traded for goods), emerging from folk
         # building for folk. No one decreed it; it arose from a builder helping and a soul grateful.
@@ -4360,19 +4449,24 @@ class World:
             helper = next((q for q in self.people if q["id"] == hid), None)
             if helper is None:
                 continue
-            # Pay in COIN once the band has money and the owner holds some; else in food (pack/larder).
+            # The CONTRACTOR who raised a whole commissioned home earns a bigger fee than a soul who
+            # merely lent a hand. Pay in COIN once the band has money and the owner holds some; else food.
+            is_contractor = commission and hid == site.get("builder")
+            fee_food = CONTRACTOR_FEE if is_contractor else COMMISSION_FEE
+            fee_coin = CONTRACTOR_COIN if is_contractor else COMMISSION_COIN
             paid = None
-            if getattr(self, "money_invented", False) and owner["inv"].get("coin", 0) >= COMMISSION_COIN:
-                owner["inv"]["coin"] -= COMMISSION_COIN
-                helper["inv"]["coin"] = helper["inv"].get("coin", 0) + COMMISSION_COIN
-                paid = f"{COMMISSION_COIN} coin"
-            elif self._spend_food(owner, COMMISSION_FEE):
-                helper["inv"]["food"] = helper["inv"].get("food", 0) + COMMISSION_FEE
-                paid = f"{COMMISSION_FEE} food"
+            if getattr(self, "money_invented", False) and owner["inv"].get("coin", 0) >= fee_coin:
+                owner["inv"]["coin"] -= fee_coin
+                helper["inv"]["coin"] = helper["inv"].get("coin", 0) + fee_coin
+                paid = f"{fee_coin} coin"
+            elif self._spend_food(owner, fee_food):
+                helper["inv"]["food"] = helper["inv"].get("food", 0) + fee_food
+                paid = f"{fee_food} food"
             if not paid:
                 continue
-            self._bump("commission")
-            self._note("trade", f"{owner['name']} paid {helper['name']} {paid} for helping raise their home.")
+            self._bump("contractor_paid" if is_contractor else "commission")
+            verb = "for building their home" if is_contractor else "for helping raise their home"
+            self._note("trade", f"{owner['name']} paid {helper['name']} {paid} {verb}.")
             mind.remember(helper, f"was paid {paid} for raising {owner['name']}'s home — honest work, honest pay",
                           0.6, "trade", self.clock)
             mind.remember(owner, f"paid {helper['name']} {paid} to help raise my home", 0.5, "trade", self.clock)
