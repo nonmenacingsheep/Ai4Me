@@ -614,7 +614,8 @@ async def company_engine_loop():
 # world feel alive (entities visibly move, the map updates smoothly). Needs/energy/
 # ecology are dt-scaled, so their balance is identical regardless of this rate.
 WORLD_STEP_SECONDS = float(os.getenv("AITHA_WORLD_STEP", "0.167"))   # real seconds per tick (~6/s)
-WORLD_SAVE_EVERY = int(os.getenv("AITHA_WORLD_SAVE_EVERY", "120"))  # ticks between saves (~1/min)
+WORLD_SAVE_EVERY = int(os.getenv("AITHA_WORLD_SAVE_EVERY", "120"))  # ticks between (cheap meta) saves
+GRID_SAVE_MULT = int(os.getenv("AITHA_GRID_SAVE_MULT", "10"))    # write the heavy 2048² grids every Nth save
 WORLD_SPEEDS = (1.0, 2.0, 4.0)          # user-selectable fast-forward multipliers
 _WORLD_SPEED = 1.0                       # current multiplier (mirrors the world's saved value)
 
@@ -667,7 +668,11 @@ async def world_engine_loop():
             prev_top = t_send
             n += 1
             if n % WORLD_SAVE_EVERY == 0:
-                await asyncio.to_thread(w.save)
+                # The mutable state (people/sites/economy) saves every time (cheap JSON); the heavy
+                # 2048² terrain grids only every GRID_SAVE_MULT-th save — that's what kills the
+                # periodic save FREEZE, since the grids barely change and cost ~130MB to compress.
+                grids = (n % (WORLD_SAVE_EVERY * GRID_SAVE_MULT) == 0)
+                await asyncio.to_thread(w.save, grids)
         except Exception as e:
             print(f"[world] tick error: {e}")
 

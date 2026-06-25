@@ -5903,14 +5903,20 @@ class World:
         )
 
     # ── persistence ────────────────────────────────────────────────────────────
-    def save(self):
+    def save(self, grids: bool = True):
+        """Persist the world. The MUTABLE state (people, sites, blocks, the economy, …) is a small
+        JSON written every time. The 2048² terrain GRIDS are ~130MB to compress, so they're written
+        only when `grids` is True (the loop does this occasionally) or when none are on disk yet —
+        the rest of the time we skip them, which is what stops the periodic save FREEZE. The grids
+        drift slowly (only vegetation/ecology change at all), so a few minutes' staleness is fine."""
         try:
             os.makedirs(_DIR, exist_ok=True)
-            np.savez_compressed(
-                PATH_GRID, elevation=self.elevation, biome=self.biome, soil=self.soil,
-                moisture=self.moisture, water=self.water, veg_sp=self.veg_sp,
-                veg_growth=self.veg_growth, chunk_eco=self._chunk_eco,
-            )
+            if grids or not os.path.exists(PATH_GRID):
+                np.savez_compressed(
+                    PATH_GRID, elevation=self.elevation, biome=self.biome, soil=self.soil,
+                    moisture=self.moisture, water=self.water, veg_sp=self.veg_sp,
+                    veg_growth=self.veg_growth, chunk_eco=self._chunk_eco,
+                )
             meta = {
                 "schema": SCHEMA,
                 "seed": self.seed, "clock": self.clock, "last_eco": self._last_eco,
