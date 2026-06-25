@@ -285,6 +285,9 @@ FOOTFALL_DECAY     = 0.78     # daily fade, so abandoned routes grass back over
 FOOTFALL_PRUNE     = 1.5      # drop a tile from the map once its wear fades below this
 FOOTFALL_PATH_MIN  = 9.0      # wear at which a tile reads as a worn path (sent to the renderer)
 FOOTFALL_SEND_CAP  = 700      # most worn tiles streamed to the renderer (the busiest win)
+PATH_PULL          = 0.4      # how much easier a worn path is to walk — souls FOLLOW the beaten track
+                              # (a gentle cost cut: headway still dominates, so they only road-follow
+                              # when it doesn't cost real ground — can't strand or force a detour)
 DANGER_AVOID_R     = 4        # tiles from a wolf at which danger starts to bend a path away
 DANGER_AVOID_COST  = 1.6      # danger cost per tile closer than DANGER_AVOID_R to a wolf
 # Site PLANNING: a soul weighs candidate spots and picks the best rather than the first that fits —
@@ -4506,6 +4509,8 @@ class World:
             elif self.blocks.get((nx, ny)) == BLOCK_LEAF:
                 cost += LEAF_BRUSH_COST                     # soft collision: prefer going ROUND a leaf wall on dry
                                                             # ground; brush through only when that's the easy way
+            elif self.footfall.get((nx, ny), 0.0) >= FOOTFALL_PATH_MIN:
+                cost -= PATH_PULL                           # a worn path is easy going — feet follow the road
             for wx, wy in near_wolves:                      # usually empty → skipped
                 d = abs(wx - nx) + abs(wy - ny)
                 if d < DANGER_AVOID_R:
