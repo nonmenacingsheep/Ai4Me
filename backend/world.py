@@ -3821,6 +3821,51 @@ class World:
             score -= cdist * (0.16 if communal else 0.05)                         # cluster (hard for communal)
         return score
 
+    def _reaches_water(self, start, planned_solid=(), budget=2500) -> bool:
+        """Bounded BFS from `start` over passable ground — treating this building's about-to-be-laid
+        WALLS (`planned_solid`) as already solid — to a land tile bordering water (a drink spot).
+        The siting guard: a home must never seal its own folk away from drink. Bounded, so it stays
+        cheap and never sweeps the whole 2048² map; returns True the instant it touches a shore."""
+        sx, sy = int(start[0]), int(start[1])
+        if not self._in(sx, sy):
+            return False
+        solid = set(planned_solid)
+        seen = {(sx, sy)}
+        q = [(sx, sy)]
+        qi = 0
+        while qi < len(q) and qi < budget:
+            x, y = q[qi]
+            qi += 1
+            if self.water[y, x] == WATER_NONE:               # standing on land — is water one step off?
+                for dx, dy in _STEP_DIRS:
+                    ax, ay = x + dx, y + dy
+                    if self._in(ax, ay) and self.water[ay, ax] != WATER_NONE:
+                        return True
+            for dx, dy in _STEP_DIRS:
+                nx, ny = x + dx, y + dy
+                if (nx, ny) in seen or (nx, ny) in solid:
+                    continue
+                if self._passable(nx, ny):
+                    seen.add((nx, ny))
+                    q.append((nx, ny))
+        return False
+
+    def _choose_reachable_site(self, found, communal: bool, top_k: int = 8):
+        """From the score-sorted candidates, pick the best whose occupants could actually REACH
+        WATER (a home must not seal its folk from drink — even soft leaf walls aside, real walls and
+        a tight cluster can box a doorway in). A communal build has no occupants, so the top score
+        wins outright. Falls back to the top score if none of the top-K prove reachable — putting a
+        roof somewhere always beats leaving a soul homeless (siting must never strand anyone)."""
+        if communal:
+            return found[0]
+        for c in found[:top_k]:
+            _, ox, oy, tasks, core, cxy = c
+            wall = {(t["x"], t["y"]) for t in tasks
+                    if t.get("layer") == "block" and t.get("code") == BLOCK_WALL}
+            if self._reaches_water(core or cxy, planned_solid=wall):
+                return c
+        return found[0]
+
     def _found_site(self, p, name: str = "leaf_shelter", communal: bool = False, rung=None):
         """PLAN a building footprint: rather than grabbing the first tile that fits, a soul weighs
         the candidate spots around its anchor and picks the BEST — near enough to water, on clear
@@ -3835,7 +3880,7 @@ class World:
             for cand in cands:
                 bp = BLUEPRINTS[cand]
                 bw, bh = len(bp["layout"][0]), len(bp["layout"])
-                best = None                              # (score, ox, oy, tasks, core)
+                found = []                               # [(score, ox, oy, tasks, core, (cx,cy)), …]
                 fits = 0
                 for off in self._site_offsets():
                     ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
@@ -3844,14 +3889,15 @@ class World:
                         continue
                     cx, cy = core if core else (ox + bw // 2, oy + bh // 2)
                     s = self._score_site(cx, cy, anchors, communal, origin=(bx, by))
-                    if best is None or s > best[0]:
-                        best = (s, ox, oy, tasks, core)
+                    found.append((s, ox, oy, tasks, core, (cx, cy)))
                     fits += 1
                     if fits >= SITE_CANDIDATES_CAP:      # weighed enough spots — commit to the best
                         break
-                if best is None:
+                if not found:
                     continue                             # this blueprint doesn't fit anywhere — try the next
-                _, ox, oy, tasks, core = best
+                found.sort(key=lambda c: -c[0])
+                chosen = self._choose_reachable_site(found, communal)
+                _, ox, oy, tasks, core = chosen[:5]
                 site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": cand, "name": bp["name"],
                         "ox": int(ox), "oy": int(oy), "by": p["name"], "owner": p["id"],
                         "rung": rung if (rung and cand == name) else cand,   # ladder rung (custom homes still track; leaf fallback stays leaf)
