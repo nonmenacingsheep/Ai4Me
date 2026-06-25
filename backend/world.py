@@ -3859,12 +3859,38 @@ class World:
             anchors.append((int(g["x"]), int(g["y"])))
         return anchors
 
-    def _score_site(self, cx, cy, anchors, communal: bool, origin=None) -> float:
-        """How GOOD a homesite (cx,cy) is — the heart of planning. Rewards a comfortable walk to
+    def _nearest_resource_dist(self, cx, cy):
+        """Manhattan distance to the nearest stone boulder or ore node, or None if the map has
+        none — what a smithy/workshop wants close: the stuff it works."""
+        best = None
+        for n in self.stone_nodes:
+            d = abs(n["x"] - cx) + abs(n["y"] - cy)
+            if best is None or d < best:
+                best = d
+        for n in self.ore_nodes:
+            d = abs(n["x"] - cx) + abs(n["y"] - cy)
+            if best is None or d < best:
+                best = d
+        return best
+
+    def _site_purpose_bonus(self, bp_name, cx, cy) -> float:
+        """A communal building belongs where its PURPOSE is best served, not just clustered: a
+        SMITHY or WORKSHOP wants the stone and ore it works close to hand. A modest nudge layered on
+        the site score, so the band raises its craft buildings WITH a reason — by the rock — while
+        the water/cluster terms still keep them near home. (Homes pass bp_name=None: no change.)"""
+        if bp_name in (WORKSHOP_BP, SMITHY_BP):
+            d = self._nearest_resource_dist(cx, cy)
+            if d is not None:
+                return max(0.0, 2.5 - d * 0.10)              # the closer to stone/ore, the better
+        return 0.0
+
+    def _score_site(self, cx, cy, anchors, communal: bool, origin=None, bp_name=None) -> float:
+        """How GOOD a building site (cx,cy) is — the heart of planning. Rewards a comfortable walk to
         water and clear ground; clusters near the band but penalises crowding a neighbour; a
         communal building is pulled hard toward the centre so it sits among everyone. Crucially it
         also favours building CLOSE to where the soul already is — a roof raised soon beats a finer
-        plot reached after a long, exposed trek (which was getting people killed by the cold)."""
+        plot reached after a long, exposed trek (which was getting people killed by the cold). A
+        purpose bonus then nudges special buildings toward what they need (a smithy by the stone)."""
         score = 0.0
         score += 3.0 if self._water_within(cx, cy, SITE_WATER_IDEAL) else -2.5   # don't strand from drink
         if not (self.veg_sp[cy, cx] in WOOD_IDS and self.veg_growth[cy, cx] > 0.2):
@@ -3879,6 +3905,7 @@ class World:
             ccy = sum(a[1] for a in anchors) / len(anchors)
             cdist = abs(ccx - cx) + abs(ccy - cy)
             score -= cdist * (0.16 if communal else 0.05)                         # cluster (hard for communal)
+        score += self._site_purpose_bonus(bp_name, cx, cy)                       # built WITH a reason
         return score
 
     def _reaches_water(self, start, planned_solid=(), budget=2500) -> bool:
@@ -3948,7 +3975,7 @@ class World:
                     if not tasks:
                         continue
                     cx, cy = core if core else (ox + bw // 2, oy + bh // 2)
-                    s = self._score_site(cx, cy, anchors, communal, origin=(bx, by))
+                    s = self._score_site(cx, cy, anchors, communal, origin=(bx, by), bp_name=cand)
                     found.append((s, ox, oy, tasks, core, (cx, cy)))
                     fits += 1
                     if fits >= SITE_CANDIDATES_CAP:      # weighed enough spots — commit to the best
