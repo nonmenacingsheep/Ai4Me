@@ -298,6 +298,13 @@ ROAD_HARDEN        = 40.0     # footfall wear at which a tile hardens into a roa
 ROAD_PULL          = 0.65     # a road is easier going than a soft path (PATH_PULL) — souls follow it
 ROAD_DECAY         = 0.08     # condition a road loses per day when no longer trodden
 ROAD_PRUNE         = 0.15     # condition below which an abandoned road grasses back over
+# SETTLEMENTS (M0) — the band's home becomes a first-class TOWN with a name, a centre and a roll of
+# members; the foundation everything civic (zoning, a treasury, a planning authority, daughter
+# colonies) will later hang on. Place-names are stitched from these.
+SETTLEMENT_PREFIXES = ("Ash", "Stone", "River", "Green", "Oak", "Fair", "Hearth", "Elm",
+                       "Bright", "Mill", "North", "Long", "Wind", "Fern")
+SETTLEMENT_SUFFIXES = ("ford", "stead", "hollow", "haven", "wick", "bourne", "field", "vale",
+                       "watch", "mere", "ridge", "barrow")
 DANGER_AVOID_R     = 4        # tiles from a wolf at which danger starts to bend a path away
 DANGER_AVOID_COST  = 1.6      # danger cost per tile closer than DANGER_AVOID_R to a wolf
 # Site PLANNING: a soul weighs candidate spots and picks the best rather than the first that fits —
@@ -751,6 +758,7 @@ class World:
         self.station_objs: dict = {}     # (x,y) -> kind: a crafted workbench/furnace/kiln, PLACED & visible
         self.footfall: dict = {}         # (x,y) -> wear: where feet fall most, worn into visible PATHS (cosmetic)
         self.roads: dict = {}            # (x,y) -> condition: paths trodden hard enough HARDEN into roads
+        self.settlements: list[dict] = []  # first-class SETTLEMENTS (the band's town(s)) — M0 foundation
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
@@ -1305,6 +1313,7 @@ class World:
             self._tick_pests()
             self._tick_governance()                                # judge the commons-norm once a day
             self._decay_footfall()                                 # worn paths fade where feet stop falling
+            self._tick_settlements()                               # keep the band's town (name/centre/roll) current
             self._last_pest = self.clock
         season_now = self.season()
         if season_now != getattr(self, "_last_season", season_now):
@@ -4115,6 +4124,32 @@ class World:
             anchors.append((int(g["x"]), int(g["y"])))
         return anchors
 
+    def _settlement_name(self) -> str:
+        """Stitch a place-name for the band's home (Ashford, Stonehaven, …)."""
+        rng = self.rng
+        return (SETTLEMENT_PREFIXES[int(rng.integers(len(SETTLEMENT_PREFIXES)))]
+                + SETTLEMENT_SUFFIXES[int(rng.integers(len(SETTLEMENT_SUFFIXES)))])
+
+    def _tick_settlements(self):
+        """Maintain the band's first-class SETTLEMENT — the town that emerges from where folk have
+        made their homes. For now the housed band is ONE settlement (daughter colonies come later):
+        its CENTRE tracks the homes' centroid, its members are the housed souls, its size their
+        count. The civic foundation (M0) that zoning, a treasury and a planning authority hang on."""
+        homed = [q for q in self.people if q.get("home_struct")]
+        if not homed:
+            return
+        cx = int(sum(q["home"][0] for q in homed) / len(homed))
+        cy = int(sum(q["home"][1] for q in homed) / len(homed))
+        if not self.settlements:
+            self.settlements = [{"id": "set_" + uuid.uuid4().hex[:8], "name": self._settlement_name(),
+                                 "cx": cx, "cy": cy, "members": [], "pop": 0,
+                                 "founded_t": round(self.clock, 1)}]
+            self._note("culture", f"the band's home is a place now — they call it {self.settlements[0]['name']}.")
+        s = self.settlements[0]
+        s["members"] = [q["id"] for q in homed]
+        s["pop"] = len(homed)
+        s["cx"], s["cy"] = cx, cy
+
     def _nearest_resource_dist(self, cx, cy):
         """Manhattan distance to the nearest stone boulder or ore node, or None if the map has
         none — what a smithy/workshop wants close: the stuff it works."""
@@ -5740,6 +5775,7 @@ class World:
             "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
             "paths": self._paths_payload(),
             "roads": [[x, y, round(c, 2)] for (x, y), c in self.roads.items()],
+            "settlements": self.settlements,
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -5933,6 +5969,7 @@ class World:
                 "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
                 "footfall": [[x, y, round(w, 1)] for (x, y), w in self.footfall.items()],
                 "roads": [[x, y, round(c, 2)] for (x, y), c in self.roads.items()],
+                "settlements": self.settlements,
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -5995,6 +6032,7 @@ class World:
             self.station_objs = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("stations") or [])}
             self.footfall = {(int(d[0]), int(d[1])): float(d[2]) for d in (meta.get("footfall") or [])}
             self.roads = {(int(d[0]), int(d[1])): float(d[2]) for d in (meta.get("roads") or [])}
+            self.settlements = meta.get("settlements", []) or []   # M0; a pre-M0 save self-heals on the daily tick
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:
@@ -6211,6 +6249,21 @@ if __name__ == "__main__":
     lint_ok = not lint_bad
     print(f"  blueprint-lint test: builtins + {designed} designed homes all valid={lint_ok}"
           + (f" BAD={lint_bad[:5]}" if lint_bad else "") + f" -> {'OK' if lint_ok else 'FAILED'}")
+
+    # SETTLEMENT (M0) — the housed band becomes a first-class town: named, centred on its homes,
+    # with a roll of members; a pre-M0 (empty) save self-heals on the daily tick; none when homeless.
+    ws = World().generate(seed=11); ws.people = []
+    for i, (sx, sy) in enumerate([(50, 50), (54, 50), (52, 54)]):
+        ws._add_person(sx, sy, name=f"S{i}"); sp = ws.people[-1]; sp["age"] = ADULT_AGE + 3
+        sp["home"] = (sx, sy); sp["home_struct"] = f"h{i}"
+    ws._tick_settlements()
+    st = ws.settlements[0] if ws.settlements else {}
+    ws.settlements = []; ws._tick_settlements()                    # self-heal from a pre-M0 save
+    healed = len(ws.settlements) == 1
+    set_ok = (bool(st.get("name")) and st.get("cx") == 52 and st.get("pop") == 3
+              and len(st.get("members", [])) == 3 and healed)
+    print(f"  settlement test: name={st.get('name')} centre=({st.get('cx')},{st.get('cy')}) "
+          f"pop={st.get('pop')} self-heal={healed} -> {'OK' if set_ok else 'FAILED'}")
 
     # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
     # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.

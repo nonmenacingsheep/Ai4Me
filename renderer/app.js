@@ -4027,6 +4027,7 @@ function setWorld(s) {
     stations: s.stations || [],
     paths: s.paths || [],
     roads: s.roads || [],
+    settlements: s.settlements || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -4654,6 +4655,18 @@ function renderWorld() {
         ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
       }
     }
+  }
+  // Settlement name — a town's label floats over its centre (the M0 first-class settlement).
+  for (const st of (d.settlements || [])) {
+    const sx = (st.cx - cam.camX) * z, sy = (st.cy - cam.camY) * z;
+    if (!onScreen(sx, sy, 6)) continue;
+    const fs = Math.max(11, Math.min(22, z * 1.1));
+    ctx.font = `600 ${fs}px system-ui`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const label = `${st.name}${st.pop ? ' · ' + st.pop : ''}`;
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.strokeText(label, sx, sy - z * 1.6);
+    ctx.fillStyle = 'rgba(245,237,217,0.92)'; ctx.fillText(label, sx, sy - z * 1.6);
+    ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
   }
   // Navigation heatmap, on demand ('n') — over terrain & buildings, under the living entities.
   if (WORLD.navOverlay && z >= 4) drawNavOverlay(cv, cam, z);
