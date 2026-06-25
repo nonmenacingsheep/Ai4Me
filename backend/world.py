@@ -449,6 +449,7 @@ STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
 # monument project — so settled, driven souls compete to leave a mark, not just nest.
 RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05, help=0.06, contribute=0.05)
 HELP_RANGE = 30               # how near a band-mate's unfinished build a housed soul will go to help
+COMMISSION_FEE = 4            # food a soul pays the builder who raised its home — the seed of a labor economy
 # Self-authored projects ("aspirations") — a settled, content soul forms its OWN goal beyond mere
 # survival (tidy the ground round its home, plant a garden by the door) and a PLAN of primitive
 # skills carries it out. This is the open-vocabulary layer: the rule body seeds a few projects so
@@ -3930,6 +3931,10 @@ class World:
             self._clear_ground(task["x"], task["y"])     # trample the growth under & around the tile
         task["done"] = True
         self._grow_skill(p, "building", CHILD_SKILL_GAIN)   # hands learn the trade by laying tile
+        if site.get("owner") and p.get("id") != site["owner"]:   # remember who built it FOR the owner
+            hs = site.setdefault("helpers", [])
+            if p["id"] not in hs:
+                hs.append(p["id"])
         self.version += 1
         if self._site_next_task(site) is None:
             self._finish_site(p, site)
@@ -3947,6 +3952,23 @@ class World:
         """Raise a soul's social standing for a visible deed, and lodge it as a proud memory."""
         p["renown"] = p.get("renown", 0.0) + amount
         mind.remember(p, why, min(0.95, 0.5 + amount), "renown", self.clock)
+
+    def _spend_food(self, q, n: int) -> bool:
+        """Pay `n` food from a soul's pack, then its home larder — for a commission/trade. Returns
+        False (no change) if it can't afford the whole sum (you can't pay what you don't have)."""
+        inv, store = q.setdefault("inv", {}), q.setdefault("store", {})
+        if inv.get("food", 0) + store.get("food", 0) < n + 1:        # keep a bite for itself
+            return False
+        from_inv = min(inv.get("food", 0), n)
+        inv["food"] = inv.get("food", 0) - from_inv
+        if inv.get("food", 0) <= 0:
+            inv.pop("food", None)
+        rem = n - from_inv
+        if rem > 0:
+            store["food"] = store.get("food", 0) - rem
+            if store.get("food", 0) <= 0:
+                store.pop("food", None)
+        return True
 
     def _dismantle_site(self, site_id):
         """Tear down a finished building: pull its blocks and roof off the map and drop the site —
@@ -3993,10 +4015,28 @@ class World:
         mind.remember(owner, f"raised my own {site['name'].lower()} — a home at last", 0.85,
                       "build", self.clock)
         self._earn_renown(owner, RENOWN_GAIN["dwelling"], f"raised a fine {site['name'].lower()} of my own")
-        if p is not owner:                          # a band-mate lent the final hand — honour it
+        if p is not owner:                          # a band-mate laid the final hand — honour it
             self._earn_renown(p, RENOWN_GAIN.get("help", 0.3),
                               f"lent a hand raising {owner['name']}'s home")
             mind.remember(p, f"helped {owner['name']} finish their home", 0.6, "renown", self.clock)
+        # COMMISSION — the owner PAYS everyone who built their home for them, as much as it can
+        # spare: the first stir of a LABOUR ECONOMY (work traded for goods), emerging from folk
+        # building for folk. No one decreed it; it arose from a builder helping and a soul grateful.
+        for hid in site.get("helpers", []):
+            if hid == owner["id"]:
+                continue
+            helper = next((q for q in self.people if q["id"] == hid), None)
+            if helper is None or not self._spend_food(owner, COMMISSION_FEE):   # pay from pack OR larder
+                continue
+            helper["inv"]["food"] = helper["inv"].get("food", 0) + COMMISSION_FEE
+            self._bump("commission")
+            self._note("trade", f"{owner['name']} paid {helper['name']} {COMMISSION_FEE} food for helping raise their home.")
+            mind.remember(helper, f"was paid {COMMISSION_FEE} food for raising {owner['name']}'s home — honest work, honest pay",
+                          0.6, "trade", self.clock)
+            mind.remember(owner, f"paid {helper['name']} to help raise my home — worth every bite", 0.5, "trade", self.clock)
+            rel = (helper.get("rel") or {}).get(owner["id"])
+            if rel:
+                rel["trades"] = rel.get("trades", 0) + 1
 
     # ── god-authored building templates (the Templates god-tool) ────────────────
     # The god designs buildings in a blank-grid editor and saves them as blueprints in the
@@ -5416,7 +5456,8 @@ if __name__ == "__main__":
           f"deaths logged: {deaths if deaths else 'none'}")
     beh = getattr(w, "_beh", {})
     print(f"  behaviours fired: planned-foundings={beh.get('plan_found', 0)}, "
-          f"help-blocks-laid={beh.get('help_block', 0)}, craft-materials-gifted={beh.get('gift_material', 0)}")
+          f"help-blocks-laid={beh.get('help_block', 0)}, craft-materials-gifted={beh.get('gift_material', 0)}, "
+          f"home-commissions-paid={beh.get('commission', 0)}")
     kids = [q for q in w.people if q["age"] < ADULT_AGE]
     ksk = {k: round(v, 2) for k, v in (kids[0].get("skills", {}) if kids else {}).items()}
     print(f"  younglings: {len(kids)} children; arrows-whittled={beh.get('child_whittle', 0)}; "
