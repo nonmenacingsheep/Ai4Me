@@ -405,6 +405,14 @@ BLUEPRINTS = {
         "WFW",
         "WDW",
     ]),
+    # A MARKETPLACE — an open trading square (corner posts, an open floor) the band raises once it
+    # trades in COIN: not a home or a workshop but the heart of its new economy, a civic sign that
+    # a wooden village has become a trading people.
+    "market": dict(name="Marketplace", roof=False, insulation=1.0, communal=True, layout=[
+        "WFW",
+        "FFF",
+        "WFW",
+    ]),
 }
 
 # The dwelling ladder — ascending comfort. Once a soul has any roof and is kitted out,
@@ -3749,6 +3757,9 @@ class World:
             out.append(("inn", "raise an inn — a roof for those who have none"))
         if getattr(self, "_wolf_blooded", False) and not self._has_building("watchtower"):
             out.append(("watchtower", "raise a watchtower — to keep the wolves off us"))
+        # Once the band trades in COIN, it raises a MARKETPLACE — a civic heart for its new economy.
+        if getattr(self, "money_invented", False) and not self._has_building("market"):
+            out.append(("market", "raise a marketplace — a place to trade now that we have coin"))
         return [{"kind": "monument", "bp": b, "why": w} for b, w in out]
 
     def _tile_unbuildable(self, tx, ty, occupied, avoid: int):
@@ -4247,6 +4258,12 @@ class World:
                 cx, cy = site["core"]
                 if self._in(cx, cy):
                     self.water[cy, cx] = WATER_RIVER
+            # A MARKETPLACE finished is a civilizational milestone — the band has become a trading
+            # people, with a civic place to deal. Marked as culture, not just another build.
+            if site["bp"] == "market":
+                self._note("culture", f"{p['name']} raised the band's first MARKETPLACE — a wooden "
+                                      "village has become a trading people.")
+                mind.speak(p, "Here we'll trade — bring your goods and your coin!", self.clock)
             # A monument/public work: it doesn't house the builder, but it crowns them — the band
             # gains a shared landmark with a purpose, and its raiser wins lasting renown.
             self._note("build", f"{p['name']} finished a {site['name'].lower()} for the band.")
