@@ -523,6 +523,7 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         # of work left" seemed to take forever (the timer only ticks while actually crafting).
         # Still additive & comfort-bounded below, so a real need preempts and the craft waits.
         momentum = max(momentum, BUILD_MOMENTUM)
+    voc = ctx.get("vocation") or p.get("vocation")
     if p.get("home_struct") is None:
         # A roofless soul out in foul weather feels the lack keenly — hurry the shelter up.
         out.append(("build", None, 0.5 + 0.18 * amb + 0.25 * exposed + momentum,
@@ -557,6 +558,14 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
             comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
             out.append(("build", None, (0.22 + 0.18 * amb + 0.12 * cur) * comfort + momentum,
                         "I'll finish what's on my bench"))
+        elif voc == "toolmaker" and "workbench" not in p.get("stations", []):
+            # The TOOLMAKER LEADS the climb: the band's craftsperson feels the calling to raise a
+            # WORKBENCH first, so the band reliably gets a bench standing (others can still make
+            # their own later). A genuine pull — keenest in the curious — but comfort-gated and
+            # below survival, so it never costs a life to set up shop.
+            comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+            out.append(("build", None, (0.30 + 0.20 * cur) * comfort + momentum,
+                        "I'll set up a workbench for our craft"))
         else:
             out.append(("build", None, 0.10 * amb, "I could make my home finer"))
         needy_id, needy_name = ctx.get("needy_id"), ctx.get("needy_name")
@@ -1161,6 +1170,20 @@ if __name__ == "__main__":
     assert bu > idle_build + 0.3 and bu > tink and bu > soc, (idle_build, bu, tink, soc)
     print("craft-momentum OK -> finish-craft pull", round(bu, 2), "beats idle", round(idle_build, 2),
           ", tinker", round(tink, 2), "& socialize", round(soc, 2))
+
+    # TOOLMAKER LEADS THE BENCH — a settled toolmaker without a workbench feels a real pull to raise
+    # one (so the band gets a bench), far above a forager's idle "make my home finer"; once a bench
+    # stands the special pull lapses back to ordinary.
+    tk = mk("Wira", 0); tk["home_struct"] = "s"
+    tk["traits"] = {"sociability": 0.4, "ambition": 0.3, "curiosity": 0.7, "caution": 0.3}
+    tmk_pull = next(u for kd, _, u, _ in drives(tk, {**base, "vocation": "toolmaker"}) if kd == "build")
+    frg_pull = next(u for kd, _, u, _ in drives(tk, {**base, "vocation": "forager"}) if kd == "build")
+    assert tmk_pull > frg_pull + 0.2, (tmk_pull, frg_pull)
+    tk["stations"] = ["workbench"]
+    have_pull = next(u for kd, _, u, _ in drives(tk, {**base, "vocation": "toolmaker"}) if kd == "build")
+    assert have_pull < tmk_pull, (have_pull, tmk_pull)
+    print("toolmaker-bench OK -> toolmaker pull", round(tmk_pull, 2), "vs forager", round(frg_pull, 2),
+          "; with a bench up", round(have_pull, 2))
 
     # identity crystallizes from what you do: a habitual builder grows ambitious
     builder = mk("Tam", 0)
