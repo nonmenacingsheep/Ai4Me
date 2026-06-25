@@ -3274,6 +3274,31 @@ class World:
                 best, best_floor = ub["id"], floor
         return best
 
+    def _partition_rooms(self, rows, x0, y0, x1, y1, rooms_left, rng) -> int:
+        """Recursively split an interior rect (glyph coords, inclusive) into rooms — a BSP partition.
+        Each split lays an inner WALL across the longer axis with a single DOORWAY, so the rooms form
+        a tree joined by doors and every room stays reachable. Returns the count of leaf rooms made."""
+        w, h = x1 - x0 + 1, y1 - y0 + 1
+        if rooms_left <= 1 or (w < 4 and h < 4):           # enough rooms, or too small to halve
+            return 1
+        if w >= h and w >= 4:                              # a vertical wall (home is wider here)
+            cut = x0 + int(rng.integers(2, w - 1))         # ≥1 floor column survives each side
+            for yy in range(y0, y1 + 1):
+                rows[yy][cut] = "W"
+            rows[y0 + (y1 - y0) // 2][cut] = "D"           # a doorway through the partition
+            a = self._partition_rooms(rows, x0, y0, cut - 1, y1, (rooms_left + 1) // 2, rng)
+            b = self._partition_rooms(rows, cut + 1, y0, x1, y1, rooms_left // 2, rng)
+            return a + b
+        if h >= 4:                                         # a horizontal wall
+            cut = y0 + int(rng.integers(2, h - 1))
+            for xx in range(x0, x1 + 1):
+                rows[cut][xx] = "W"
+            rows[cut][x0 + (x1 - x0) // 2] = "D"
+            a = self._partition_rooms(rows, x0, y0, x1, cut - 1, (rooms_left + 1) // 2, rng)
+            b = self._partition_rooms(rows, x0, cut + 1, x1, y1, rooms_left // 2, rng)
+            return a + b
+        return 1
+
     def _design_dwelling(self, p, rung: str) -> str:
         """A soul DESIGNS its own home. If the god has drawn a fitting blueprint it builds THAT (a
         template prior); otherwise it generates one parametrically — a timber room sized to its
@@ -3301,24 +3326,24 @@ class World:
         Wt, Ht = iw + 2, ih + 2                                 # +2 for the wall ring
         rows = [["W" if (rx in (0, Wt - 1) or ry in (0, Ht - 1)) else "F"
                  for rx in range(Wt)] for ry in range(Ht)]
-        rows[0][Wt // 2] = "D"                                  # a door in the middle of the front wall
+        # A roomier household earns more ROOMS: a skilled builder partitions the interior by BSP
+        # (a hearth room, sleeping rooms), each joined to the next by an inner doorway so the home
+        # stays walkable. Small homes stay a single open room. Scales 2→4 rooms with the family.
+        rooms_target = 1
+        if fam >= 4 and skill > 0.25 and (ih >= 4 or iw >= 4):
+            rooms_target = max(2, min(4, (fam + 2) // 2))
+        rooms = self._partition_rooms(rows, 1, 1, Wt - 2, Ht - 2, rooms_target, self.rng) \
+            if rooms_target > 1 else 1
+        # A front door in the top wall, set where it opens onto FLOOR (never into an inner wall).
+        cols = [cx for cx in range(1, Wt - 1) if rows[1][cx] == "F"]
+        dcol = min(cols, key=lambda cx: abs(cx - Wt // 2)) if cols else Wt // 2
+        rows[0][dcol] = "D"
         if skill > 0.3 and Ht >= 4:                            # a skilled hand adds windows to the long walls
             rows[Ht // 2][0] = "O"
             rows[Ht // 2][Wt - 1] = "O"
-        # A roomier household earns a SECOND ROOM: a skilled builder partitions the interior with
-        # an inner wall and an interior doorway (a sleeping room off the hearth room), so big homes
-        # actually have rooms rather than one open hall.
-        rooms = 1
-        if fam >= 4 and ih >= 4 and skill > 0.25:
-            mid = Ht // 2
-            for rx in range(1, Wt - 1):
-                rows[mid][rx] = "W"                            # the partition wall
-            rows[mid][Wt // 2] = "D"                           # an inner doorway between the rooms
-            rows[0][Wt // 2] = "D"; rows[mid][0] = rows[mid][Wt - 1] = "W"  # keep the front door; no windows on the divider
-            rooms = 2
         layout = ["".join(r) for r in rows]
         kind = "Hut" if rung == "hut" else "Cabin"
-        nm = f"{p['name']}'s {kind}" + (" (2 rooms)" if rooms > 1 else "")
+        nm = f"{p['name']}'s {kind}" + (f" ({rooms} rooms)" if rooms > 1 else "")
         bid = f"home_{p['id']}"
         BLUEPRINTS[bid] = dict(name=nm, roof=True, insulation=1.0, layout=layout)
         return bid
