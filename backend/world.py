@@ -450,6 +450,9 @@ STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
 RENOWN_GAIN = dict(dwelling=0.07, monument=0.55, teach=0.10, gift=0.05, help=0.06, contribute=0.05)
 HELP_RANGE = 30               # how near a band-mate's unfinished build a housed soul will go to help
 COMMISSION_FEE = 4            # food a soul pays the builder who raised its home — the seed of a labor economy
+COMMISSION_COIN = 2          # …or, once money exists, this many coins instead
+MONEY_TRADE_XP = 6           # trades under a soul's belt before it could conceive of MONEY
+COIN_MINT = 20               # coins the inventor of money strikes into being
 # Self-authored projects ("aspirations") — a settled, content soul forms its OWN goal beyond mere
 # survival (tidy the ground round its home, plant a garden by the door) and a PLAN of primitive
 # skills carries it out. This is the open-vocabulary layer: the rule body seeds a few projects so
@@ -693,6 +696,8 @@ class World:
         self._berry_index: dict[tuple[int, int], dict] = {}  # (x,y)->bush, rebuilt on load/seed
         self.granary: dict = {"store": {}, "x": None, "y": None}  # the band's shared common store
         self.decor: dict = {}            # (x,y) -> kind: flowers/art a soul plants to beautify its home
+        self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
+        self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
         self._load_templates()                    # pull the library off disk + register it for placement
         self.log: list[dict] = []        # recent god actions / notable events
@@ -2108,6 +2113,7 @@ class World:
                                 ev = mind.give(giver, taker, gid, self.clock)
                                 if ev:
                                     self._note("social", ev)
+                                    self._record_trade(giver, taker)
                                 break
                         # Help someone CRAFT: a band-mate who's worked out a piece of gear but is
                         # short the makings gets the missing material from someone who has it to
@@ -2125,6 +2131,7 @@ class World:
                                     # the maker's name as a craftsman the band relies on (#20).
                                     self._earn_renown(giver, RENOWN_GAIN["gift"],
                                                       f"made a {key} that now serves {taker['name']}")
+                                    self._record_trade(giver, taker)
                                 break
                     # The quiet bonds of daily life — kin breaking bread side by side (#1), and
                     # children at play (#5) — each warms a relationship a little. Gated to a small
@@ -3391,6 +3398,7 @@ class World:
                         giver["gift_cd"] = self.clock + self.GIFT_COOLDOWN
                         self._earn_renown(giver, RENOWN_GAIN["gift"],
                                           f"shared {mat} so {taker['name']} could make a {rid.replace('_', ' ')}")
+                        self._record_trade(giver, taker)   # trade XP — the road to inventing money
                     return
         return
 
@@ -3953,6 +3961,36 @@ class World:
         p["renown"] = p.get("renown", 0.0) + amount
         mind.remember(p, why, min(0.95, 0.5 + amount), "renown", self.clock)
 
+    def _record_trade(self, a, b):
+        """Both parties gain a little TRADE EXPERIENCE — and out of enough of it, a clever soul may
+        one day conceive of money. This is the ground the currency idea grows from."""
+        a["trade_n"] = a.get("trade_n", 0) + 1
+        b["trade_n"] = b.get("trade_n", 0) + 1
+        self._maybe_invent_money(a)
+        self._maybe_invent_money(b)
+
+    def _maybe_invent_money(self, p):
+        """A trade-worn, curious soul has the INSIGHT that a durable token can stand for any debt or
+        trade — and so MONEY comes into the world, once, named for its inventor. No system decreed
+        it; it emerged from a band that had bartered enough to feel the need. The inventor strikes
+        the first coins; they then circulate through the labour market (commissions paid in coin)."""
+        if getattr(self, "money_invented", False) or p.get("age", 0) < ADULT_AGE:
+            return
+        if p.get("trade_n", 0) < MONEY_TRADE_XP or mind._trait(p, "curiosity") < 0.5:
+            return
+        if self.rng.random() > 0.25:                       # an insight, not a certainty
+            return
+        self.money_invented = True
+        self.money_inventor = p["name"]
+        p["inv"]["coin"] = p["inv"].get("coin", 0) + COIN_MINT
+        self._bump("money_invented")
+        self._note("culture", f"{p['name']} reasoned that a marked token could stand for any trade or "
+                              "debt — and so MONEY was born. The band would never barter blind again.")
+        mind.remember(p, "I saw it — a token can stand for anything we owe one another. I have given the band MONEY.",
+                      0.95, "discovery", self.clock)
+        mind.speak(p, "A token — let it stand for what we owe each other! This changes everything.", self.clock)
+        self._earn_renown(p, 0.6, "gave the band the very idea of money — a name to outlast the ages")
+
     def _spend_food(self, q, n: int) -> bool:
         """Pay `n` food from a soul's pack, then its home larder — for a commission/trade. Returns
         False (no change) if it can't afford the whole sum (you can't pay what you don't have)."""
@@ -4026,17 +4064,28 @@ class World:
             if hid == owner["id"]:
                 continue
             helper = next((q for q in self.people if q["id"] == hid), None)
-            if helper is None or not self._spend_food(owner, COMMISSION_FEE):   # pay from pack OR larder
+            if helper is None:
                 continue
-            helper["inv"]["food"] = helper["inv"].get("food", 0) + COMMISSION_FEE
+            # Pay in COIN once the band has money and the owner holds some; else in food (pack/larder).
+            paid = None
+            if getattr(self, "money_invented", False) and owner["inv"].get("coin", 0) >= COMMISSION_COIN:
+                owner["inv"]["coin"] -= COMMISSION_COIN
+                helper["inv"]["coin"] = helper["inv"].get("coin", 0) + COMMISSION_COIN
+                paid = f"{COMMISSION_COIN} coin"
+            elif self._spend_food(owner, COMMISSION_FEE):
+                helper["inv"]["food"] = helper["inv"].get("food", 0) + COMMISSION_FEE
+                paid = f"{COMMISSION_FEE} food"
+            if not paid:
+                continue
             self._bump("commission")
-            self._note("trade", f"{owner['name']} paid {helper['name']} {COMMISSION_FEE} food for helping raise their home.")
-            mind.remember(helper, f"was paid {COMMISSION_FEE} food for raising {owner['name']}'s home — honest work, honest pay",
+            self._note("trade", f"{owner['name']} paid {helper['name']} {paid} for helping raise their home.")
+            mind.remember(helper, f"was paid {paid} for raising {owner['name']}'s home — honest work, honest pay",
                           0.6, "trade", self.clock)
-            mind.remember(owner, f"paid {helper['name']} to help raise my home — worth every bite", 0.5, "trade", self.clock)
+            mind.remember(owner, f"paid {helper['name']} {paid} to help raise my home", 0.5, "trade", self.clock)
             rel = (helper.get("rel") or {}).get(owner["id"])
             if rel:
                 rel["trades"] = rel.get("trades", 0) + 1
+            self._record_trade(helper, owner)              # trade XP — the road to inventing money
 
     # ── god-authored building templates (the Templates god-tool) ────────────────
     # The god designs buildings in a blank-grid editor and saves them as blueprints in the
@@ -5304,6 +5353,7 @@ class World:
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
                 "speed": self.speed, "day_speed": self.day_speed, "night_speed": self.night_speed,
+                "money_invented": self.money_invented, "money_inventor": self.money_inventor,
             }
             tmp = PATH_META + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -5371,6 +5421,8 @@ class World:
             self.speed = float(meta.get("speed") or 1.0)
             self.day_speed = float(meta.get("day_speed") or 1.0)
             self.night_speed = float(meta.get("night_speed") or 1.0)
+            self.money_invented = bool(meta.get("money_invented"))
+            self.money_inventor = meta.get("money_inventor")
             self.version = meta.get("version", 0)
             self.rng = np.random.default_rng()
             return True
