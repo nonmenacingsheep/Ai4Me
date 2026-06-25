@@ -3958,7 +3958,17 @@ class World:
         self.version += 1
         self._note("build", "The granary stood where no one could reach it — the band hauled it to dry ground.")
 
-    def _blueprint_tasks(self, name, ox, oy, occupied=None, avoid: int = 0):
+    @staticmethod
+    def _rotate_layout(layout, k: int):
+        """Rotate a glyph layout 90°×k clockwise (k in 0..3). Glyphs are orientation-free, so this
+        just carries the door (and windows) round to a different wall — the basis for ORIENTING a
+        building so its door faces open ground rather than always pointing the same way."""
+        rows = [list(r) for r in layout]
+        for _ in range(k % 4):
+            rows = [list(col) for col in zip(*rows[::-1])]
+        return ["".join(r) for r in rows]
+
+    def _blueprint_tasks(self, name, ox, oy, occupied=None, avoid: int = 0, layout=None):
         """Turn a blueprint at origin (ox,oy) into placement tasks + the home core tile, or
         (None, None) if the footprint doesn't fit (off-map, over water, or OVERLAPPING an
         existing building/site — which is why shelters used to grow inside one another). Each
@@ -3966,7 +3976,8 @@ class World:
         Blocks are laid first, then roof tiles. A 'C' core lays no block but is roofed/home.
         When `avoid` > 0 (autonomous siting) the footprint must also keep that many tiles from
         water (flood-shy) and never sit on a standing tree — so the band stops building on the
-        shore and over the woods. (God placement passes avoid=0 — the god may build anywhere.)"""
+        shore and over the woods. (God placement passes avoid=0 — the god may build anywhere.)
+        A `layout` override lets a soul try the building in a chosen ROTATION (see _found_site)."""
         bp = BLUEPRINTS.get(name)
         if not bp:
             return None, None
@@ -3975,7 +3986,7 @@ class World:
         def bad(tx, ty) -> bool:
             return self._tile_unbuildable(tx, ty, occupied, avoid) is not None
 
-        layout = bp["layout"]
+        layout = layout if layout is not None else bp["layout"]
         roof_cost = bp.get("roof_cost", ROOF_COST)
         blocks, roof, core = [], [], None
         for dy, row in enumerate(layout):
@@ -4011,6 +4022,65 @@ class World:
             for t in s["tasks"]:
                 occ.add((t["x"], t["y"]))
         return occ
+
+    def _door_approaches(self) -> set:
+        """Every tile that must stay CLEAR in front of a DOOR — the open step a soul takes to come
+        and go — so a new building can never wall a neighbour into their home by building across the
+        doorway (the spatial-awareness gap: siting used to forbid only OVERLAP, not blocking). Covers
+        doors already placed (in self.blocks) and doors still planned (in pending sites)."""
+        reserved = set()
+        blocks = self.blocks
+        for (x, y), code in blocks.items():
+            if code != BLOCK_DOOR:
+                continue
+            for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = x + ddx, y + ddy
+                if self._in(nx, ny) and (nx, ny) not in blocks and self.water[ny, nx] == WATER_NONE:
+                    reserved.add((nx, ny))             # the open approach just outside the door
+        for s in self.sites:
+            if s.get("done"):
+                continue
+            btiles = {(t["x"], t["y"]) for t in s["tasks"] if t.get("layer") == "block"}
+            for t in s["tasks"]:
+                if t.get("code") != BLOCK_DOOR:
+                    continue
+                x, y = t["x"], t["y"]
+                for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + ddx, y + ddy
+                    if self._in(nx, ny) and (nx, ny) not in btiles and self.water[ny, nx] == WATER_NONE:
+                        reserved.add((nx, ny))
+        return reserved
+
+    def _door_openness(self, tasks, occupied, anchors) -> float:
+        """Score an ORIENTATION: reward a door that opens onto CLEAR GROUND and faces OUT (away from
+        the settlement's heart) instead of into a neighbour's wall — the spatial sense to point a
+        doorway somewhere a soul can actually come and go. Added to the site score in _found_site."""
+        btiles = {(t["x"], t["y"]) for t in tasks if t.get("layer") == "block"}
+        doors = [(t["x"], t["y"]) for t in tasks if t.get("code") == BLOCK_DOOR]
+        if not doors:
+            return 0.0
+        cx = cy = None
+        if anchors:
+            cx = sum(a[0] for a in anchors) / len(anchors)
+            cy = sum(a[1] for a in anchors) / len(anchors)
+        score = 0.0
+        for (x, y) in doors:
+            outdir = None
+            for ddx, ddy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                if (x + ddx, y + ddy) not in btiles:           # the open side outside the door
+                    outdir = (ddx, ddy)
+                    break
+            if outdir is None:
+                continue
+            ddx, ddy = outdir
+            for step in (1, 2):                                # clear ground for two tiles out the door
+                tx, ty = x + ddx * step, y + ddy * step
+                if (self._in(tx, ty) and (tx, ty) not in occupied and (tx, ty) not in btiles
+                        and self.water[ty, tx] == WATER_NONE):
+                    score += 0.8
+            if cx is not None and abs(x + ddx - cx) + abs(y + ddy - cy) > abs(x - cx) + abs(y - cy):
+                score += 0.5                                   # the door faces OUT of the settlement
+        return score
 
     @staticmethod
     def _site_offsets():
@@ -4135,26 +4205,38 @@ class World:
         (a monument) is NOT the builder's home, so it doesn't move their home anchor; a `client`
         commission is OWNED by the client (it becomes their home) and likewise leaves the builder's."""
         bx, by = p["home"]
-        occupied = self._occupied_tiles()
+        occupied = self._occupied_tiles() | self._door_approaches()   # never build across a doorway
         anchors = self._settlement_anchors()
         cands = [name] + (["leaf_shelter"] if name != "leaf_shelter" else [])
         for avoid in (WATER_BUILD_BUFFER, 0):            # prefer a flood-shy spot, else any dry ground
             for cand in cands:
                 bp = BLUEPRINTS[cand]
-                bw, bh = len(bp["layout"][0]), len(bp["layout"])
+                # Try the building in each DISTINCT rotation, so its door can be ORIENTED toward open
+                # ground instead of always facing the same way (a symmetric layout dedups to fewer).
+                rot_layouts, seen_l = [], set()
+                for k in (0, 1, 2, 3):
+                    lr = self._rotate_layout(bp["layout"], k)
+                    key = tuple(lr)
+                    if key not in seen_l:
+                        seen_l.add(key)
+                        rot_layouts.append(lr)
+                per_rot = max(8, SITE_CANDIDATES_CAP // len(rot_layouts))
                 found = []                               # [(score, ox, oy, tasks, core, (cx,cy)), …]
-                fits = 0
-                for off in self._site_offsets():
-                    ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
-                    tasks, core = self._blueprint_tasks(cand, ox, oy, occupied, avoid=avoid)
-                    if not tasks:
-                        continue
-                    cx, cy = core if core else (ox + bw // 2, oy + bh // 2)
-                    s = self._score_site(cx, cy, anchors, communal, origin=(bx, by), bp_name=cand)
-                    found.append((s, ox, oy, tasks, core, (cx, cy)))
-                    fits += 1
-                    if fits >= SITE_CANDIDATES_CAP:      # weighed enough spots — commit to the best
-                        break
+                for lr in rot_layouts:
+                    bw, bh = len(lr[0]), len(lr)
+                    rfits = 0
+                    for off in self._site_offsets():
+                        ox, oy = bx - bw // 2 + off[0], by - bh // 2 + off[1]
+                        tasks, core = self._blueprint_tasks(cand, ox, oy, occupied, avoid=avoid, layout=lr)
+                        if not tasks:
+                            continue
+                        cx, cy = core if core else (ox + bw // 2, oy + bh // 2)
+                        s = (self._score_site(cx, cy, anchors, communal, origin=(bx, by), bp_name=cand)
+                             + self._door_openness(tasks, occupied, anchors))   # orient the door to open ground
+                        found.append((s, ox, oy, tasks, core, (cx, cy)))
+                        rfits += 1
+                        if rfits >= per_rot:             # weighed enough spots in THIS orientation
+                            break
                 if not found:
                     continue                             # this blueprint doesn't fit anywhere — try the next
                 found.sort(key=lambda c: -c[0])
