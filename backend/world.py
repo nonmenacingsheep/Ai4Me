@@ -3274,6 +3274,41 @@ class World:
                 best, best_floor = ub["id"], floor
         return best
 
+    def _validate_blueprint(self, layout) -> tuple:
+        """Lint a building layout: it must enclose at least one floor/core tile, every such tile
+        must be reachable FROM OUTSIDE (through doors or open/leaf panels — no walled-off room a
+        soul could never enter), and the footprint must be a sane size. The guard that keeps a
+        generated or god-drawn building actually usable. Returns (ok: bool, reason: str)."""
+        if not layout:
+            return False, "empty layout"
+        Hh = len(layout)
+        Ww = max(len(r) for r in layout)
+        grid = [r.ljust(Ww, ".") for r in layout]
+        solid = {"W", "O"}                                # walls & windows block; leaf is soft-passable
+        floors = [(x, y) for y in range(Hh) for x in range(Ww) if grid[y][x] in ("F", "C")]
+        if not floors:
+            return False, "no floor"
+        if Hh * Ww > 144 or len(floors) > 60:
+            return False, "oversized footprint"
+        # Flood from OUTSIDE the box inward through every non-solid tile; each floor must be touched.
+        seen = {(-1, -1)}
+        q = [(-1, -1)]
+        qi = 0
+        while qi < len(q):
+            x, y = q[qi]
+            qi += 1
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = x + dx, y + dy
+                if (nx, ny) in seen or not (-1 <= nx <= Ww and -1 <= ny <= Hh):
+                    continue
+                if 0 <= nx < Ww and 0 <= ny < Hh and grid[ny][nx] in solid:
+                    continue
+                seen.add((nx, ny))
+                q.append((nx, ny))
+        if not all(f in seen for f in floors):
+            return False, "a room is walled off from outside"
+        return True, "ok"
+
     def _partition_rooms(self, rows, x0, y0, x1, y1, rooms_left, rng) -> int:
         """Recursively split an interior rect (glyph coords, inclusive) into rooms — a BSP partition.
         Each split lays an inner WALL across the longer axis with a single DOORWAY, so the rooms form
@@ -5761,6 +5796,37 @@ if __name__ == "__main__":
           f"first home = {site['name'] if site else 'none'}, blocks={len(wc.blocks)}, "
           f"roofs={len(wc.roofs)}, insul={b.get('insul')}, housed={b.get('home_struct') is not None} "
           f"-> {'OK' if built_ok else 'FAILED'}")
+
+    # BLUEPRINT LINT — every built-in design AND every parametrically-generated home must be a
+    # usable building: floor enclosed, every room reachable from outside (no walled-off space), and
+    # sanely sized. Sweeps the home designer across household sizes & skills to catch a bad layout
+    # (an orphan room, a door into a wall) before a soul ever tries to live in one.
+    wl = World().generate(seed=11)
+    lint_bad = []
+    for bpn, bp in list(BLUEPRINTS.items()):
+        ok, why = wl._validate_blueprint(bp["layout"])
+        if not ok:
+            lint_bad.append((bpn, why))
+    designed = 0
+    for fam in range(1, 9):
+        for sk in (0.0, 0.4, 0.8):
+            wl.people = []; wl._add_person(50, 50, name="L"); lp = wl.people[0]
+            lp["age"] = ADULT_AGE + 5; lp["home"] = (50, 50)
+            lp["inv"] = {"wood": 99}; lp["skills"] = {"building": sk}; lp["children"] = []
+            for ci in range(max(0, fam - 1)):
+                wl._add_person(50, 52, name=f"c{ci}"); kk = wl.people[-1]; kk["age"] = 2
+                lp["children"].append(kk["id"])
+            if fam >= 2 and lp["children"]:
+                lp["partner"] = lp["children"].pop(0)
+            for rung in ("hut", "cabin"):
+                bid = wl._design_dwelling(lp, rung)
+                ok, why = wl._validate_blueprint(BLUEPRINTS[bid]["layout"])
+                designed += 1
+                if not ok:
+                    lint_bad.append((f"{rung}/fam{fam}/sk{sk}", why))
+    lint_ok = not lint_bad
+    print(f"  blueprint-lint test: builtins + {designed} designed homes all valid={lint_ok}"
+          + (f" BAD={lint_bad[:5]}" if lint_bad else "") + f" -> {'OK' if lint_ok else 'FAILED'}")
 
     # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
     # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.
