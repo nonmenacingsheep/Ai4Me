@@ -556,7 +556,12 @@ BREED_MIN_AGE = 18 * DAYS_PER_YEAR
 BREED_MAX_AGE = 45 * DAYS_PER_YEAR
 BREED_COOLDOWN_DAYS = 14.0         # game-days between a mother's children (births must outpace attrition)
 BOND_WARMTH = 0.30                 # mutual sentiment at which two adults pair off
-POP_CAP = 36                       # ceiling on band size (performance + ecology)
+POP_CAP = int(os.getenv("AITHA_POP_CAP", "100"))   # ceiling on band size. Raised 36→100 so the band can
+# grow into a TOWN (the civilization arc's whole point). The demographics already support it (a model on
+# the real constants grows to the cap in decades, no extinction); the body tick scales linearly (~0.3ms/
+# soul → ~30ms at 100, well under the 167ms budget); and the satiety BIRTH-GATE self-limits the band at
+# its food carrying-capacity (births halt when a pair isn't well-fed), so a higher ceiling can't cause a
+# Malthusian crash — it just lets the band find its natural, food-regulated size.
 TRAIT_MUTATION = 0.08              # how far a child's nature drifts from the parental mean
 RENOWN_LEGACY = 0.25               # share of a parent's standing that passes to each child
 
