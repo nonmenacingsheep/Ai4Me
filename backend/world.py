@@ -2789,7 +2789,16 @@ class World:
                 # standing stones — a little monument by the home for the band to marvel at.
                 spots = art_tiles or bare
                 cx0, cy0 = spots[0]
-                center = "obelisk" if amb >= 0.55 else ("totem" if cur >= 0.55 else "statue")
+                # the centrepiece reflects temperament, with room for variety: the ambitious raise
+                # monumental works (obelisk/arch/statue/brazier), the curious whimsical ones
+                # (totem/fountain/shrine/banner), others something solid and proud.
+                if amb >= 0.55:
+                    palette = ["obelisk", "arch", "statue", "brazier"]
+                elif cur >= 0.55:
+                    palette = ["totem", "fountain", "shrine", "banner"]
+                else:
+                    palette = ["statue", "brazier", "banner", "totem"]
+                center = palette[int(self.rng.integers(len(palette)))]
                 steps = [["place", cx0, cy0, center]]
                 ring = [t for t in bare if t != (cx0, cy0)][:4]
                 steps += [["place", rx, ry, "cairn"] for rx, ry in ring]

@@ -4469,6 +4469,36 @@ function renderWorld() {
         ctx.beginPath(); ctx.ellipse(cx, cy + r2 * 0.3, r2 * 0.7, r2 * 0.38, 0, 0, 6.283); ctx.fill();
         ctx.strokeStyle = '#9fd8f5'; ctx.lineWidth = Math.max(1, z * 0.05);
         ctx.beginPath(); ctx.moveTo(cx, cy + r2 * 0.1); ctx.lineTo(cx, cy - r2 * 0.5); ctx.stroke();
+      } else if (dpt[2] === 'arch') {                         // a stone archway
+        const w = z * 0.7, h = z * 0.85, bx = cx - w / 2, by = cy - h * 0.55, pw = w * 0.22;
+        ctx.fillStyle = '#b3ada1';
+        ctx.fillRect(bx, by + h * 0.35, pw, h * 0.65);                              // left pillar
+        ctx.fillRect(bx + w - pw, by + h * 0.35, pw, h * 0.65);                     // right pillar
+        ctx.beginPath(); ctx.arc(cx, by + h * 0.35, w / 2, Math.PI, 0); ctx.fill(); // the span
+        ctx.fillStyle = '#0000'; ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath(); ctx.arc(cx, by + h * 0.35, w / 2 - pw, Math.PI, 0); ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+      } else if (dpt[2] === 'brazier') {                      // a fire bowl on a stand
+        const bw = z * 0.42;
+        ctx.fillStyle = '#5a5048'; ctx.fillRect(cx - z * 0.04, cy, z * 0.08, z * 0.4);   // stem
+        ctx.fillStyle = '#6b5f53';
+        ctx.beginPath(); ctx.moveTo(cx - bw / 2, cy); ctx.lineTo(cx + bw / 2, cy);
+        ctx.lineTo(cx + bw * 0.34, cy - z * 0.14); ctx.lineTo(cx - bw * 0.34, cy - z * 0.14); ctx.closePath(); ctx.fill();
+        const g = ctx.createRadialGradient(cx, cy - z * 0.12, 0, cx, cy - z * 0.12, bw * 0.5);
+        g.addColorStop(0, '#ffe07a'); g.addColorStop(0.5, '#ff8a1a'); g.addColorStop(1, 'rgba(255,80,0,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(cx, cy - z * 0.18, bw * 0.4, z * 0.28, 0, 0, 6.283); ctx.fill();
+      } else if (dpt[2] === 'shrine') {                       // a small altar with an offering flame
+        const w = z * 0.5, bx = cx - w / 2, by = cy - z * 0.05;
+        ctx.fillStyle = '#8a8278'; ctx.fillRect(bx, by, w, z * 0.3);                 // stone altar
+        ctx.fillStyle = '#b8b0a4'; ctx.fillRect(bx - z * 0.04, by - z * 0.06, w + z * 0.08, z * 0.08); // capstone
+        ctx.fillStyle = '#ffb347';
+        ctx.beginPath(); ctx.ellipse(cx, by - z * 0.16, z * 0.07, z * 0.12, 0, 0, 6.283); ctx.fill();   // little flame
+      } else if (dpt[2] === 'banner') {                       // a flagpole with a banner
+        ctx.strokeStyle = '#6b4824'; ctx.lineWidth = Math.max(1, z * 0.06);
+        ctx.beginPath(); ctx.moveTo(cx - z * 0.2, cy + z * 0.3); ctx.lineTo(cx - z * 0.2, cy - z * 0.5); ctx.stroke();
+        ctx.fillStyle = FLOWER[(dpt[0] * 5 + dpt[1]) % FLOWER.length];
+        ctx.beginPath(); ctx.moveTo(cx - z * 0.2, cy - z * 0.5); ctx.lineTo(cx + z * 0.28, cy - z * 0.38);
+        ctx.lineTo(cx - z * 0.2, cy - z * 0.2); ctx.closePath(); ctx.fill();          // triangular pennant
       } else {                                                // a tuft of flowers
         ctx.fillStyle = '#3f7a44';
         ctx.fillRect(cx - r * 0.25, cy, r * 0.5, r * 1.4);
