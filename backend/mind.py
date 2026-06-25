@@ -440,6 +440,15 @@ def _try_trade(p: dict, other: dict, ra: dict, rb: dict, clock: float) -> str | 
     return f"{p['name']} traded {give} with {other['name']} for {get}."
 
 
+def _market_price(good: str, seller: dict) -> int:
+    """The price a seller asks — the good's base worth, bent by SUPPLY: a seller only just in
+    surplus holds out for a coin more, a glutted one lets it go at base. Emergent prices from local
+    abundance (no global market decreed), never below 1 coin."""
+    base = GOOD_PRICE.get(good, 1)
+    have = seller.get("inv", {}).get(good, 0)
+    return base + 1 if have <= TRADE_SURPLUS + 1 else base    # tight supply commands a premium
+
+
 def _try_buy(buyer: dict, seller: dict, ra: dict, rb: dict, clock: float) -> str | None:
     """A coin SALE: once a soul holds money, it can BUY a good it lacks from a neighbour who has it
     to spare, paying coin for it instead of swapping like-for-like. This is what gives money
@@ -453,7 +462,7 @@ def _try_buy(buyer: dict, seller: dict, ra: dict, rb: dict, clock: float) -> str
     good = _surplus_the_other_wants(seller, buyer)        # seller has it spare; buyer is short of it
     if not good:
         return None
-    price = GOOD_PRICE.get(good, 1)
+    price = _market_price(good, seller)
     if bi.get("coin", 0) < price:
         return None
     bi["coin"] -= price
