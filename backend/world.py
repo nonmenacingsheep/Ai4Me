@@ -286,7 +286,8 @@ PERSON_AVOID_COST  = 4.0      # souls don't walk INTO each other: a tile another
 FOOTFALL_CAP       = 60.0     # most a single tile's wear can build to
 FOOTFALL_DECAY     = 0.78     # daily fade, so abandoned routes grass back over
 FOOTFALL_PRUNE     = 1.5      # drop a tile from the map once its wear fades below this
-FOOTFALL_PATH_MIN  = 9.0      # wear at which a tile reads as a worn path (sent to the renderer)
+FOOTFALL_PATH_MIN  = 6.0      # distinct-walker passes at which a tile reads as a shared worn path (sparser
+                              # now that wear needs DIFFERENT souls, not one soul's repeated steps)
 FOOTFALL_SEND_CAP  = 700      # most worn tiles streamed to the renderer (the busiest win)
 PATH_PULL          = 0.4      # how much easier a worn path is to walk — souls FOLLOW the beaten track
                               # (a gentle cost cut: headway still dominates, so they only road-follow
@@ -294,7 +295,7 @@ PATH_PULL          = 0.4      # how much easier a worn path is to walk — souls
 # ROADS — a desire-path trodden hard enough HARDENS into a persistent road (the slime-mold result:
 # near-optimal routes emerge from reinforce-on-use). Roads outlast the daily footfall fade, pull
 # harder than a soft path, and grass over only if abandoned for good — the seed of a road NETWORK.
-ROAD_HARDEN        = 40.0     # footfall wear at which a tile hardens into a road
+ROAD_HARDEN        = 24.0     # shared-wear at which a tile hardens into a road (a genuinely busy artery)
 ROAD_PULL          = 0.65     # a road is easier going than a soft path (PATH_PULL) — souls follow it
 ROAD_DECAY         = 0.08     # condition a road loses per day when no longer trodden
 ROAD_PRUNE         = 0.15     # condition below which an abandoned road grasses back over
@@ -757,6 +758,7 @@ class World:
         self.decor: dict = {}            # (x,y) -> kind: flowers/art/furniture a soul sets in/around its home
         self.station_objs: dict = {}     # (x,y) -> kind: a crafted workbench/furnace/kiln, PLACED & visible
         self.footfall: dict = {}         # (x,y) -> wear: where feet fall most, worn into visible PATHS (cosmetic)
+        self._foot_last: dict = {}       # (x,y) -> last walker id; a path wears only when DIFFERENT souls tread
         self.roads: dict = {}            # (x,y) -> condition: paths trodden hard enough HARDEN into roads
         self.settlements: list[dict] = []  # first-class SETTLEMENTS (the band's town(s)) — M0 foundation
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
@@ -4754,10 +4756,13 @@ class World:
         if self.water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
             p["wet_until"] = self.clock + WET_DURATION
             p["_wade"] = True
-        else:                                                  # dry ground remembers where feet fall
-            ff = self.footfall
-            w = ff.get((nx, ny), 0.0) + 1.0
-            ff[(nx, ny)] = w if w < FOOTFALL_CAP else FOOTFALL_CAP
+        else:                                                  # dry ground remembers where SHARED feet fall:
+            last = self._foot_last                             # wear builds only when a DIFFERENT soul treads,
+            if last.get((nx, ny)) != p["id"]:                  # so one soul pacing (or a lone household route)
+                ff = self.footfall                             # never wears a path — only a route the band SHARES
+                w = ff.get((nx, ny), 0.0) + 1.0
+                ff[(nx, ny)] = w if w < FOOTFALL_CAP else FOOTFALL_CAP
+                last[(nx, ny)] = p["id"]
         p["x"], p["y"] = nx, ny
 
     def _move_person(self, p, direction):
@@ -4825,6 +4830,7 @@ class World:
             self.roads = kept
         if ff:
             self.footfall = {t: w * FOOTFALL_DECAY for t, w in ff.items() if w * FOOTFALL_DECAY >= FOOTFALL_PRUNE}
+            self._foot_last = {t: w for t, w in self._foot_last.items() if t in self.footfall}  # drop stale walkers
 
     def _paths_payload(self):
         """The worn tiles to draw as paths — those above FOOTFALL_PATH_MIN, busiest first, capped,
@@ -5969,6 +5975,7 @@ class World:
                 "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
                 "footfall": [[x, y, round(w, 1)] for (x, y), w in self.footfall.items()],
                 "roads": [[x, y, round(c, 2)] for (x, y), c in self.roads.items()],
+                "foot_v": 1,                                   # paths/roads now wear only on SHARED use (see load)
                 "settlements": self.settlements,
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
@@ -6032,6 +6039,8 @@ class World:
             self.station_objs = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("stations") or [])}
             self.footfall = {(int(d[0]), int(d[1])): float(d[2]) for d in (meta.get("footfall") or [])}
             self.roads = {(int(d[0]), int(d[1])): float(d[2]) for d in (meta.get("roads") or [])}
+            if meta.get("foot_v", 0) < 1:                      # one-time scrub: the old per-step paths/roads
+                self.footfall = {}; self.roads = {}; self._foot_last = {}   # wore everywhere — start clean
             self.settlements = meta.get("settlements", []) or []   # M0; a pre-M0 save self-heals on the daily tick
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
