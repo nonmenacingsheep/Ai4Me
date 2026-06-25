@@ -441,6 +441,7 @@ WONDER_KINDS = ("generator", "reactor")
 WONDER_VISION = 18                 # tiles within which a wondrous structure is perceived
 WONDER_INSIGHT_TO_LEARN = 24.0     # study-beats of insight before the first electricity craft is grasped
 WONDER_RECIPE = "copper_coil"      # the first secret reverse-engineered from beholding the machine
+WONDER_COOLING_INSIGHT = 10.0      # study-beats before a curious soul reasons WHY a reactor needs water
 STOREHOUSE_BP = "storehouse"       # a communal specialized building that protects the band's stored food
 STORE_SPOIL_FACTOR = 0.5          # a storehouse halves how fast STORED food spoils
 STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
@@ -1494,13 +1495,26 @@ class World:
         mind.speak(p, text, self.clock)
         self._note("awe", f"{p['name']} beheld the strange machine in {'fear' if dread else 'wonder'}.")
 
-    def _study_wonder(self, p):
+    def _study_wonder(self, p, kind="generator"):
         """Standing before the machine, a curious soul STUDIES it — slowly gathering insight until
-        the first secret of the strangers' craft comes clear (reverse-engineering the modern tree)."""
+        the first secret of the strangers' craft comes clear (reverse-engineering the modern tree).
+        Along the way they reason about what the thing NEEDS to run — a reactor runs fearsomely hot
+        and must be cooled — the seed of grasping a building's requirements & consequences."""
         p["insight"] = p.get("insight", 0.0) + 1.0
         if p["insight"] % 8 < 1:
             mind.remember(p, "I study the strangers' machine, trying to grasp how it is wrought",
                           0.5, "study", self.clock)
+        # REASONING about the machine's REQUIREMENT — before grasping how it's built, a curious soul
+        # works out that a reactor runs hot and needs water close by to keep from burning. The user's
+        # own example ("they can't reason a reactor needs cooling") — now they can, and say so.
+        if (kind == "reactor" and p["insight"] >= WONDER_COOLING_INSIGHT
+                and not p.get("grasped_cooling")):
+            p["grasped_cooling"] = True
+            mind.remember(p, "that machine runs fearsomely hot — it must need water close by, or it would burn",
+                          0.75, "study", self.clock)
+            mind.speak(p, "It runs so hot — it must need water to stay cool, else it would burn itself up.",
+                       self.clock)
+            self._note("insight", f"{p['name']} reasoned the strange machine needs water to keep cool.")
         if p["insight"] >= WONDER_INSIGHT_TO_LEARN and not self._person_knows(p, WONDER_RECIPE):
             self._grant_recipe(p, WONDER_RECIPE, via="puzzled out from the strangers' machine",
                                rationale="studied the god's wondrous device until its first secret came clear")
@@ -1520,7 +1534,7 @@ class World:
             return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
         if dist > 2:                                          # curious — go closer to see
             return "wander", (int(np.sign(wx - x)), int(np.sign(wy - y)))
-        self._study_wonder(p)                                # at its foot — study it
+        self._study_wonder(p, _kind)                         # at its foot — study it (and reason about it)
         return "rest", None
 
     def place_power(self, kind: str, x: int, y: int, by: str = "the god") -> str:
