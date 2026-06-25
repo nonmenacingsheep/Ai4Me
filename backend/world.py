@@ -697,7 +697,8 @@ class World:
         self.berry_bushes: list[dict] = []  # scattered berry bushes (some poisonous), P3
         self._berry_index: dict[tuple[int, int], dict] = {}  # (x,y)->bush, rebuilt on load/seed
         self.granary: dict = {"store": {}, "x": None, "y": None}  # the band's shared common store
-        self.decor: dict = {}            # (x,y) -> kind: flowers/art a soul plants to beautify its home
+        self.decor: dict = {}            # (x,y) -> kind: flowers/art/furniture a soul sets in/around its home
+        self.station_objs: dict = {}     # (x,y) -> kind: a crafted workbench/furnace/kiln, PLACED & visible
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
@@ -2755,12 +2756,15 @@ class World:
             if kind == "tidy" and overgrown:
                 return {"goal": goal, "kind": "tidy", "i": 0,
                         "steps": [["clear", tx, ty] for tx, ty in overgrown[:ASPIRE_MAX_STEPS]]}
-            if kind == "furnish":                            # beds for the family, inside the home
-                bedless = [t for t in self._home_interior(p) if t not in self.decor]
-                if bedless:
-                    n = min(len(bedless), max(1, self._household_size(p)))
-                    return {"goal": goal, "kind": "furnish", "i": 0,
-                            "steps": [["place", tx, ty, "bed"] for tx, ty in bedless[:n]]}
+            if kind == "furnish":                            # furnish the home: beds first, then a hearth-table, chairs, a chest
+                empty = [t for t in self._home_interior(p)
+                         if t not in self.decor and t not in self.station_objs]
+                if empty:
+                    want = (["bed"] * max(1, self._household_size(p))  # a bed per soul, then the comforts of a settled home
+                            + ["table", "chest", "chair", "chair"])
+                    steps = [["place", tx, ty, k] for (tx, ty), k in zip(empty, want)]
+                    if steps:
+                        return {"goal": goal, "kind": "furnish", "i": 0, "steps": steps}
             return None
 
         # An LLM-AUTHORED project (the mind's own reasoned goal — see mind.apply_deliberation) takes
@@ -4736,6 +4740,25 @@ class World:
                 return True
         return False
 
+    def _place_station_obj(self, p, kind: str) -> None:
+        """Set a freshly-crafted personal station down as a VISIBLE object in the soul's home — so
+        a workbench/furnace/kiln actually appears in the dwelling instead of living as an abstract
+        list. Prefers a clear interior floor tile; failing that, just outside the door."""
+        taken = set(self.station_objs)
+        interior = [t for t in self._home_interior(p)
+                    if t not in taken and self.decor.get(t) != "bed"]
+        spot = interior[0] if interior else None
+        if spot is None:
+            hx, hy = p.get("home", (p["x"], p["y"]))
+            for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1)):
+                t = (hx + dx, hy + dy)
+                if self._in(t[0], t[1]) and t not in taken and self.water[t[1], t[0]] == WATER_NONE:
+                    spot = t
+                    break
+        if spot is not None:
+            self.station_objs[spot] = kind
+            self.version += 1
+
     def _stations_for(self, p) -> set:
         """The crafting STATIONS a soul can use right now: the campfire of its own hearth, plus
         any communal craft-building (workshop → bench/kiln/loom/tannery, smithy → furnace/forge/
@@ -4824,11 +4847,13 @@ class World:
             return False
         p["inv"][c["out"]] = p["inv"].get(c["out"], 0) + c["qty"]
         # A crafted STATION (workbench/furnace/kiln/forge/loom/tannery/anvil) is PLACED at the
-        # soul's home and thereafter opens its tier of the tree there — the soul's own climb.
+        # soul's home as a VISIBLE object and thereafter opens its tier of the tree there — the
+        # soul's own climb. The kind is also indexed on the soul for the fast station-in-reach gate.
         if c["out"] in crafting.STATION_KINDS:
             stations = p.setdefault("stations", [])
             if c["out"] not in stations:
                 stations.append(c["out"])
+                self._place_station_obj(p, c["out"])
         self.version += 1
         rid = c["rid"]
         p["craft"] = None
@@ -5215,6 +5240,7 @@ class World:
             "berries": [{"x": b["x"], "y": b["y"], "ripe": self._bush_ripe(b)} for b in self.berry_bushes],
             "stockpiles": self._stockpiles_payload(),
             "decor": [[x, y, k] for (x, y), k in self.decor.items()],
+            "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -5399,6 +5425,7 @@ class World:
                 "stone_nodes": self.stone_nodes,
                 "berry_bushes": self.berry_bushes, "granary": self.granary,
                 "decor": [[x, y, k] for (x, y), k in self.decor.items()],
+                "stations": [[x, y, k] for (x, y), k in self.station_objs.items()],
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -5458,6 +5485,7 @@ class World:
                 self._seed_stone_nodes()
             self.granary = meta.get("granary") or {"store": {}, "x": None, "y": None}
             self.decor = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("decor") or [])}
+            self.station_objs = {(int(d[0]), int(d[1])): d[2] for d in (meta.get("stations") or [])}
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:

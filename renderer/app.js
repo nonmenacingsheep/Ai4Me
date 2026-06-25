@@ -4024,6 +4024,7 @@ function setWorld(s) {
     blocks: s.blocks || [], roofs: s.roofs || [], sites: s.sites || [],
     ore: s.ore || [], berries: s.berries || [], blockNames: s.block_names || {},
     stone: s.stone || [], stockpiles: s.stockpiles || [], decor: s.decor || [],
+    stations: s.stations || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -4414,6 +4415,20 @@ function renderWorld() {
         ctx.fillStyle = '#7a5230'; ctx.fillRect(bx, by, bw, bh);          // wooden frame
         ctx.fillStyle = '#c2563f'; ctx.fillRect(bx + bw * 0.12, by + bh * 0.18, bw * 0.76, bh * 0.66); // blanket
         ctx.fillStyle = '#eee6d8'; ctx.fillRect(bx + bw * 0.12, by + bh * 0.18, bw * 0.26, bh * 0.66); // pillow
+      } else if (dpt[2] === 'table') {                        // a low wooden table
+        const tw = z * 0.6, th = z * 0.5, tx = cx - tw / 2, ty = cy - th / 2;
+        ctx.fillStyle = '#8a6038'; ctx.fillRect(tx, ty, tw, th);
+        ctx.fillStyle = '#6b4824'; ctx.fillRect(tx, ty + th * 0.78, tw, th * 0.22); // legs/shadow
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1; ctx.strokeRect(tx, ty, tw, th);
+      } else if (dpt[2] === 'chair') {                        // a little stool/chair
+        const cw = z * 0.34, ch = z * 0.34, qx = cx - cw / 2, qy = cy - ch / 2;
+        ctx.fillStyle = '#9a6e3e'; ctx.fillRect(qx, qy, cw, ch);                    // seat
+        ctx.fillStyle = '#7a5230'; ctx.fillRect(qx, qy - ch * 0.5, cw * 0.28, ch * 0.6); // backrest
+      } else if (dpt[2] === 'chest') {                        // a storage chest
+        const ww = z * 0.5, wh = z * 0.42, wx = cx - ww / 2, wy = cy - wh / 2;
+        ctx.fillStyle = '#6e4a26'; ctx.fillRect(wx, wy, ww, wh);                    // body
+        ctx.fillStyle = '#8a6038'; ctx.fillRect(wx, wy, ww, wh * 0.4);              // domed lid
+        ctx.fillStyle = '#d9c27a'; ctx.fillRect(cx - ww * 0.06, wy + wh * 0.34, ww * 0.12, wh * 0.3); // brass clasp
       } else {                                                // a tuft of flowers
         ctx.fillStyle = '#3f7a44';
         ctx.fillRect(cx - r * 0.25, cy, r * 0.5, r * 1.4);
@@ -4421,6 +4436,48 @@ function renderWorld() {
         for (const [ddx, ddy] of [[-1, -0.3], [1, -0.3], [0, -1.1], [0, 0.2]]) {
           ctx.beginPath(); ctx.arc(cx + ddx * r * 0.85, cy + ddy * r, r * 0.6, 0, 6.283); ctx.fill();
         }
+      }
+    }
+  }
+  // Crafted personal STATIONS a soul has set down in its home — a workbench, then a furnace,
+  // kiln, forge, loom, tannery, anvil. Real visible objects, not an abstract list.
+  if (z >= 3) {
+    for (const sp of (d.stations || [])) {
+      const sx = (sp[0] - cam.camX) * z, sy = (sp[1] - cam.camY) * z;
+      if (!onScreen(sx, sy, 1)) continue;
+      const cx = sx + z / 2, cy = sy + z / 2, k = sp[2];
+      if (k === 'furnace' || k === 'forge') {                 // a stone furnace with a glowing mouth
+        const w = z * 0.62, h = z * 0.66, bx = cx - w / 2, by = cy - h / 2;
+        ctx.fillStyle = '#6b6760'; ctx.fillRect(bx, by, w, h);
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1; ctx.strokeRect(bx, by, w, h);
+        const g = ctx.createRadialGradient(cx, cy + h * 0.1, 0, cx, cy + h * 0.1, w * 0.5);
+        g.addColorStop(0, '#ffd24a'); g.addColorStop(0.5, '#ff7a1a'); g.addColorStop(1, 'rgba(255,90,0,0)');
+        ctx.fillStyle = g; ctx.fillRect(bx, by + h * 0.2, w, h * 0.7);
+      } else if (k === 'kiln') {                              // a domed clay oven
+        const r = z * 0.34;
+        ctx.fillStyle = '#9a6b4a';
+        ctx.beginPath(); ctx.arc(cx, cy + r * 0.3, r, Math.PI, 0); ctx.fill();
+        ctx.fillRect(cx - r, cy + r * 0.3, r * 2, r * 0.5);
+        ctx.fillStyle = '#ff8a3a'; ctx.beginPath(); ctx.arc(cx, cy + r * 0.45, r * 0.34, 0, 6.283); ctx.fill();
+      } else if (k === 'anvil') {                             // a dark iron anvil
+        const w = z * 0.6, bx = cx - w / 2;
+        ctx.fillStyle = '#3a3a40';
+        ctx.fillRect(bx, cy - z * 0.06, w, z * 0.16);                       // face
+        ctx.fillRect(cx - w * 0.12, cy + z * 0.1, w * 0.24, z * 0.2);       // waist
+        ctx.fillRect(bx + w * 0.2, cy + z * 0.28, w * 0.6, z * 0.1);        // base
+      } else if (k === 'loom' || k === 'tannery') {           // an upright frame (threads / stretched hide)
+        const w = z * 0.5, h = z * 0.62, bx = cx - w / 2, by = cy - h / 2;
+        ctx.strokeStyle = '#7a5230'; ctx.lineWidth = Math.max(1, z * 0.06);
+        ctx.strokeRect(bx, by, w, h);
+        ctx.strokeStyle = k === 'loom' ? 'rgba(230,225,210,0.85)' : '#c9a06a';
+        ctx.lineWidth = 1;
+        for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(bx + w * i / 4, by); ctx.lineTo(bx + w * i / 4, by + h); ctx.stroke(); }
+      } else {                                                // a workbench (default) — bench top + a tool
+        const w = z * 0.7, h = z * 0.34, bx = cx - w / 2, by = cy - h / 2;
+        ctx.fillStyle = '#8a6038'; ctx.fillRect(bx, by, w, h);
+        ctx.fillStyle = '#6b4824'; ctx.fillRect(bx, by + h, w, h * 0.5);    // legs/apron
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1; ctx.strokeRect(bx, by, w, h);
+        ctx.fillStyle = '#c9c5bd'; ctx.fillRect(cx + w * 0.1, by - h * 0.3, w * 0.3, h * 0.3); // a tool on the bench
       }
     }
   }
