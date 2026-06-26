@@ -81,17 +81,39 @@ SEASON_STOCK_MULT = {"spring": 1.0, "summer": 1.15, "autumn": 2.1, "winter": 1.6
 # FORAGERS. Each plies a different trade in idle hours, producing a different surplus — which
 # is what gives the barter economy something to move and gifting something to share.
 VOCATIONS = ("forager", "builder", "toolmaker")
+VOCATION_CROWDING = 0.30     # how strongly a soul shuns a calling the band already has plenty of
+VOCATION_NEED = 0.30         # draw toward a calling the band has NO-ONE in yet (someone should take it up)
+VOCATION_HYSTERESIS = 0.12   # a soul won't switch trade unless another is clearly the better fit (no churn)
 
 
-def vocation(p: dict) -> str:
-    """The soul's calling, read from its (lived-bent) temperament. Ambition builds, curiosity
-    makes; everyone else forages — the steady backbone that keeps the band fed."""
+def vocation(p: dict, band=None) -> str:
+    """A soul's calling. Read first from TEMPERAMENT (ambition builds, curiosity makes, the steady
+    rest forage), then BENT toward the trade the band still LACKS — so the band doesn't end up all
+    one calling. The second would-be toolmaker, seeing one already, forages instead ('Elsa makes,
+    Nate builds, so I'll forage'). With no band given it's pure temperament (the offline default)."""
     amb, cur = _trait(p, "ambition"), _trait(p, "curiosity")
-    if amb >= 0.55 and amb >= cur:
-        return "builder"
-    if cur >= 0.55 and cur > amb:
-        return "toolmaker"
-    return "forager"
+    fit = {"builder": amb, "toolmaker": cur, "forager": 0.45 + 0.40 * (1.0 - max(amb, cur))}
+    if band:
+        counts = {v: 0 for v in VOCATIONS}
+        n = 0
+        for q in band:
+            if q is p:
+                continue
+            qv = q.get("vocation")
+            if qv in counts:
+                counts[qv] += 1
+                n += 1
+        if n:
+            ideal = n / len(VOCATIONS)                       # an even split is the band's balance point
+            for v in VOCATIONS:
+                if counts[v] == 0 and n >= 2:                # the band has NO-ONE in this trade yet
+                    fit[v] += VOCATION_NEED                  # someone should take it up
+                fit[v] -= VOCATION_CROWDING * max(0.0, counts[v] - ideal)   # a crowded trade loses its draw
+    best = max(VOCATIONS, key=lambda v: fit[v])
+    cur_voc = p.get("vocation")                              # don't churn: keep the current calling unless
+    if cur_voc in fit and fit[cur_voc] + VOCATION_HYSTERESIS >= fit[best]:  # clearly out-competed now
+        return cur_voc
+    return best
 
 # The vocabulary a tinkering mind brainstorms from when guessing how to make a make-shift
 # craft (raws it can gather plus rope, which every band knows). Offline discovery is honest

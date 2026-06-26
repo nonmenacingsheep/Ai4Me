@@ -2546,7 +2546,9 @@ class World:
         site = None if is_child else self._person_site(p)
         build_progress = (sum(1 for t in site["tasks"] if t["done"]) / len(site["tasks"])
                           if site and site.get("tasks") else 0.0)
-        voc = None if is_child else mind.vocation(p)        # the soul's calling (division of labour)
+        # The soul's calling — read from temperament but BENT toward the trade the band lacks, so the
+        # division of labour stays balanced (not everyone the same calling). Hysteresis keeps it stable.
+        voc = None if is_child else mind.vocation(p, self.people)
         p["vocation"] = voc
         needs_hearth = (not is_child and p.get("home_struct") is not None
                         and self._person_knows(p, "campfire") and not p.get("hearth"))
