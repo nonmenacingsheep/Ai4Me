@@ -557,6 +557,13 @@ CO_OP_MIN = 2                      # builders that must be present at a communal
 CO_OP_CREW_MAX = 4                 # most builders that will join one communal build
 CO_OP_RANGE = 6                    # how near the site a crew-mate counts as "on hand"
 
+# Neighbourliness: a soul at loose ends who spots a band-mate raising their OWN home nearby walks
+# over and OFFERS a hand; the builder accepts unless they dislike the helper. (Communal/commission
+# builds already crew themselves — this is the unbidden good turn between neighbours.)
+HELP_OFFER_RANGE = 9               # how near a neighbour's build must be to catch a passer-by's eye
+HELP_OFFER_CD = 6 * 60            # game-min a soul waits before offering again (after a decline/a stint)
+HELP_OK_SENTIMENT = -0.15         # a builder accepts help unless they regard the offerer below this
+
 # Phase A — the DESIGN RATCHET: an LLM authors a new kind of building for a prospering band. Gated to
 # stay RARE (one design buys days of game-life): a settled builder, a band grown past a threshold, a
 # cooldown between designs, and a cap on the band's own library. Inert with no model (offline ceiling).
@@ -2440,12 +2447,15 @@ class World:
         return edible, drinkable, tree, stone, fiber, leaf, x - wx0, y - wy0, wx0, wy0
 
     def _nearest_local(self, mask, lx, ly):
-        """Step direction toward the nearest True tile in a window mask (centre lx,ly)."""
+        """The RAW delta toward the nearest True tile in a window mask (centre lx,ly) — so the mover
+        PATHFINDS around walls to reach it (water, food, wood, …), instead of greedily oscillating
+        against an obstacle. This is what stops a soul getting stuck on its OWN house wall on the way
+        to water. None if the mask is empty or the nearest tile is the soul's own."""
         if not mask.any():
             return None
         ys, xs = np.nonzero(mask)
         k = int(np.argmin(np.abs(xs - lx) + np.abs(ys - ly)))
-        dx, dy = int(np.sign(xs[k] - lx)), int(np.sign(ys[k] - ly))
+        dx, dy = int(xs[k] - lx), int(ys[k] - ly)
         return (dx, dy) if (dx or dy) else None
 
     def _nearest_loc(self, mask, lx, ly, wx0, wy0):
@@ -2769,6 +2779,9 @@ class World:
             return self._idle(p)          # already beside them — the social pass does the rest
         if kind == "explore":
             p["last_explore_t"] = self.clock
+            lend = self._offer_help_maybe(p, tree, stone, fiber, leaf, lx, ly)
+            if lend is not None:                          # a neighbour's raising their home nearby — pitch in
+                return lend
             # Curiosity is leashed to home range: range out, but turn back before straying
             # past easy return to known water — wonder shouldn't be a death sentence. The leash
             # SHORTENS when the body is weak (hungry/thirsty/tired/hurt), so a soul never wanders
@@ -2796,6 +2809,9 @@ class World:
         if kind == "aspire":
             # A self-authored project beyond survival — beautify one's own home (tidy / garden).
             return self._pursue_aspiration(p)
+        lend = self._offer_help_maybe(p, tree, stone, fiber, leaf, lx, ly)
+        if lend is not None:                              # at loose ends — lend a neighbour a hand if one's building
+            return lend
         return self._idle(p)
 
     def _seek_toward(self, p, target_id):
@@ -4426,6 +4442,63 @@ class World:
         d = self.__dict__.setdefault("_beh", {})
         d[key] = d.get(key, 0) + 1
 
+    def _helpable_build_near(self, p):
+        """A band-mate's OWN home-in-progress within eyeshot that this soul could pitch in on — not a
+        communal/commission raise (those crew themselves), not their own, and still needing work.
+        Nearest first; None if there's nothing to lend a hand with."""
+        x, y = p["x"], p["y"]
+        best, bd = None, HELP_OFFER_RANGE + 1
+        for s in self.sites:
+            if s.get("done") or s.get("communal") or s.get("commission") or s.get("owner") == p["id"]:
+                continue
+            ox, oy = s.get("ox", x), s.get("oy", y)
+            d = abs(ox - x) + abs(oy - y)
+            if d >= bd:
+                continue
+            if all(t.get("done") for t in s.get("tasks", [])):
+                continue                                  # nothing left to lay
+            best, bd = s, d
+        return best
+
+    def _offer_help_maybe(self, p, tree, stone, fiber, leaf, lx, ly):
+        """While at loose ends, a hale soul who SEES a neighbour raising their own home walks over,
+        OFFERS a hand, and — if the builder is willing — pitches in. Returns a body action while
+        offering/helping, or None to carry on wandering. The good turn that makes a village feel
+        like neighbours, not strangers sharing ground."""
+        # Already committed to a build? See it through, then rest the offer.
+        hid = p.get("helping")
+        if hid:
+            site = next((s for s in self.sites if s["id"] == hid and not s.get("done")), None)
+            if site is not None and not all(t.get("done") for t in site.get("tasks", [])):
+                return self._help_build(p, hid, tree, stone, fiber, leaf, lx, ly)
+            p.pop("helping", None)
+            p["help_offer_cd"] = self.clock + HELP_OFFER_CD
+            return None
+        # Only a settled, hale, unhurried soul offers — never while houseless, sick, or running low.
+        if (p.get("home_struct") is None or p.get("illness")
+                or max(p.get("hunger", 0), p.get("thirst", 0), p.get("fatigue", 0)) > 0.5
+                or self.clock < p.get("help_offer_cd", 0.0)):
+            return None
+        site = self._helpable_build_near(p)
+        if site is None:
+            return None
+        owner = next((q for q in self.people if q["id"] == site.get("owner")), None)
+        if owner is None:
+            return None
+        x, y = p["x"], p["y"]
+        if abs(owner["x"] - x) + abs(owner["y"] - y) > 2:        # walk over to ask (pathfinds round walls)
+            return "socialize", (owner["x"] - x, owner["y"] - y)
+        # Beside them — ASK. The builder accepts unless they regard the offerer poorly.
+        sentiment = p.get("rel", {}).get(owner["id"], {}).get("sentiment", 0.0)
+        if sentiment < HELP_OK_SENTIMENT:
+            p["help_offer_cd"] = self.clock + HELP_OFFER_CD
+            mind.speak(owner, "I've got it — but thank you.", self.clock)
+            return None
+        p["helping"] = site["id"]                                # accepted — fall in and help
+        mind.speak(p, f"Want a hand with that, {owner['name']}?", self.clock)
+        mind.speak(owner, "Aye — much obliged!", self.clock)
+        return self._help_build(p, site["id"], tree, stone, fiber, leaf, lx, ly)
+
     def _help_build(self, p, site_id, tree, stone, fiber, leaf, lx, ly):
         """Lend a hand on a band-mate's unfinished build: FORAGE the next tile's material if short
         of it (just as the owner would), then walk over and lay the tile. The finished home still
@@ -4450,7 +4523,7 @@ class World:
             return g() if g else self._idle(p)
         tx, ty = task["x"], task["y"]
         if max(abs(tx - x), abs(ty - y)) > 1:
-            return "wander", (int(np.sign(tx - x)), int(np.sign(ty - y)))
+            return "wander", (tx - x, ty - y)            # walk to the build tile → pathfind round walls
         before = sum(1 for t in site["tasks"] if t["done"])
         self._build_next_block(p, site=site)            # lay it (credits the owner on completion)
         if sum(1 for t in site["tasks"] if t["done"]) > before:
@@ -6743,6 +6816,34 @@ if __name__ == "__main__":
         coop_ok = solo_blocked and crew_builds
     print(f"  co-op build test: lone-builder-blocked={solo_blocked if csite else '?'} "
           f"crew-of-two-builds={crew_builds if csite else '?'} -> {'OK' if coop_ok else 'FAILED'}")
+
+    # OFFER A HAND — a hale, settled soul at loose ends who spots a NEIGHBOUR raising their own home
+    # walks over, asks, and pitches in; a disliked builder declines; a hungry passer-by doesn't offer.
+    wh = World().generate(seed=5); wh.people = []
+    hl = np.argwhere(wh.water == WATER_NONE)[len(np.argwhere(wh.water == WATER_NONE)) // 2]
+    hby, hbx = int(hl[0]), int(hl[1])
+    def _hsite():
+        return {"id": "hs", "owner": "OWN", "bp": "hut", "ox": hbx, "oy": hby, "done": False,
+                "communal": False, "tasks": [{"x": hbx, "y": hby, "code": 1, "cost": ["wood", 1], "done": False}]}
+    def _hsetup(hx, hy):
+        wh.people = []
+        wh._add_person(hbx, hby, name="Own"); _o = wh.people[0]; _o["id"] = "OWN"; _o["home"] = (hbx, hby)
+        wh._add_person(hx, hy, name="Help"); _h = wh.people[1]; _h["id"] = "HLP"; _h["home"] = (hbx + 6, hby)
+        _h["home_struct"] = "hh"; _h["age"] = ADULT_AGE + 5; _h["inv"] = {}
+        _h["hunger"] = _h["thirst"] = _h["fatigue"] = 0.1; _h["hp"] = 1.0; _h["help_offer_cd"] = 0.0
+        return _o, _h
+    def _hgrids(_h):
+        e, d, t, s, f, l, glx, gly, _, _ = wh._perceive(_h["x"], _h["y"]); return (t, s, f, l, glx, gly)
+    _o, _h = _hsetup(hbx + 1, hby); wh.sites = [_hsite()]
+    h_accept = (wh._offer_help_maybe(_h, *_hgrids(_h)) is not None and _h.get("helping") == "hs"
+                and bool(_h.get("say")))
+    _o, _h = _hsetup(hbx + 1, hby); wh.sites = [_hsite()]; _h["rel"] = {"OWN": {"sentiment": -0.5, "name": "Own"}}
+    h_decline = wh._offer_help_maybe(_h, *_hgrids(_h)) is None and _h.get("helping") is None
+    _o, _h = _hsetup(hbx + 1, hby); _h["hunger"] = 0.8; wh.sites = [_hsite()]
+    h_gated = wh._offer_help_maybe(_h, *_hgrids(_h)) is None
+    help_ok = h_accept and h_decline and h_gated
+    print(f"  offer-a-hand test: accepts={h_accept} disliked-declines={h_decline} hungry-skips={h_gated} "
+          f"-> {'OK' if help_ok else 'FAILED'}")
 
     # HUNTING PARTIES — big game (a deer) can't be taken by one: a lone hunter's strikes never
     # fell it; a party of HUNT_PARTY_MIN on hand brings it down and shares the meat.
