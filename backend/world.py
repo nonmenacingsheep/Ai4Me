@@ -496,6 +496,13 @@ STOREHOUSE_BP = "storehouse"       # a communal specialized building that protec
 STORE_SPOIL_FACTOR = 0.5          # a storehouse halves how fast STORED food spoils
 STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
 
+# A building's FUNCTION — the real mechanical ROLE it fills. Every functional effect keys off this,
+# not a fixed blueprint id, so the band's workshop/storehouse/hall works whether it's the built-in
+# form OR one the band designed itself (Phase A.2: the LLM authors the FORM, the function is real).
+BUILTIN_FUNCTION = {WORKSHOP_BP: "workshop", SMITHY_BP: "smithy",
+                    STOREHOUSE_BP: "storehouse", MONUMENT_BP: "hall"}
+AUTHORABLE_FUNCTIONS = ("home", "workshop", "smithy", "storehouse", "hall")  # what an LLM may design
+
 # ─── Renown — social standing (Phase 2) ──────────────────────────────────────
 # A soul's STANDING in the band: it grows from socially-visible achievements (raising a fine
 # home, a communal monument, teaching a craft, giving freely) and fades slowly if not renewed,
@@ -3598,7 +3605,7 @@ class World:
         # may turn to raising the band's communal monument — choosing lasting standing over a
         # finer house of their own. It takes precedence over further nesting; less driven souls
         # keep climbing the dwelling ladder instead.
-        mon = {"kind": "monument", "bp": MONUMENT_BP,
+        mon = {"kind": "monument", "bp": self._authored_for("hall") or MONUMENT_BP,
                "why": "raise a gathering hall — a place for us all, and a name that lasts"}
         has_real_home = i >= DWELLING_LADDER.index("hut")
         # Already mid communal build (hall OR workshop)? Keep at it rather than switching projects.
@@ -3613,22 +3620,22 @@ class World:
         # isn't one yet — gear, tools and everyone's crafting go faster beside it. It's their
         # answer to the ambitious soul's gathering hall.
         voc = p.get("vocation") or mind.vocation(p)
-        band_has_shop = any(s["bp"] == WORKSHOP_BP and s["done"] for s in self.sites)
+        band_has_shop = self._has_function("workshop")
         if (voc == "toolmaker" and has_real_home and not band_has_shop
                 and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
-            return {"kind": "monument", "bp": WORKSHOP_BP,
+            return {"kind": "monument", "bp": self._authored_for("workshop") or WORKSHOP_BP,
                     "why": "raise a workshop — a bench for us all, and faster hands"}
         # Once the band has a workshop, a toolmaker raises the SMITHY — the metalworking shop that
         # opens smelting and metal tools (the deep tree). Their crowning specialty build.
-        if (voc == "toolmaker" and has_real_home and band_has_shop and not self._has_building(SMITHY_BP)
+        if (voc == "toolmaker" and has_real_home and band_has_shop and not self._has_function("smithy")
                 and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
-            return {"kind": "monument", "bp": SMITHY_BP,
+            return {"kind": "monument", "bp": self._authored_for("smithy") or SMITHY_BP,
                     "why": "raise a smithy — to smelt ore and forge true metal tools"}
         # A FORAGER's specialty: raise the communal STOREHOUSE so the band's food keeps against
         # lean days (slower spoilage, fewer vermin) — their answer to the bench and the hall.
-        if (voc == "forager" and has_real_home and not self._has_building(STOREHOUSE_BP)
+        if (voc == "forager" and has_real_home and not self._has_function("storehouse")
                 and (self._communal_build_to_join(p) is not None or not self._communal_in_progress())):
-            return {"kind": "monument", "bp": STOREHOUSE_BP,
+            return {"kind": "monument", "bp": self._authored_for("storehouse") or STOREHOUSE_BP,
                     "why": "raise a storehouse — to keep our food against lean days"}
         # A BUILDER's calling: OFFER to raise a proper home for a leaf-sheltered neighbour, paid a
         # fee on completion — the deliberate labour market ("build a home for others for something in
@@ -3646,7 +3653,7 @@ class World:
             wants = self._community_wants(p)
             if wants:
                 return wants[0]
-        band_has_hall = any(s["bp"] == MONUMENT_BP and s["done"] for s in self.sites)
+        band_has_hall = self._has_function("hall")
         # A communal build is a GROUP effort: an ambitious soul undertakes one, OR joins an
         # in-progress one whose crew isn't full — so the band's builders converge to raise it
         # together (a lone soul can't lay its heavy tiles; see _build_next_block). Only begun when
@@ -3903,6 +3910,35 @@ class World:
             if s.get("done") and s.get("bp") == bp and abs(s["ox"] - x) + abs(s["oy"] - y) <= r:
                 return True
         return False
+
+    # ── building FUNCTION — effects key off the role, so an LLM-authored form works too (A.2) ──
+    def _bp_function(self, bp_id) -> str:
+        """The mechanical role a blueprint fills: a built-in workshop/smithy/storehouse/hall, or
+        whatever an authored design declared. '' for a plain home/monument with no special effect."""
+        if bp_id in BUILTIN_FUNCTION:
+            return BUILTIN_FUNCTION[bp_id]
+        return (BLUEPRINTS.get(bp_id) or {}).get("function") or ""
+
+    def _has_function(self, func: str) -> bool:
+        """Has the band finished ANY building (built-in OR self-designed) that fills this role?"""
+        return any(s.get("done") and self._bp_function(s.get("bp")) == func for s in self.sites)
+
+    def _near_function(self, p, func: str, r: int) -> bool:
+        """Is the soul within r of a FINISHED building filling this role (whatever its design)?"""
+        x, y = p["x"], p["y"]
+        for s in self.sites:
+            if (s.get("done") and self._bp_function(s.get("bp")) == func
+                    and abs(s["ox"] - x) + abs(s["oy"] - y) <= r):
+                return True
+        return False
+
+    def _authored_for(self, func: str):
+        """The id of an LLM-authored design for this role, if the band has dreamt one up — so it
+        raises ITS OWN workshop/storehouse/hall instead of the built-in form. Newest design wins."""
+        for ab in reversed(self.authored_blueprints):
+            if ab.get("function") == func:
+                return ab["id"]
+        return None
 
     def _community_wants(self, p):
         """The PUBLIC WORKS the band needs but hasn't raised — its growing repertoire of functional
@@ -4670,6 +4706,7 @@ class World:
                 "name": ab.get("name", "Building"), "roof": bool(ab.get("roof", True)),
                 "insulation": float(ab.get("insulation", 1.0)), "layout": list(ab.get("layout", [])),
                 "communal": bool(ab.get("communal", False)), "authored": True,
+                "function": ab.get("function", "home"),     # the real ROLE its effect keys off (A.2)
             }
 
     def apply_authored_building(self, data, by="the band") -> str | None:
@@ -4693,16 +4730,21 @@ class World:
             self._note("design", f"a plan for a {name.lower()} was set aside — {why}.")
             self._bump("design_rejected")
             return None
+        func = str(data.get("function") or "home").strip().lower()
+        if func not in AUTHORABLE_FUNCTIONS:                  # the band only designs roles it understands
+            func = "home"
+        communal = (func != "home")                          # a workshop/store/hall is a PUBLIC work, not a home
         bid = "auth_" + uuid.uuid4().hex[:8]
         bp = {"id": bid, "name": name, "roof": True, "insulation": 1.0, "layout": layout,
-              "communal": bool(data.get("communal")), "authored": True,
+              "communal": communal, "authored": True, "function": func,
               "purpose": (str(data.get("purpose") or "").strip())[:80]}
         self.authored_blueprints.append(bp)
         self._register_authored()
         self._authored_cd = self.clock + AUTHOR_COOLDOWN   # rest the design ratchet — one buys days
         self.version += 1
         self._bump("authored_building")
-        self._note("design", f"{by} worked out a new kind of building — a {name.lower()}"
+        role = "" if func == "home" else f" — a {func} for the band"
+        self._note("design", f"{by} worked out a new kind of building — a {name.lower()}{role}"
                              + (f" ({bp['purpose']})" if bp["purpose"] else "") + ".")
         return bid
 
@@ -5109,7 +5151,7 @@ class World:
         proportionally to elapsed time over its shelf life. Cheap: a few people × a few items."""
         if dt_days <= 0:
             return
-        has_store = self._has_building(STOREHOUSE_BP)              # the band's stores keep better with one
+        has_store = self._has_function("storehouse")              # the band's stores keep better with one
         for p in self.people:
             for hold in (p.get("inv"), p.get("store")):
                 if not hold:
@@ -5163,7 +5205,7 @@ class World:
         """A fat larder of fresh food draws vermin. Each game-day, a store past the threshold
         risks a raid that carries off a chunk — the price of hoarding perishables in the open,
         and a nudge toward DRYING the surplus (preserved goods don't tempt them)."""
-        has_store = self._has_building(STOREHOUSE_BP)             # a storehouse keeps vermin off the stores
+        has_store = self._has_function("storehouse")             # a storehouse keeps vermin off the stores
         for p in self.people:
             store = p.get("store")
             if not store:
@@ -5346,13 +5388,9 @@ class World:
         return True
 
     def _near_workshop(self, p) -> bool:
-        """Is the soul working within reach of a finished communal workshop (the band's bench)?"""
-        x, y = p["x"], p["y"]
-        for s in self.sites:
-            if s.get("done") and s.get("bp") == WORKSHOP_BP \
-                    and abs(s["ox"] - x) + abs(s["oy"] - y) <= WORKSHOP_RANGE:
-                return True
-        return False
+        """Is the soul working within reach of a finished workshop (the band's bench) — the built-in
+        form OR one the band designed itself (A.2)?"""
+        return self._near_function(p, "workshop", WORKSHOP_RANGE)
 
     def _place_station_obj(self, p, kind: str) -> None:
         """Set a freshly-crafted personal station down as a VISIBLE object in the soul's home — so
@@ -6478,10 +6516,14 @@ if __name__ == "__main__":
     # LLM only for a SETTLED BUILDER in a prospering band. Inert offline — with no model the band
     # builds exactly as before, so this can't move survival.
     wa = World().generate(seed=5)
-    a_good = wa.apply_authored_building({"name": "Workshop", "purpose": "to craft",
-                                         "layout": ["WWDWW", "WFCFW", "WFFFW", "WWWWW"]})
+    # A.2: an authored WORKSHOP carries a FUNCTION → built communally, and the band would raise ITS
+    # design (not the built-in) and crafting near it is faster. Built-ins still resolve to their role.
+    a_good = wa.apply_authored_building({"name": "Tinkers' Shed", "function": "workshop",
+                                         "purpose": "to craft", "layout": ["WWDWW", "WFCFW", "WFFFW", "WWWWW"]})
     a_walled = wa.apply_authored_building({"name": "Tomb", "layout": ["WWWWW", "WFFFW", "WWWWW"]})  # no door
     a_huge = wa.apply_authored_building({"name": "Mega", "layout": ["F" * 20] * 20})                # oversized
+    func_ok = (wa._bp_function(WORKSHOP_BP) == "workshop" and wa._bp_function(a_good) == "workshop"
+               and BLUEPRINTS[a_good]["communal"] and wa._authored_for("workshop") == a_good)
     a_land = np.argwhere(wa.water == WATER_NONE)
     wa.people = []
     for i in range(AUTHOR_MIN_POP):
@@ -6492,10 +6534,10 @@ if __name__ == "__main__":
     a_forg = wa.people[1]; a_forg["vocation"] = "forager"; a_forg["home_struct"] = "h"
     a_trig_f = wa.wants_new_building(a_forg)                        # a forager is not the architect → no
     auth_ok = (bool(a_good) and a_good in BLUEPRINTS and a_walled is None and a_huge is None
-               and a_trig_b and not a_trig_f)
-    print(f"  authoring test (Phase A): registered={bool(a_good)} rejects-walled={a_walled is None} "
-          f"rejects-huge={a_huge is None} trigger builder={a_trig_b}/forager={a_trig_f} "
-          f"-> {'OK' if auth_ok else 'FAILED'}")
+               and func_ok and a_trig_b and not a_trig_f)
+    print(f"  authoring test (Phase A/A.2): registered={bool(a_good)} func_routes={func_ok} "
+          f"rejects-walled={a_walled is None} rejects-huge={a_huge is None} "
+          f"trigger builder={a_trig_b}/forager={a_trig_f} -> {'OK' if auth_ok else 'FAILED'}")
 
     # SETTLEMENT (M0) — the housed band becomes a first-class town: named, centred on its homes,
     # with a roll of members; a pre-M0 (empty) save self-heals on the daily tick; none when homeless.

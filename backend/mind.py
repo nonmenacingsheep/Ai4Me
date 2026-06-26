@@ -960,17 +960,23 @@ def author_building_messages(p: dict, ctx: dict) -> tuple[str, str]:
         "A plan is a grid of single-character GLYPHS, one string per row, every row the same length:\n"
         "  W = wall   F = floor (inside)   D = door (on an OUTER edge, opening outward)\n"
         "  O = window (set in a wall)   C = hearth / heart of the room   . = open ground (outside)\n"
+        "Pick a FUNCTION — the real job the building does for the band:\n"
+        "  workshop  — a bench where tools and goods are crafted faster\n"
+        "  storehouse — keeps the band's food from spoiling and safe from vermin\n"
+        "  smithy    — a forge to smelt ore and make metal tools\n"
+        "  hall      — a gathering place that draws the band together\n"
+        "  home      — a dwelling for a household\n"
         "RULES: keep it small and buildable — at MOST 8 rows by 8 columns. Wall the floor in. Put at "
         "LEAST one door (D) on an outer edge so people can enter, and make every inside tile reachable "
-        "from it. Match size to purpose — a workshop or store is small, a gathering hall larger. Build "
-        "only with what the band has; invent no new materials."
+        "from it. Match size to function — a workshop or store is small, a hall larger. Build only with "
+        "what the band has; invent no new materials."
     )
     user = (
-        f"You are {name}, in {where}. Your people are prospering and could use a kind of building they "
-        f"don't have yet. They can build with: {have}. What they already raise: {existing}.\n"
-        "Design ONE useful new building. Reply as JSON:\n"
-        '{"name": "<short name>", "purpose": "<one short phrase: what it is for>", '
-        '"layout": ["WWDWW","WFCFW","WFFFW","WWWWW"]}'
+        f"You are {name}, in {where}. Your people are prospering and could use a building they don't "
+        f"have yet. They can build with: {have}. What they already raise: {existing}.\n"
+        "Design ONE useful building and give its function. Reply as JSON:\n"
+        '{"name": "<short name>", "function": "<workshop|storehouse|smithy|hall|home>", '
+        '"purpose": "<one short phrase>", "layout": ["WWDWW","WFCFW","WFFFW","WWWWW"]}'
     )
     return system, user
 
