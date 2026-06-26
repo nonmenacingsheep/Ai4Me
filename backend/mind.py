@@ -944,6 +944,37 @@ def apply_discovery(p: dict, data: dict, ctx: dict, world_known: set, clock: flo
     return None
 
 
+def author_building_messages(p: dict, ctx: dict) -> tuple[str, str]:
+    """Build (system, user) asking the mind to DESIGN a new kind of building for its settlement —
+    the LLM as ARCHITECT (Phase A). It returns a small glyph-grid floor-plan the engine then
+    VALIDATES (the immune system) and the band raises tile by tile. The author proposes a FORM; the
+    deterministic engine disposes (rejects a hallucinated mansion or a walled-off room)."""
+    name = p["name"]
+    have = ctx.get("can_build_with") or "wood, leaves and stone"
+    existing = ctx.get("buildings_here") or "simple homes"
+    where = ctx.get("settlement") or "your settlement"
+    system = (
+        "You are the practical imagination of a person in a small pre-industrial settlement, "
+        "designing a NEW kind of building their people need. You think in simple floor-plans and "
+        "reply with ONE JSON object only — no prose.\n"
+        "A plan is a grid of single-character GLYPHS, one string per row, every row the same length:\n"
+        "  W = wall   F = floor (inside)   D = door (on an OUTER edge, opening outward)\n"
+        "  O = window (set in a wall)   C = hearth / heart of the room   . = open ground (outside)\n"
+        "RULES: keep it small and buildable — at MOST 8 rows by 8 columns. Wall the floor in. Put at "
+        "LEAST one door (D) on an outer edge so people can enter, and make every inside tile reachable "
+        "from it. Match size to purpose — a workshop or store is small, a gathering hall larger. Build "
+        "only with what the band has; invent no new materials."
+    )
+    user = (
+        f"You are {name}, in {where}. Your people are prospering and could use a kind of building they "
+        f"don't have yet. They can build with: {have}. What they already raise: {existing}.\n"
+        "Design ONE useful new building. Reply as JSON:\n"
+        '{"name": "<short name>", "purpose": "<one short phrase: what it is for>", '
+        '"layout": ["WWDWW","WFCFW","WFFFW","WWWWW"]}'
+    )
+    return system, user
+
+
 # ─── LLM touch-points (prompt builders + result appliers; the call itself is in the
 #     server, so this module stays sync/testable and free of the brain dependency) ────
 def deliberate_messages(p: dict, ctx: dict) -> tuple[str, str]:

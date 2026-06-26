@@ -749,6 +749,17 @@ async def _mind_think_one():
                 w.version += 1
                 await broadcast({"type": "world_changed",
                                  "changes": [f"{target['name']} reasoned out a {rid.replace('_', ' ')}"]})
+        # Architecture authoring (Phase A — the design ratchet): when a SETTLED BUILDER's band has
+        # grown prosperous, let the model DESIGN a new kind of building. The engine VALIDATES it (the
+        # immune system) before the band can raise it — the mind proposes a form, the engine disposes.
+        if target is not None and w.wants_new_building(target):
+            asys, ausr = mind_store.author_building_messages(target, ctx)
+            araw = await asyncio.wait_for(
+                brain._complete(asys, ausr, max_tokens=200, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+            bid = w.apply_authored_building(brain._parse_json_object(araw), by=target["name"])
+            if bid:
+                await broadcast({"type": "world_changed",
+                                 "changes": [f"{target['name']} designed a new kind of building"]})
     except Exception as e:
         print(f"[mind] deliberation fell back to the arbiter ({type(e).__name__}: {e})")
 

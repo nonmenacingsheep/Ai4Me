@@ -541,6 +541,13 @@ AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monu
 CO_OP_MIN = 2                      # builders that must be present at a communal site to lay a tile
 CO_OP_CREW_MAX = 4                 # most builders that will join one communal build
 CO_OP_RANGE = 6                    # how near the site a crew-mate counts as "on hand"
+
+# Phase A — the DESIGN RATCHET: an LLM authors a new kind of building for a prospering band. Gated to
+# stay RARE (one design buys days of game-life): a settled builder, a band grown past a threshold, a
+# cooldown between designs, and a cap on the band's own library. Inert with no model (offline ceiling).
+AUTHOR_MIN_POP = 10                # the band must have grown this big to spare imagination for new forms
+AUTHOR_MAX = 6                     # cap on the band's self-authored design library
+AUTHOR_COOLDOWN = 2 * 24 * 60      # game-minutes between authored buildings (~2 days)
 PLY_WOOD_STOCK = 14                # a woodcutter plying their trade stocks timber up to this
 
 # ─── Generations & lineage (Phase 4) ─────────────────────────────────────────
@@ -769,6 +776,7 @@ class World:
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
+        self.authored_blueprints: list[dict] = []  # the BAND's own designs (LLM-authored, validated) — Phase A
         self._load_templates()                    # pull the library off disk + register it for placement
         self.log: list[dict] = []        # recent god actions / notable events
         # Craft knowledge. Everyone is born knowing the basics (STARTER_RECIPES); the make-
@@ -3415,8 +3423,10 @@ class World:
         not just the parametric default. Picks the smallest non-communal template roomy enough for
         the household; None when there's none suitable (or it's a timber design and no wood is to
         hand). This is the long-promised 'templates as priors': the god's blueprints become the
-        forms a soul reaches for first."""
-        if not self.user_blueprints:
+        forms a soul reaches for first. The band's OWN (LLM-authored) designs count too — Phase A —
+        so a soul reaches for a home its people designed, not only the god's or the parametric one."""
+        priors = self.user_blueprints + self.authored_blueprints   # the god's designs AND the band's own
+        if not priors:
             return None
         fam = self._household_size(p)
         hx, hy = p["home"]
@@ -3426,7 +3436,7 @@ class World:
         # household needs — a family of two doesn't raise a 100-tile hall just because the god drew
         # one. Templates wildly oversized for this soul are skipped; the parametric designer (which
         # sizes to the household) then builds an appropriately modest home.
-        for ub in self.user_blueprints:
+        for ub in priors:
             if ub.get("communal"):
                 continue
             layout = ub.get("layout") or []
@@ -4649,6 +4659,63 @@ class World:
                 "capacity": int(ub.get("capacity", 0)),
                 "user": True,
             }
+
+    def _register_authored(self) -> None:
+        """Inject the BAND's own (LLM-authored, validated) designs into BLUEPRINTS, so the build
+        machinery raises them like any built-in. Mirrors _register_user_blueprints for god templates."""
+        for ab in self.authored_blueprints:
+            BLUEPRINTS[ab["id"]] = {
+                "name": ab.get("name", "Building"), "roof": bool(ab.get("roof", True)),
+                "insulation": float(ab.get("insulation", 1.0)), "layout": list(ab.get("layout", [])),
+                "communal": bool(ab.get("communal", False)), "authored": True,
+            }
+
+    def apply_authored_building(self, data, by="the band") -> str | None:
+        """The Author→Validate→World loop for ARCHITECTURE (mirrors apply_llm_discovery for crafts):
+        take an LLM-authored building DESIGN (name + purpose + glyph layout) and, only if it survives
+        the validators — known glyphs & sane dims (_valid_layout) AND a usable building (floor
+        enclosed, every room reachable, sane size — _validate_blueprint) — register it as a new
+        blueprint the band can raise. The validators are the IMMUNE SYSTEM: a hallucinated 113-tile
+        mansion or a walled-off room is set aside, never built. Returns the new blueprint id, or None.
+        The mind PROPOSES; the deterministic engine DISPOSES."""
+        if not isinstance(data, dict):
+            return None
+        name = (str(data.get("name") or "").strip())[:40]
+        layout = data.get("layout")
+        if isinstance(layout, list):
+            layout = [str(r) for r in layout]
+        if not name or not self._valid_layout(layout):       # known glyphs (. F W D O # L C), 1–16 sq
+            return None
+        ok, why = self._validate_blueprint(layout)           # floor enclosed, reachable from outside, sane size
+        if not ok:
+            self._note("design", f"a plan for a {name.lower()} was set aside — {why}.")
+            self._bump("design_rejected")
+            return None
+        bid = "auth_" + uuid.uuid4().hex[:8]
+        bp = {"id": bid, "name": name, "roof": True, "insulation": 1.0, "layout": layout,
+              "communal": bool(data.get("communal")), "authored": True,
+              "purpose": (str(data.get("purpose") or "").strip())[:80]}
+        self.authored_blueprints.append(bp)
+        self._register_authored()
+        self._authored_cd = self.clock + AUTHOR_COOLDOWN   # rest the design ratchet — one buys days
+        self.version += 1
+        self._bump("authored_building")
+        self._note("design", f"{by} worked out a new kind of building — a {name.lower()}"
+                             + (f" ({bp['purpose']})" if bp["purpose"] else "") + ".")
+        return bid
+
+    def wants_new_building(self, p) -> bool:
+        """Rule trigger for the LLM design ratchet: a SETTLED BUILDER in a band prosperous enough to
+        spare the imagination — grown past AUTHOR_MIN_POP — when the band has room left in its design
+        library and hasn't authored one lately (cooldown). Rare by construction: the LLM is the rare,
+        expensive AUTHOR; this cheap rule decides WHEN it's worth waking. Inert until a band thrives."""
+        if len(self.authored_blueprints) >= AUTHOR_MAX:
+            return False
+        if p.get("vocation") != "builder" or p.get("home_struct") is None:
+            return False                                   # the band's settled architect, not a struggler
+        if self.clock < getattr(self, "_authored_cd", 0.0):
+            return False                                   # still resting from the last design
+        return len(self.people) >= AUTHOR_MIN_POP          # only a grown, prospering band
 
     @staticmethod
     def _valid_layout(layout) -> bool:
@@ -5984,6 +6051,7 @@ class World:
                 "roads": [[x, y, round(c, 2)] for (x, y), c in self.roads.items()],
                 "foot_v": 1,                                   # paths/roads now wear only on SHARED use (see load)
                 "settlements": self.settlements,
+                "authored_blueprints": self.authored_blueprints,   # the band's own designs (Phase A)
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -6049,6 +6117,8 @@ class World:
             if meta.get("foot_v", 0) < 1:                      # one-time scrub: the old per-step paths/roads
                 self.footfall = {}; self.roads = {}; self._foot_last = {}   # wore everywhere — start clean
             self.settlements = meta.get("settlements", []) or []   # M0; a pre-M0 save self-heals on the daily tick
+            self.authored_blueprints = meta.get("authored_blueprints", []) or []   # the band's own designs
+            self._register_authored()                     # re-inject them into BLUEPRINTS for the build machinery
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
             if self.berry_bushes:
@@ -6265,6 +6335,30 @@ if __name__ == "__main__":
     lint_ok = not lint_bad
     print(f"  blueprint-lint test: builtins + {designed} designed homes all valid={lint_ok}"
           + (f" BAD={lint_bad[:5]}" if lint_bad else "") + f" -> {'OK' if lint_ok else 'FAILED'}")
+
+    # ARCHITECTURE AUTHORING (Phase A) — the LLM design ratchet. An authored building is REGISTERED
+    # only if it survives the validators (the immune system); the rule trigger wakes the (rare, costly)
+    # LLM only for a SETTLED BUILDER in a prospering band. Inert offline — with no model the band
+    # builds exactly as before, so this can't move survival.
+    wa = World().generate(seed=5)
+    a_good = wa.apply_authored_building({"name": "Workshop", "purpose": "to craft",
+                                         "layout": ["WWDWW", "WFCFW", "WFFFW", "WWWWW"]})
+    a_walled = wa.apply_authored_building({"name": "Tomb", "layout": ["WWWWW", "WFFFW", "WWWWW"]})  # no door
+    a_huge = wa.apply_authored_building({"name": "Mega", "layout": ["F" * 20] * 20})                # oversized
+    a_land = np.argwhere(wa.water == WATER_NONE)
+    wa.people = []
+    for i in range(AUTHOR_MIN_POP):
+        aly, alx = (int(v) for v in a_land[i * 37]); wa._add_person(alx, aly, name=f"A{i}")
+    a_arch = wa.people[0]; a_arch["vocation"] = "builder"; a_arch["home_struct"] = "h"
+    wa._authored_cd = 0.0                                           # clear the cooldown left by a_good
+    a_trig_b = wa.wants_new_building(a_arch)                        # settled builder, grown band → wants
+    a_forg = wa.people[1]; a_forg["vocation"] = "forager"; a_forg["home_struct"] = "h"
+    a_trig_f = wa.wants_new_building(a_forg)                        # a forager is not the architect → no
+    auth_ok = (bool(a_good) and a_good in BLUEPRINTS and a_walled is None and a_huge is None
+               and a_trig_b and not a_trig_f)
+    print(f"  authoring test (Phase A): registered={bool(a_good)} rejects-walled={a_walled is None} "
+          f"rejects-huge={a_huge is None} trigger builder={a_trig_b}/forager={a_trig_f} "
+          f"-> {'OK' if auth_ok else 'FAILED'}")
 
     # SETTLEMENT (M0) — the housed band becomes a first-class town: named, centred on its homes,
     # with a roll of members; a pre-M0 (empty) save self-heals on the daily tick; none when homeless.
