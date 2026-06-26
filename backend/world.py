@@ -283,6 +283,12 @@ LEAF_BRUSH_COST    = 3.5      # leaf panels are passable but "collide": a soul r
 PERSON_AVOID_COST  = 4.0      # souls don't walk INTO each other: a tile another soul stands on costs this
                               # much more, so they route round one another — but it's soft (never a hard
                               # block), so a crowd can't deadlock and no one is ever trapped by a neighbour
+# Wandering with no errand: a soul picks a reachable ROAM waypoint a little way off and walks to it
+# (pathfinding around walls), then picks a fresh one — so it actually crosses the ground instead of
+# pacing back and forth against an obstacle the way a blind heading does.
+ROAM_MIN = 5                  # nearest a roam waypoint is chosen
+ROAM_MAX = 13                 # farthest a roam waypoint is chosen
+ROAM_TIME = 150               # game-min before giving up on a waypoint (e.g. unreachable) and re-picking
 # Desire-line PATHS — feet wear trails into the ground along the routes the band actually uses (home↔
 # water↔resources), so a cluster of huts reads as a real village. Purely COSMETIC (no movement effect).
 FOOTFALL_CAP       = 60.0     # most a single tile's wear can build to
@@ -2463,7 +2469,7 @@ class World:
                 best, bd = q, d
         if best is None or bd <= 1:
             return None
-        return (int(np.sign(best["x"] - p["x"])), int(np.sign(best["y"] - p["y"])))
+        return (best["x"] - p["x"], best["y"] - p["y"])   # raw delta → pathfind to company round walls
 
     def _explore_dir(self, p):
         """A persistent roaming heading (re-rolled now and then) so a searching person
@@ -2772,8 +2778,8 @@ class World:
             leash = EXPLORE_LEASH * (1.0 - 0.6 * min(1.0, weak))
             hx, hy = p["home"]
             if abs(hx - x) + abs(hy - y) > leash:
-                return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
-            return "wander", self._explore_dir(p)
+                return "wander", (hx - x, hy - y)          # beyond the leash → pathfind home
+            return "wander", self._roam_delta(p, hx, hy, leash)   # within leash → roam near home
         if kind == "tend" and target:
             # Go to the sick band-mate's side and nurse them (the recovery boost + any food
             # they're handed happen on contact in the illness tick / social pass).
@@ -2807,16 +2813,16 @@ class World:
             seen[target_id] = [t["x"], t["y"], self.clock]
             if abs(t["x"] - x) + abs(t["y"] - y) <= 1:
                 return None
-            return (int(np.sign(t["x"] - x)), int(np.sign(t["y"] - y)))
+            return (t["x"] - x, t["y"] - y)                             # raw delta → pathfind round walls
         loc = seen.get(target_id)
         if loc and self.clock - loc[2] <= SEEN_FORGET:                  # go where we last saw them
             if abs(loc[0] - x) + abs(loc[1] - y) <= 1:                  # got there, they've moved on
                 seen.pop(target_id, None)                               # the trail's cold — give up
                 return None
-            return (int(np.sign(loc[0] - x)), int(np.sign(loc[1] - y)))
+            return (loc[0] - x, loc[1] - y)                             # raw delta → pathfind
         hx, hy = t.get("home", (x, y))                                  # try their home, then give up
         if abs(hx - x) + abs(hy - y) > 1:
-            return (int(np.sign(hx - x)), int(np.sign(hy - y)))
+            return (hx - x, hy - y)                                     # raw delta → pathfind to their home
         return None
 
     def _step_off_door(self, p):
@@ -2847,7 +2853,7 @@ class World:
             return off
         hx, hy = p["home"]
         if abs(hx - p["x"]) + abs(hy - p["y"]) > 6:
-            return "wander", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
+            return "wander", (hx - p["x"], hy - p["y"])    # drift home → pathfind round walls
         # Drift toward the nearest neighbour within an easy stroll (not a cross-map trek), so
         # the idle band clusters; once beside someone, just amble (the social pass does the rest).
         best, bd = None, 11
@@ -2858,7 +2864,7 @@ class World:
             if 1 < d < bd:
                 best, bd = q, d
         if best is not None:
-            return "wander", (int(np.sign(best["x"] - p["x"])), int(np.sign(best["y"] - p["y"])))
+            return "wander", (best["x"] - p["x"], best["y"] - p["y"])   # drift to a neighbour → pathfind
         # No one to drift toward and home is near — SETTLE in place (an occasional amble keeps it
         # from looking frozen) instead of restlessly milling the village every single beat.
         if self.rng.random() < 0.15:
@@ -4953,6 +4959,37 @@ class World:
         p["_path"] = {"goal": (gx, gy), "steps": path[1:]}
         return path[0]
 
+    def _pick_roam(self, p, ax, ay, radius):
+        """A reachable WANDER waypoint within `radius` of an anchor (ax,ay) — kept near HOME and inside
+        the soul's leash so a wanderer never strays toward unsafe water, on dry open ground. None if
+        no spot found in a few tries."""
+        radius = max(float(ROAM_MIN), min(float(radius), float(ROAM_MAX)))
+        for _ in range(8):
+            ang = self.rng.random() * 6.283185
+            dist = ROAM_MIN + self.rng.random() * (radius - ROAM_MIN)
+            gx = int(ax + np.cos(ang) * dist)
+            gy = int(ay + np.sin(ang) * dist)
+            if (self._in(gx, gy) and self.water[gy, gx] == WATER_NONE
+                    and self.blocks.get((gx, gy)) not in SOLID_BLOCKS):
+                return (gx, gy)
+        return None
+
+    def _roam_delta(self, p, ax, ay, radius):
+        """Wandering with no errand: the RAW delta to a self-chosen roam waypoint near the anchor
+        (the mover then PATHFINDS there), picking a fresh one on arrival or when it's gone stale — so
+        a wanderer crosses the ground instead of pacing, while staying within its leash of home.
+        Falls back to a blind heading if no waypoint is reachable."""
+        x, y = p["x"], p["y"]
+        roam = p.get("roam")
+        if (not roam or (abs(roam[0] - x) + abs(roam[1] - y) <= 2)
+                or self.clock >= p.get("roam_until", 0.0)
+                or abs(roam[0] - ax) + abs(roam[1] - ay) > radius + 3):   # waypoint drifted past the leash
+            roam = self._pick_roam(p, ax, ay, radius)
+            if roam is None:
+                return self._explore_dir(p)
+            p["roam"], p["roam_until"] = roam, self.clock + ROAM_TIME
+        return (roam[0] - x, roam[1] - y)
+
     def _move_person(self, p, direction):
         """One cost-aware step. Each open neighbour is scored by how much HEADWAY it makes toward
         the goal (weighted) minus its travel cost (slow water, nearby danger). The best wins — so
@@ -4961,22 +4998,24 @@ class World:
         heading it ROAMS along a persistent wander direction (re-rolled now and then) rather than
         jittering back and forth between two tiles — so an idle soul actually covers ground.
 
-        For a DIRECTED move toward a real, multi-tile goal (a haul home, a remembered spot — passed
-        as the RAW delta, |dx|+|dy| > 2) it uses the bounded PATHFINDER so a soul routes AROUND
-        buildings instead of oscillating against a wall (the greedy mover's blind spot). Wander/flee
-        and short hops pass sign-vectors (≤ 2) and keep the cheap greedy step."""
+        For a DIRECTED move toward a real, multi-tile goal (a haul home, a remembered spot, a
+        band-mate — passed as the RAW delta, |dx|+|dy| > 2) it uses the bounded PATHFINDER so a soul
+        routes AROUND buildings instead of oscillating against a wall. With NO goal (a wander) it
+        walks to a self-chosen ROAM waypoint, also pathfound — so it crosses the ground instead of
+        pacing. Flee/repulsion and short hops pass sign-vectors (≤ 2) and keep the cheap greedy step."""
         x, y = p["x"], p["y"]
         if p.pop("_wade", False):                          # slogging through water — lose this beat
             return
-        if direction and abs(int(direction[0])) + abs(int(direction[1])) > 2:
+        mag = (abs(int(direction[0])) + abs(int(direction[1]))) if direction else 0
+        if mag > 2:                                        # DIRECTED toward a real goal → pathfind round walls
             gx, gy = x + int(direction[0]), y + int(direction[1])
-            step = self._path_step(p, gx, gy)              # route around walls toward the real goal
+            step = self._path_step(p, gx, gy)
             if step is not None:
                 self._step_to(p, step[0], step[1])
                 return
             # nothing reachable found → fall through to the greedy step (using the sign direction)
         else:
-            p.pop("_path", None)                           # not on a directed haul this beat
+            p.pop("_path", None)                           # a short hop / blind amble → greedy
         if not direction or (direction[0] == 0 and direction[1] == 0):
             direction = self._explore_dir(p)               # a steady wander heading, not a dither
         sx = int(np.sign(direction[0])) if direction else 0
@@ -6974,7 +7013,8 @@ if __name__ == "__main__":
     e4, d4, t4, s4, f4, l4, lx4, ly4, _, _ = wp._perceive(hz["x"], hz["y"])
     hz["intention"] = {"kind": "explore", "u": 9.9}; hz["delib_cd"] = wp.clock + 9e9   # hold explore
     wa, wmove = wp._person_decide(hz, e4, d4, t4, s4, f4, l4, False, lx4, ly4)
-    homeward = wmove == (int(np.sign(hz["home"][0] - hz["x"])), 0)
+    # directed moves now carry the RAW delta (the mover pathfinds); a weak soul still turns HOMEward
+    homeward = (wmove is not None and np.sign(wmove[0]) == np.sign(hz["home"][0] - hz["x"]) and wmove[1] == 0)
     leash_ok = homeward
     prudence_ok = inj_ok and enough_ok and leash_ok
     print(f"  prudence test: hurt→{hurt_kind}, full-ply {full_ply:.2f}<empty {empty_ply:.2f}={enough_ok}, "
@@ -6994,7 +7034,7 @@ if __name__ == "__main__":
     # Idle clustering: a soul with a neighbour a short stroll off ambles toward them.
     a["home"] = (int(a["x"]), int(a["y"])); b["x"], b["y"] = int(a["x"]) + 5, int(a["y"])
     _act, move = wc._idle(a)
-    clusters = move == (1, 0)
+    clusters = move is not None and np.sign(move[0]) == 1 and move[1] == 0   # raw delta toward the neighbour
     social_ok = greeted and clusters
     print(f"  social-texture test: greeted={greeted} (\"{a.get('say','')}\"), idle-clusters={clusters} "
           f"-> {'OK' if social_ok else 'FAILED'}")
