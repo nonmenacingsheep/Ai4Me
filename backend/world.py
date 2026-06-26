@@ -2491,7 +2491,7 @@ class World:
             if abs(kx - x) + abs(ky - y) <= 1:        # arrived but it's gone — forget it
                 p["known"][key] = None
             else:
-                return act_seek, (int(np.sign(kx - x)), int(np.sign(ky - y)))
+                return act_seek, (kx - x, ky - y)        # raw delta to the remembered spot → pathfind
         return act_seek, self._explore_dir(p)
 
     def _mind_ctx(self, p, night) -> dict:
@@ -3158,7 +3158,7 @@ class World:
                 return getters[mat]()                         # short on a material — go get it
         hx, hy = p["home"]
         if abs(hx - p["x"]) + abs(hy - p["y"]) > 1:           # have it all — bring it home and build
-            return "haul", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
+            return "haul", (hx - p["x"], hy - p["y"])    # raw delta → the mover pathfinds around walls
         for mat, need in HEARTH_COST.items():
             inv[mat] = inv.get(mat, 0) - need
             if inv[mat] <= 0:
@@ -3297,7 +3297,7 @@ class World:
             return None
         hx, hy = p["home"]
         if abs(hx - p["x"]) + abs(hy - p["y"]) > 1:                      # still on the way home
-            return "haul", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
+            return "haul", (hx - p["x"], hy - p["y"])    # raw delta → the mover pathfinds around walls
         for k in keys:                                                   # at the larder — withdraw one
             if store.get(k, 0) > 0:
                 store[k] -= 1
@@ -3336,7 +3336,7 @@ class World:
                 p["next_rung"] = rung
                 p["next_client"] = client["id"] if client else None   # owner-to-be, for a commission
                 return "found_site", None
-            return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+            return "haul", (hx - x, hy - y)              # raw delta → the mover pathfinds around walls
         task = self._site_next_task(site)
         if task is None:                                       # all tiles placed → finish it
             self._finish_site(p, site)
@@ -3345,7 +3345,7 @@ class World:
         if inv.get(item, 0) >= qty:                            # have the material — go lay it
             if max(abs(task["x"] - x), abs(task["y"] - y)) <= 2:
                 return "build_block", None
-            return "haul", (int(np.sign(task["x"] - x)), int(np.sign(task["y"] - y)))
+            return "haul", (task["x"] - x, task["y"] - y)   # raw delta → pathfind around walls
         return getters.get(item, getters["wood"])()
 
     def _current_dwelling_bp(self, p):
@@ -3766,7 +3766,7 @@ class World:
         # Stockpiling stays a near-home chore: never let laying-in food range a soul far from its
         # own water. If we've strayed past the leash, head back rather than chase another bush.
         if abs(hx - x) + abs(hy - y) > PROVISION_LEASH:
-            return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+            return "haul", (hx - x, hy - y)              # raw delta → the mover pathfinds around walls
         cap = PERSON["inv_cap"] + (6 if inv.get("forage_sack", 0) else 0)
         load = min(STORE_KEEP["food"] + PROVISION_LOAD, cap)   # carry the reserve plus a load to bank
         if inv.get("food", 0) < load:
@@ -3776,7 +3776,7 @@ class World:
             here = bool(edible[ly, lx]) and self.veg_growth[y, x] > PERSON["gather_min"]
             return self._seek(p, x, y, here, edible, lx, ly, "food", "gather", "seek_food")
         if abs(hx - x) + abs(hy - y) > 1:                      # loaded — bring it home to the larder
-            return "haul", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+            return "haul", (hx - x, hy - y)              # raw delta → the mover pathfinds around walls
         self._deposit_home(p)                                  # bank the surplus above the travel reserve
         return "tend", None
 
@@ -4883,16 +4883,100 @@ class World:
                 last[(nx, ny)] = p["id"]
         p["x"], p["y"] = nx, ny
 
+    def _compute_path(self, x, y, gx, gy, cap=700):
+        """A bounded, terrain-aware shortest path from (x,y) toward (gx,gy) — A* (Dijkstra + a
+        goal heuristic) over passable tiles, capped at `cap` expansions so it never scans the whole
+        2048² map. Step costs mirror the greedy mover (water/leaf cost more, roads/paths less), so
+        the path prefers dry ground and the road network. If the goal can't be reached within the
+        cap it heads for the nearest tile it COULD reach — so a soul always makes progress. Returns
+        the list of tiles to walk (first step first), or None if it's already there / boxed in."""
+        start, goal = (x, y), (gx, gy)
+        if start == goal:
+            return None
+        pq = [(abs(gx - x) + abs(gy - y), 0.0, start)]
+        came = {start: None}
+        cost = {start: 0.0}
+        best_t, best_h = start, abs(gx - x) + abs(gy - y)
+        seen = 0
+        while pq and seen < cap:
+            _, c, cur = heapq.heappop(pq)
+            seen += 1
+            if cur == goal:
+                best_t = goal
+                break
+            cx, cy = cur
+            h = abs(gx - cx) + abs(gy - cy)
+            if h < best_h:                                 # remember the closest tile reached so far
+                best_h, best_t = h, cur
+            for dx, dy in _STEP_DIRS:
+                nx, ny = cx + dx, cy + dy
+                if not self._passable(nx, ny):
+                    continue
+                sc = 1.0
+                if self.water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
+                    sc += WADE_COST                        # keep paths on dry ground (wading risks chill/illness)
+                elif self.blocks.get((nx, ny)) == BLOCK_LEAF:
+                    sc += LEAF_BRUSH_COST
+                elif (nx, ny) in self.roads:
+                    sc = max(0.1, 1.0 - ROAD_PULL)         # follow the road network where it goes our way
+                elif self.footfall.get((nx, ny), 0.0) >= FOOTFALL_PATH_MIN:
+                    sc = max(0.1, 1.0 - PATH_PULL)
+                nc = c + sc
+                if nc < cost.get((nx, ny), 1e18):
+                    cost[(nx, ny)] = nc
+                    came[(nx, ny)] = cur
+                    heapq.heappush(pq, (nc + (abs(gx - nx) + abs(gy - ny)), nc, (nx, ny)))
+        if best_t == start:
+            return None
+        node, path = best_t, []
+        while node is not None and node != start:
+            path.append(node)
+            node = came.get(node)
+        path.reverse()
+        return path or None
+
+    def _path_step(self, p, gx, gy):
+        """The next tile toward (gx,gy) along a path that routes AROUND walls — cached on the soul so
+        the search runs only when needed (path exhausted, goal moved, or the next tile got blocked),
+        not every beat. Returns a neighbour tile, or None (caller falls back to the greedy step)."""
+        x, y = p["x"], p["y"]
+        cache = p.get("_path")
+        if cache and cache["goal"] == (gx, gy) and cache["steps"]:
+            nxt = cache["steps"][0]
+            if abs(nxt[0] - x) + abs(nxt[1] - y) == 1 and self._passable(*nxt):
+                cache["steps"].pop(0)
+                return nxt
+        path = self._compute_path(x, y, gx, gy)
+        if not path:
+            p.pop("_path", None)
+            return None
+        p["_path"] = {"goal": (gx, gy), "steps": path[1:]}
+        return path[0]
+
     def _move_person(self, p, direction):
         """One cost-aware step. Each open neighbour is scored by how much HEADWAY it makes toward
         the goal (weighted) minus its travel cost (slow water, nearby danger). The best wins — so
         a soul rounds lakes and walls instead of freezing against them, skirts wolves, and prefers
         dry ground, while still fording or braving danger when that's plainly the way. With no
         heading it ROAMS along a persistent wander direction (re-rolled now and then) rather than
-        jittering back and forth between two tiles — so an idle soul actually covers ground."""
+        jittering back and forth between two tiles — so an idle soul actually covers ground.
+
+        For a DIRECTED move toward a real, multi-tile goal (a haul home, a remembered spot — passed
+        as the RAW delta, |dx|+|dy| > 2) it uses the bounded PATHFINDER so a soul routes AROUND
+        buildings instead of oscillating against a wall (the greedy mover's blind spot). Wander/flee
+        and short hops pass sign-vectors (≤ 2) and keep the cheap greedy step."""
         x, y = p["x"], p["y"]
         if p.pop("_wade", False):                          # slogging through water — lose this beat
             return
+        if direction and abs(int(direction[0])) + abs(int(direction[1])) > 2:
+            gx, gy = x + int(direction[0]), y + int(direction[1])
+            step = self._path_step(p, gx, gy)              # route around walls toward the real goal
+            if step is not None:
+                self._step_to(p, step[0], step[1])
+                return
+            # nothing reachable found → fall through to the greedy step (using the sign direction)
+        else:
+            p.pop("_path", None)                           # not on a directed haul this beat
         if not direction or (direction[0] == 0 and direction[1] == 0):
             direction = self._explore_dir(p)               # a steady wander heading, not a dither
         sx = int(np.sign(direction[0])) if direction else 0
