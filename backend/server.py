@@ -1259,6 +1259,50 @@ async def api_world_reset(req: Request):
     return {"ok": True, "world": await asyncio.to_thread(w.snapshot)}
 
 
+@app.get("/api/world/snapshots")
+async def api_world_snapshots():
+    """Named save checkpoints the user can return to, newest first (Settings → World saves)."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "snapshots": []}
+    w = world_store.get_world()
+    return {"ok": True, "snapshots": await asyncio.to_thread(w.list_snapshots)}
+
+
+@app.post("/api/world/snapshot")
+async def api_world_snapshot(req: Request):
+    """Save a named checkpoint of the current world."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "error": "World is off — enable it in Settings."}
+    body = await req.json()
+    w = world_store.get_world()
+    info = await asyncio.to_thread(w.save_snapshot, str(body.get("name", "")).strip())
+    return {"ok": True, "snapshot": info}
+
+
+@app.post("/api/world/restore")
+async def api_world_restore(req: Request):
+    """Restore a named snapshot. The current world is snapshotted first, so a restore is undoable.
+    Returns the restored world so the client can swap to it (same payload as reset)."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False}
+    body = await req.json()
+    nw = await asyncio.to_thread(world_store.restore_world, str(body.get("id", "")).strip())
+    if nw is None:
+        return {"ok": False}
+    await broadcast({"type": "world_changed", "changes": ["a saved world was restored"]})
+    return {"ok": True, "world": await asyncio.to_thread(nw.snapshot)}
+
+
+@app.post("/api/world/snapshot/delete")
+async def api_world_snapshot_delete(req: Request):
+    """Delete a named snapshot."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False}
+    body = await req.json()
+    w = world_store.get_world()
+    return {"ok": await asyncio.to_thread(w.delete_snapshot, str(body.get("id", "")).strip())}
+
+
 @app.post("/api/company/meeting")
 async def api_company_meeting(req: Request):
     """Convene a structured team meeting on a topic: everyone weighs in, the CEO

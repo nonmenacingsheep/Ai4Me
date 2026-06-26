@@ -26,6 +26,7 @@ import heapq
 import itertools
 import json
 import os
+import shutil
 import time
 import uuid
 
@@ -91,6 +92,7 @@ def _json_safe(o):
 _DIR = os.path.join(os.path.expanduser("~"), ".ai4me")
 PATH_GRID = os.path.join(_DIR, "world.npz")     # tile arrays (compressed)
 PATH_META = os.path.join(_DIR, "world.json")    # clock, weather, entities, log
+SNAP_DIR = os.path.join(_DIR, "snapshots")      # named checkpoints the user can save & restore to
 PATH_TEMPLATES = os.path.join(_DIR, "templates.json")  # the god's hand-authored building blueprints
                                                 # (a library independent of any one world — survives resets)
 
@@ -6024,15 +6026,16 @@ class World:
         JSON written every time. The 2048² terrain GRIDS are ~130MB to compress, so they're written
         only when `grids` is True (the loop does this occasionally) or when none are on disk yet —
         the rest of the time we skip them, which is what stops the periodic save FREEZE. The grids
-        drift slowly (only vegetation/ecology change at all), so a few minutes' staleness is fine."""
+        drift slowly (only vegetation/ecology change at all), so a few minutes' staleness is fine.
+
+        Every write is ATOMIC (staged to a .tmp, then os.replace): an interrupted or partial write
+        — app closed mid-save, a crash — can never leave a truncated/corrupt file. That truncation,
+        on the non-atomic 1.6s grid write, is what used to corrupt world.npz and silently reset the
+        world on next launch. On a full (grid) save the previous good pair is also rotated to .bak,
+        so load() can fall back to it rather than regenerate."""
         try:
             os.makedirs(_DIR, exist_ok=True)
-            if grids or not os.path.exists(PATH_GRID):
-                np.savez_compressed(
-                    PATH_GRID, elevation=self.elevation, biome=self.biome, soil=self.soil,
-                    moisture=self.moisture, water=self.water, veg_sp=self.veg_sp,
-                    veg_growth=self.veg_growth, chunk_eco=self._chunk_eco,
-                )
+            full = grids or not os.path.exists(PATH_GRID)
             meta = {
                 "schema": SCHEMA,
                 "seed": self.seed, "clock": self.clock, "last_eco": self._last_eco,
@@ -6058,26 +6061,56 @@ class World:
                 "speed": self.speed, "day_speed": self.day_speed, "night_speed": self.night_speed,
                 "money_invented": self.money_invented, "money_inventor": self.money_inventor,
             }
-            tmp = PATH_META + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
+            mtmp = PATH_META + ".tmp"
+            with open(mtmp, "w", encoding="utf-8") as f:
                 json.dump(meta, f, default=_json_safe)
-            os.replace(tmp, PATH_META)
+            if full:
+                # Stage the new grid fully to a temp BEFORE touching anything live, so a failed
+                # compress leaves the existing save intact. Then back up the current good pair to
+                # .bak and swap both new files in. Worlds can no longer be lost to a partial write.
+                gtmp = PATH_GRID + ".tmp"
+                with open(gtmp, "wb") as gf:           # a file object → numpy won't append ".npz"
+                    np.savez_compressed(
+                        gf, elevation=self.elevation, biome=self.biome, soil=self.soil,
+                        moisture=self.moisture, water=self.water, veg_sp=self.veg_sp,
+                        veg_growth=self.veg_growth, chunk_eco=self._chunk_eco,
+                    )
+                for path in (PATH_GRID, PATH_META):
+                    if os.path.exists(path):
+                        try:
+                            os.replace(path, path + ".bak")
+                        except OSError:
+                            pass
+                os.replace(gtmp, PATH_GRID)
+            os.replace(mtmp, PATH_META)                # atomic; on a meta-only save this is the whole write
         except OSError as e:
             print(f"[world] save failed: {e}")
 
     def load(self) -> bool:
-        """Restore a saved world. Returns False (→ caller regenerates) if the save
-        is missing, corrupt, or from an incompatible schema/size, so a world left
-        broken by an older build heals itself instead of staying frozen."""
+        """Restore a saved world, falling back to the .bak pair before ever giving up — so a single
+        corrupt/partial file recovers from the last good save instead of resetting the world. Returns
+        False (→ caller regenerates) only when neither the primary nor the backup can be read."""
+        if self._load_files(PATH_META, PATH_GRID):
+            return True
+        if (os.path.exists(PATH_META + ".bak") and os.path.exists(PATH_GRID + ".bak")
+                and self._load_files(PATH_META + ".bak", PATH_GRID + ".bak")):
+            print("[world] primary save unreadable — recovered from backup (.bak)")
+            return True
+        return False
+
+    def _load_files(self, meta_path: str, grid_path: str) -> bool:
+        """Restore a saved world from a specific meta/grid pair. Returns False (→ caller tries the
+        backup, then regenerates) if the save is missing, corrupt, or from an incompatible
+        schema/size, so a world left broken by an older build heals itself instead of staying frozen."""
         try:
-            with open(PATH_META, encoding="utf-8") as f:
+            with open(meta_path, encoding="utf-8") as f:
                 meta = json.load(f)
             # Reject saves from a different layout version up front — loading them
             # would let step() crash every tick (the tab would look frozen).
             if meta.get("schema") != SCHEMA:
                 print(f"[world] save schema {meta.get('schema')!r} != {SCHEMA}; regenerating")
                 return False
-            with np.load(PATH_GRID) as z:
+            with np.load(grid_path) as z:
                 self.elevation = z["elevation"]; self.biome = z["biome"]; self.soil = z["soil"]
                 self.moisture = z["moisture"]; self.water = z["water"]
                 self.veg_sp = z["veg_sp"]; self.veg_growth = z["veg_growth"]
@@ -6145,6 +6178,75 @@ class World:
             print(f"[world] load failed ({type(e).__name__}: {e}); regenerating")
             return False
 
+    # ─── named snapshots — explicit, user-controlled saves (settings → World saves) ──────
+    @staticmethod
+    def _snap_id(name: str) -> str:
+        """A filesystem-safe, unique folder id from a display name (+ a timestamp so two saves can
+        share a name)."""
+        base = "".join(c if (c.isalnum() or c in "-_") else "-" for c in (name or "").strip())
+        base = "-".join(part for part in base.split("-") if part)[:28] or "save"
+        return f"{base}-{int(time.time())}"
+
+    def save_snapshot(self, name: str = "") -> dict:
+        """Save a NAMED checkpoint the user can return to. Forces a full, current save first, then
+        copies the save pair into snapshots/<id>/. Returns the snapshot's info record."""
+        self.save(grids=True)                              # make the on-disk save current + complete
+        disp = (name or "").strip()[:40] or time.strftime("%b %d, %H:%M")
+        sid = self._snap_id(disp)
+        dest = os.path.join(SNAP_DIR, sid)
+        os.makedirs(dest, exist_ok=True)
+        shutil.copy2(PATH_META, os.path.join(dest, "world.json"))
+        shutil.copy2(PATH_GRID, os.path.join(dest, "world.npz"))
+        info = {"id": sid, "name": disp, "created": time.time(),
+                "day": self.day(), "pop": len(self.people)}
+        with open(os.path.join(dest, "snapshot.json"), "w", encoding="utf-8") as f:
+            json.dump(info, f)
+        return info
+
+    def list_snapshots(self) -> list:
+        """All saved snapshots, newest first — each {id, name, created, day, pop} for the list."""
+        out = []
+        if os.path.isdir(SNAP_DIR):
+            for d in os.listdir(SNAP_DIR):
+                info_path = os.path.join(SNAP_DIR, d, "snapshot.json")
+                if os.path.exists(info_path):
+                    try:
+                        with open(info_path, encoding="utf-8") as f:
+                            out.append(json.load(f))
+                    except (OSError, ValueError):
+                        pass
+        out.sort(key=lambda s: s.get("created", 0), reverse=True)
+        return out
+
+    def _stage_restore(self, sid: str) -> bool:
+        """Snapshot the current world (so a restore is undoable), then copy a named snapshot's files
+        over the live save. The actual reload is an atomic singleton swap in restore_world() — never
+        an in-place reload that could race the engine tick. Returns True if the snapshot staged."""
+        sid = os.path.basename((sid or "").strip())        # guard against path traversal
+        src = os.path.join(SNAP_DIR, sid)
+        smeta, sgrid = os.path.join(src, "world.json"), os.path.join(src, "world.npz")
+        if not (sid and os.path.exists(smeta) and os.path.exists(sgrid)):
+            return False
+        self.save_snapshot("before restore")               # keep the current world recoverable
+        try:
+            shutil.copy2(smeta, PATH_META)
+            shutil.copy2(sgrid, PATH_GRID)
+        except OSError:
+            return False
+        return True
+
+    def delete_snapshot(self, sid: str) -> bool:
+        """Delete a named snapshot. Returns True if it existed and was removed."""
+        sid = os.path.basename((sid or "").strip())
+        dest = os.path.join(SNAP_DIR, sid)
+        if sid and os.path.isdir(dest):
+            try:
+                shutil.rmtree(dest)
+                return True
+            except OSError:
+                pass
+        return False
+
 
 # ─── module-level singleton (mirrors room.py's load/save ergonomics) ──────────
 _world: World | None = None
@@ -6156,10 +6258,29 @@ def get_world() -> World:
     if _world is None:
         w = World()
         if not w.load():
+            # A save EXISTS but neither it nor its backup could be read — do NOT silently overwrite
+            # it (that's what used to turn a transient corruption into a permanent reset). Set it
+            # aside, recoverable, then start fresh.
+            if os.path.exists(PATH_META) or os.path.exists(PATH_GRID):
+                _quarantine_save()
             w.generate()
             w.save()
         _world = w
     return _world
+
+
+def _quarantine_save() -> None:
+    """Move an unreadable save out of the way (instead of overwriting it) so a damaged world can
+    still be recovered by hand, into ~/.ai4me/corrupt-<timestamp>/."""
+    dest = os.path.join(_DIR, "corrupt-" + time.strftime("%Y%m%d-%H%M%S"))
+    try:
+        os.makedirs(dest, exist_ok=True)
+        for path in (PATH_META, PATH_GRID, PATH_META + ".bak", PATH_GRID + ".bak"):
+            if os.path.exists(path):
+                shutil.move(path, os.path.join(dest, os.path.basename(path)))
+        print(f"[world] unreadable save quarantined to {dest} (recoverable; world regenerated)")
+    except OSError as e:
+        print(f"[world] could not quarantine the unreadable save: {e}")
 
 
 def reset_world(seed: int | None = None) -> World:
@@ -6167,6 +6288,22 @@ def reset_world(seed: int | None = None) -> World:
     _world = World().generate(seed)
     _world.save()
     return _world
+
+
+def restore_world(sid: str) -> "World | None":
+    """Restore a named snapshot by swapping in a freshly-loaded world — atomic like reset_world, so
+    the running tick finishes on the old world and the next tick gets the restored one (no in-place
+    reload racing the engine). The current world is snapshotted first, so a restore is undoable.
+    Returns the restored world, or None if the snapshot was missing/unreadable."""
+    global _world
+    cur = get_world()
+    if not cur._stage_restore(sid):                # validates + snapshots current + copies files over
+        return None
+    w = World()
+    if not w.load():                              # load the just-restored save into a fresh world
+        return None
+    _world = w
+    return w
 
 
 # ════════════════════════════════════════════════════════════════════════════

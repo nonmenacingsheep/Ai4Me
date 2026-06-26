@@ -553,6 +553,29 @@ async function loadTemplates() {
   }
 }
 
+/* ═══ World saves — named snapshots + restore. The world autosaves on its own; these are
+   explicit checkpoints the user can name and return to (stored in ~/.ai4me/snapshots). ═══ */
+async function loadSnapshots() {
+  const list = document.getElementById('wsnap-list'); if (!list) return;
+  list.innerHTML = '<div class="wsnap-empty">Loading…</div>';
+  let snaps = [];
+  try { const j = await (await fetch('/api/world/snapshots')).json(); snaps = j.snapshots || []; } catch (_) {}
+  list.innerHTML = '';
+  if (!snaps.length) { list.innerHTML = '<div class="wsnap-empty">No saves yet — name one above and hit Save.</div>'; return; }
+  for (const s of snaps) {
+    const when = s.created ? new Date(s.created * 1000).toLocaleString() : '';
+    const card = document.createElement('div'); card.className = 'wsnap-card'; card.dataset.id = s.id;
+    const meta = document.createElement('div'); meta.className = 'wsnap-meta';
+    meta.innerHTML = `<div class="wsnap-name">${escapeHtml(s.name || s.id)}</div>` +
+      `<div class="wsnap-sub">day ${s.day ?? '?'} · ${s.pop ?? '?'} people · ${escapeHtml(when)}</div>`;
+    const acts = document.createElement('div'); acts.className = 'wsnap-acts';
+    acts.innerHTML = `<button class="wbtn wsnap-restore" data-id="${s.id}">Restore</button>` +
+      `<button class="wbtn wsnap-del" data-id="${s.id}" title="Delete this save">✕</button>`;
+    card.append(meta, acts);
+    list.appendChild(card);
+  }
+}
+
 function armTemplatePlacement(id) {
   WORLD.tool = 'template';
   WORLD.templateId = id;
@@ -5261,6 +5284,7 @@ function bindWorld() {
       if (open && sec.dataset.menu === 'crafting') loadCraftingRecipes();   // lazy-load on first open
       if (open && sec.dataset.menu === 'ledger') loadLedger();
       if (open && sec.dataset.menu === 'templates') loadTemplates();
+      if (open && sec.dataset.menu === 'settings') loadSnapshots();   // World saves
     });
   });
   const csearch = document.getElementById('wcraft-search');
@@ -5287,6 +5311,37 @@ function bindWorld() {
       })).json();
       if (j.world) { WORLD.cam = null; setWorld(j.world); }
     } catch (_) {}
+  });
+
+  document.getElementById('wsnap-save')?.addEventListener('click', async () => {
+    const input = document.getElementById('wsnap-name');
+    const name = (input?.value || '').trim();
+    const btn = document.getElementById('wsnap-save'); if (btn) btn.disabled = true;
+    try {
+      await fetch('/api/world/snapshot', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }) });
+      if (input) input.value = '';
+      await loadSnapshots();
+    } catch (_) {} finally { if (btn) btn.disabled = false; }
+  });
+
+  document.getElementById('wsnap-list')?.addEventListener('click', async (e) => {
+    const id = e.target.closest('[data-id]')?.dataset.id; if (!id) return;
+    if (e.target.closest('.wsnap-restore')) {
+      if (!confirm('Restore this save? Your current world is snapshotted first, so this is undoable.')) return;
+      try {
+        const j = await (await fetch('/api/world/restore', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })).json();
+        if (j.world) { WORLD.cam = null; setWorld(j.world); }
+        else if (!j.ok) alert('Could not restore that save.');
+      } catch (_) {}
+      loadSnapshots();
+    } else if (e.target.closest('.wsnap-del')) {
+      if (!confirm('Delete this save? This cannot be undone.')) return;
+      try { await fetch('/api/world/snapshot/delete', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) }); } catch (_) {}
+      loadSnapshots();
+    }
   });
 
   // Pointer: inspect-tool drags pan the camera; any paint tool paints.
