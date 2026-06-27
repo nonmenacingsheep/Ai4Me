@@ -4558,7 +4558,7 @@ class World:
         SMITHY or WORKSHOP wants the stone and ore it works close to hand. A modest nudge layered on
         the site score, so the band raises its craft buildings WITH a reason — by the rock — while
         the water/cluster terms still keep them near home. (Homes pass bp_name=None: no change.)"""
-        if bp_name in (WORKSHOP_BP, SMITHY_BP):
+        if self._bp_function(bp_name) in ("workshop", "smithy"):   # by ROLE, so an AUTHORED forge counts too
             d = self._nearest_resource_dist(cx, cy)
             if d is not None:
                 return max(0.0, 2.5 - d * 0.10)              # the closer to stone/ore, the better
