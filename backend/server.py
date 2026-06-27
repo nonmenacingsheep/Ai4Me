@@ -760,6 +760,20 @@ async def _mind_think_one():
             if bid:
                 await broadcast({"type": "world_changed",
                                  "changes": [f"{target['name']} designed a new kind of building"]})
+        # Institutions (Phase B): when a recurring wrong goes un-named and the band has a recognised
+        # LEADER, let the model give the people a LAW. The engine validates it's an enforceable norm,
+        # then judges by reputation — the leader proposes, the deterministic governance disposes.
+        if target is not None and w.wants_new_law(target):
+            problem = w._law_problem()
+            if problem is not None:
+                ctx["law_reproach"] = world_store.LAW_REPROACH.get(problem, problem)
+                lsys, lusr = mind_store.author_law_messages(target, ctx)
+                lraw = await asyncio.wait_for(
+                    brain._complete(lsys, lusr, max_tokens=140, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+                norm = w.apply_authored_law(brain._parse_json_object(lraw), by=target["name"])
+                if norm:
+                    await broadcast({"type": "world_changed",
+                                     "changes": [f"{target['name']} gave the band a law"]})
     except Exception as e:
         print(f"[mind] deliberation fell back to the arbiter ({type(e).__name__}: {e})")
 

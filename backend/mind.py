@@ -981,6 +981,33 @@ def author_building_messages(p: dict, ctx: dict) -> tuple[str, str]:
     return system, user
 
 
+def author_law_messages(p: dict, ctx: dict) -> tuple[str, str]:
+    """Build (system, user) asking the band's recognised LEADER to give the people a LAW — the LLM
+    as LEGISLATOR (Phase B). It names ONE wrong (from a vocabulary the engine can actually judge) and
+    frames the value it upholds; the engine then enforces it by reputation. Proposes a NORM; the
+    deterministic governance disposes."""
+    name = p["name"]
+    reproach = ctx.get("law_reproach") or "some keep more than they share with the band"
+    where = ctx.get("settlement") or "your people"
+    system = (
+        "You are the judgement of the most respected elder of a small pre-industrial band, about to "
+        "give your people their first written LAW. Name ONE wrong to forbid and say what it protects. "
+        "Reply with ONE JSON object only — no prose.\n"
+        "The wrong MUST be one the band can actually judge:\n"
+        "  hoarding — keeping food to oneself while the common store runs low\n"
+        "  labour   — never lending a hand when the band raises a building\n"
+        "  peace    — sowing discord and enmity among the people\n"
+        "Choose the one that best answers the trouble before you."
+    )
+    user = (
+        f"You are {name}, the one {where} look to. The trouble of late: {reproach}.\n"
+        "Give your people a law against it. Reply as JSON:\n"
+        '{"norm": "<hoarding|labour|peace>", "name": "<the law\'s short name>", '
+        '"value": "<one line: the good it upholds>"}'
+    )
+    return system, user
+
+
 # ─── LLM touch-points (prompt builders + result appliers; the call itself is in the
 #     server, so this module stays sync/testable and free of the brain dependency) ────
 def deliberate_messages(p: dict, ctx: dict) -> tuple[str, str]:

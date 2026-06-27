@@ -548,6 +548,26 @@ GOV_FREERIDE       = 4.0      # granary units taken (this window) past which a n
 GOV_FREERIDE_COST  = 0.05     # renown a chronic free-rider sheds per day
 GOV_DISAPPROVAL    = 0.03     # how much each bandmate's regard for a free-rider dips per day
 GOV_LEDGER_DECAY   = 0.6      # daily decay of the give/take ledger — recent conduct is what counts
+
+# Phase B — INSTITUTIONS: a renown-recognised LEADER, facing a recurring problem, enacts a LAW the
+# band then lives by. The LLM (the leader's judgement) picks WHICH wrong to name and frames it; the
+# engine ENFORCES it deterministically — soft, through reputation only (a dip in standing & regard),
+# never punishment that could endanger a life. Each law codifies one norm from an ENFORCEABLE
+# vocabulary (the immune system: a law the engine can't actually judge is rejected). Inert with no
+# model (only the default granary norm runs), so it can't move survival.
+LAW_NORMS = ("hoarding", "labour", "peace")   # what an LLM may codify, beyond the always-on granary norm
+LAW_MIN_RENOWN  = 2.5        # standing a soul needs to be heeded as the band's law-giver
+LAW_PROBLEM_FRAC = 0.34      # a wrong is "recurring" once this share of able adults are in it
+LAW_MAX = 3                  # most enacted laws the band carries (beyond the granary norm)
+LAW_COOLDOWN = 4 * 24 * 60   # game-min between new laws (~4 days — lawmaking is rare and weighty)
+LAW_SANCTION = 0.05          # renown an able violator sheds per day a law judges them
+LAW_HOARD_CAP = 14           # personal food store above which (while the commons runs low) one hoards
+LAW_GRANARY_LOW = 6          # commons food below which hoarding is a real wrong, not mere thrift
+LAW_LABOUR_MIN = 1.0         # rolling "aided a build" credit below which an able soul shirks the work
+LAW_PEACE_FOES = 3           # bandmates a soul holds in real enmity (sentiment < -0.3) to be a discord-sower
+LAW_REPROACH = {"hoarding": "hoards food while the commons runs low",
+                "labour": "never lends a hand when the band builds",
+                "peace": "sows discord among us"}
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
@@ -795,6 +815,7 @@ class World:
         self._foot_last: dict = {}       # (x,y) -> last walker id; a path wears only when DIFFERENT souls tread
         self.roads: dict = {}            # (x,y) -> condition: paths trodden hard enough HARDEN into roads
         self.settlements: list[dict] = []  # first-class SETTLEMENTS (the band's town(s)) — M0 foundation
+        self.laws: list[dict] = []         # the band's enacted LAWS (LLM-authored, validated) — Phase B
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
@@ -4528,6 +4549,7 @@ class World:
         self._build_next_block(p, site=site)            # lay it (credits the owner on completion)
         if sum(1 for t in site["tasks"] if t["done"]) > before:
             self._bump("help_block")
+            p["aided"] = p.get("aided", 0.0) + 1.0       # rolling "lends a hand" credit (the labour norm)
             if not site.get("done"):
                 self._earn_renown(p, RENOWN_GAIN.get("help", 0.3) * 0.4, "lent a hand on a neighbour's build")
         return "build", None
@@ -5368,6 +5390,95 @@ class World:
                         if hold[item] <= 0:
                             hold.pop(item, None)
 
+    # ── Phase B: LAWS — the LLM-as-leader codifies a norm; the engine enforces it (reputation only) ──
+    def _band_leader(self):
+        """The soul the band would heed as its law-giver: the highest-renown able adult, if their
+        standing clears LAW_MIN_RENOWN. None if no one yet carries that authority."""
+        best, br = None, LAW_MIN_RENOWN
+        for q in self.people:
+            if q["age"] < ADULT_AGE or q.get("illness"):
+                continue
+            r = q.get("renown", 0.0)
+            if r >= br:
+                best, br = q, r
+        return best
+
+    def _law_violates(self, p, norm) -> bool:
+        """Does this soul stand in breach of `norm` right now? Only able adults are ever judged — a
+        child, the sick or the badly hurt are never in the wrong for failing the band."""
+        if p["age"] < ADULT_AGE or p.get("illness") or p.get("hp", 1.0) <= 0.5:
+            return False
+        if norm == "hoarding":
+            return (p.get("store", {}).get("food", 0) > LAW_HOARD_CAP
+                    and self.granary.get("store", {}).get("food", 0) < LAW_GRANARY_LOW)
+        if norm == "labour":
+            return p.get("aided", 0.0) < LAW_LABOUR_MIN and any(not s.get("done") for s in self.sites)
+        if norm == "peace":
+            return sum(1 for r in (p.get("rel") or {}).values()
+                       if r.get("sentiment", 0.0) < -0.3) >= LAW_PEACE_FOES
+        return False
+
+    def _sanction(self, p, norm) -> None:
+        """Soft enforcement: a law-breaker sheds a little standing and a little of the band's regard
+        — disapproval, never punishment that could endanger a life (mirrors the granary norm)."""
+        p["renown"] = max(0.0, p.get("renown", 0.0) - LAW_SANCTION)
+        self._note("norm", f"the band marks that {p['name']} {LAW_REPROACH.get(norm, 'breaks our law')}.")
+        for q in self.people:
+            if q is p:
+                continue
+            rel = (q.get("rel") or {}).get(p["id"])
+            if rel:
+                rel["sentiment"] = max(-1.0, rel["sentiment"] - GOV_DISAPPROVAL)
+        self._bump("law_enforced")
+
+    def _law_problem(self):
+        """A recurring WRONG the band has no law against yet — the norm the most able adults are in
+        breach of, if that share clears LAW_PROBLEM_FRAC. Returns the norm id, or None. This is the
+        cheap rule that tells the leader there's something worth legislating."""
+        adults = [q for q in self.people if q["age"] >= ADULT_AGE and not q.get("illness")
+                  and q.get("hp", 1.0) > 0.5]
+        if len(adults) < GOV_MIN_BAND:
+            return None
+        enacted = {law["norm"] for law in self.laws}
+        worst, worst_frac = None, LAW_PROBLEM_FRAC
+        for norm in LAW_NORMS:
+            if norm in enacted:
+                continue
+            frac = sum(1 for q in adults if self._law_violates(q, norm)) / len(adults)
+            if frac >= worst_frac:
+                worst, worst_frac = norm, frac
+        return worst
+
+    def wants_new_law(self, p) -> bool:
+        """Rule trigger for the LLM legislator: p is the band's recognised LEADER, a recurring wrong
+        goes un-named, the band has room for another law, and lawmaking has rested (cooldown). Rare
+        by construction — one law is weighty and stands for days."""
+        if len(self.laws) >= LAW_MAX or self.clock < getattr(self, "_law_cd", 0.0):
+            return False
+        leader = self._band_leader()
+        if leader is None or leader["id"] != p["id"]:
+            return False
+        return self._law_problem() is not None
+
+    def apply_authored_law(self, data, by="the band") -> str | None:
+        """Author→Validate→World for LAWS (mirrors apply_authored_building): the leader's design names
+        a wrong to forbid; it is ENACTED only if the wrong is one the engine can actually judge (norm
+        in LAW_NORMS) and isn't already law. The validator is the immune system — an unenforceable or
+        duplicate law is set aside. Returns the norm id enacted, or None."""
+        if not isinstance(data, dict):
+            return None
+        norm = str(data.get("norm") or "").strip().lower()
+        if norm not in LAW_NORMS or any(law["norm"] == norm for law in self.laws):
+            return None
+        name = (str(data.get("name") or "").strip())[:48] or f"the law against {norm}"
+        value = (str(data.get("value") or "").strip())[:90]
+        self.laws.append({"norm": norm, "name": name, "value": value, "by": by, "enacted": self.clock})
+        self._law_cd = self.clock + LAW_COOLDOWN
+        self.version += 1
+        self._bump("law_enacted")
+        self._note("law", f"{by} gave the band a law — {name} ({LAW_REPROACH.get(norm, norm)}).")
+        return norm
+
     def _tick_governance(self):
         """The band's first NORM, judged once a game-day: pull your weight at the common granary.
         Steady contributors earn standing; an ABLE soul who keeps drawing from the commons without
@@ -5395,7 +5506,11 @@ class World:
                     if rel:                                    # only those who actually know them judge
                         rel["sentiment"] = max(-1.0, rel["sentiment"] - GOV_DISAPPROVAL)
                 self._bump("gov_judged")
+            for law in self.laws:                          # any ENACTED law judges its wrong (soft, reputation)
+                if self._law_violates(p, law["norm"]):
+                    self._sanction(p, law["norm"])
             p["gran_given"], p["gran_taken"] = given * GOV_LEDGER_DECAY, taken * GOV_LEDGER_DECAY
+            p["aided"] = p.get("aided", 0.0) * GOV_LEDGER_DECAY   # the labour-credit window rolls too
 
     def _tick_pests(self):
         """A fat larder of fresh food draws vermin. Each game-day, a store past the threshold
@@ -6289,6 +6404,7 @@ class World:
                 "foot_v": 1,                                   # paths/roads now wear only on SHARED use (see load)
                 "settlements": self.settlements,
                 "authored_blueprints": self.authored_blueprints,   # the band's own designs (Phase A)
+                "laws": self.laws,                                 # the band's enacted laws (Phase B)
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -6385,6 +6501,7 @@ class World:
                 self.footfall = {}; self.roads = {}; self._foot_last = {}   # wore everywhere — start clean
             self.settlements = meta.get("settlements", []) or []   # M0; a pre-M0 save self-heals on the daily tick
             self.authored_blueprints = meta.get("authored_blueprints", []) or []   # the band's own designs
+            self.laws = meta.get("laws", []) or []                                  # enacted laws (Phase B)
             self._register_authored()                     # re-inject them into BLUEPRINTS for the build machinery
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
@@ -6734,6 +6851,30 @@ if __name__ == "__main__":
     print(f"  authoring test (Phase A/A.2): registered={bool(a_good)} func_routes={func_ok} "
           f"rejects-walled={a_walled is None} rejects-huge={a_huge is None} "
           f"trigger builder={a_trig_b}/forager={a_trig_f} -> {'OK' if auth_ok else 'FAILED'}")
+
+    # LAWS (Phase B) — a renown-recognised LEADER, facing a recurring wrong, enacts a law the engine
+    # then judges by REPUTATION only. An unenforceable/duplicate law is set aside; the unable are
+    # never judged. Inert offline (only the default granary norm runs), so it can't move survival.
+    wl = World().generate(seed=5); wl.people = []
+    wl.granary = {"store": {"food": 2}, "x": 50, "y": 50}                  # commons LOW
+    for i in range(5):
+        wl._add_person(50 + i, 50, name=f"L{i}"); _p = wl.people[i]
+        _p["age"] = ADULT_AGE + 5; _p["renown"] = 0.5; _p["hp"] = 1.0; _p["store"] = {}
+    wl_lead = wl.people[0]; wl_lead["renown"] = 3.0
+    for i in (1, 2):
+        wl.people[i]["store"] = {"food": LAW_HOARD_CAP + 5}               # 2/5 hoard → a recurring wrong
+    l_problem = wl._law_problem() == "hoarding"
+    wl._law_cd = 0.0
+    l_leader = wl.wants_new_law(wl_lead) and not wl.wants_new_law(wl.people[1])   # only the leader legislates
+    l_enact = wl.apply_authored_law({"norm": "hoarding", "name": "The Sharing Law"}, by="L0") == "hoarding"
+    l_reject = (wl.apply_authored_law({"norm": "hoarding"}) is None                # already enacted
+                and wl.apply_authored_law({"norm": "teleport"}) is None)           # unenforceable
+    _rb = [wl.people[i]["renown"] for i in (1, 2)]
+    wl._tick_governance()
+    l_enforce = all(wl.people[i]["renown"] < _rb[k] for k, i in enumerate((1, 2))) and wl_lead["renown"] == 3.0
+    law_ok = l_problem and l_leader and l_enact and l_reject and l_enforce
+    print(f"  law test (Phase B): problem={l_problem} leader-only={l_leader} enacts={l_enact} "
+          f"rejects-dup/bad={l_reject} enforces-soft={l_enforce} -> {'OK' if law_ok else 'FAILED'}")
 
     # SETTLEMENT (M0) — the housed band becomes a first-class town: named, centred on its homes,
     # with a roll of members; a pre-M0 (empty) save self-heals on the daily tick; none when homeless.
