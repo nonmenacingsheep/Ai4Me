@@ -4420,6 +4420,10 @@ class World:
         s["members"] = [q["id"] for q in homed]
         s["pop"] = len(homed)
         s["cx"], s["cy"] = cx, cy
+        era = self._civilization_era()                     # the band's stage from stone to power (a watcher's stat)
+        if s.get("era") and s["era"] != era:               # a MILESTONE — the civilisation has moved on
+            self._note("culture", f"{s['name']} has entered the {era}.")
+        s["era"] = era
         # Phase D: once it's grown into a real TOWN (folk + a few public works), lay out its civic
         # plan — a square and roads — ONCE, so it reads as designed rather than a scatter of huts.
         if not s.get("planned") and s["pop"] >= CIVIC_MIN_POP:
@@ -4482,6 +4486,22 @@ class World:
         s = self._band_settlement()
         sq = s.get("square") if s else None
         return (sq[0], sq[1]) if sq else None
+
+    def _civilization_era(self) -> str:
+        """The band's place on the long road from stone to power — read from what it has BUILT and
+        LEARNED, so a watcher can feel the civilisation advancing. A derived stat (like population),
+        no mechanical effect: Stone Age -> Founding Age -> Age of Craft -> Age of Iron -> Age of Power."""
+        if (any(s.get("kind") in POWER_SOURCES for s in self.structures)
+                or WONDER_RECIPE in self.known_recipes):
+            return "Age of Power"                          # a generator/reactor stands, or its secret is known
+        if self._has_function("smithy"):
+            return "Age of Iron"                           # a forge to smelt ore and work metal
+        if self._has_function("workshop"):
+            return "Age of Craft"                          # a bench where the deeper crafts are made
+        if (any(t.get("done") and t.get("communal") for t in self.sites)
+                or (self._band_settlement() or {}).get("planned")):
+            return "Founding Age"                          # settled, with public works and a town taking shape
+        return "Stone Age"                                 # a band living off the land
 
     def wants_civic_identity(self, p) -> bool:
         """Rule trigger for the LLM city-PLANNER (D.2): a respected soul in a town that's been LAID
@@ -7161,6 +7181,23 @@ if __name__ == "__main__":
              and not ws._near_function({"x": 99, "y": 99}, "school", SCHOOL_RANGE))
     print(f"  school/infirmary test (A.2): registers={bool(s_id) and bool(i_id)} effect-gate-sees-them={si_ok} "
           f"-> {'OK' if si_ok else 'FAILED'}")
+
+    # CIVILISATION ERA — a derived stat (no effect) reading the band's stage from stone to power,
+    # so a watcher can feel the civilisation advance: Stone -> Founding -> Craft -> Iron -> Power.
+    we = World().generate(seed=5); we.people = []; we.sites = []; we.structures = []
+    we.known_recipes = set(); we.settlements = []
+    era_stone = we._civilization_era() == "Stone Age"
+    we.sites = [{"id": "h", "bp": "gathering", "done": True, "communal": True, "ox": 1, "oy": 1}]
+    era_found = we._civilization_era() == "Founding Age"
+    we.sites.append({"id": "ws", "bp": "workshop", "done": True, "ox": 2, "oy": 2})
+    era_craft = we._civilization_era() == "Age of Craft"
+    we.sites.append({"id": "sm", "bp": "smithy", "done": True, "ox": 3, "oy": 3})
+    era_iron = we._civilization_era() == "Age of Iron"
+    we.structures = [{"kind": "reactor", "x": 5, "y": 5}]
+    era_power = we._civilization_era() == "Age of Power"
+    era_ok = era_stone and era_found and era_craft and era_iron and era_power
+    print(f"  civilisation-era test: stone={era_stone} founding={era_found} craft={era_craft} "
+          f"iron={era_iron} power={era_power} -> {'OK' if era_ok else 'FAILED'}")
 
     # LAWS (Phase B) — a renown-recognised LEADER, facing a recurring wrong, enacts a law the engine
     # then judges by REPUTATION only. An unenforceable/duplicate law is set aside; the unable are

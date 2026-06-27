@@ -1227,7 +1227,7 @@ async def api_world_ways():
     s = w._band_settlement() or {}
     town = ({"name": s.get("name"), "square": s.get("square_name"), "character": s.get("character")}
             if s.get("character") else None)
-    return {"enabled": True, "town": town,
+    return {"enabled": True, "town": town, "era": w._civilization_era(),
             "laws": list(w.laws), "customs": list(w.customs),
             "designs": [{"name": ab.get("name"), "function": ab.get("function", "home"),
                          "purpose": ab.get("purpose", "")} for ab in w.authored_blueprints]}
