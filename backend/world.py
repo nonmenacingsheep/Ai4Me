@@ -542,6 +542,12 @@ DEFAULT_ASPIRE_GOAL = {"tidy": "tend the ground around my home",
                        "art": "raise a grand work the whole band will marvel at",
                        "furnish": "make beds for my family"}
 BED_REST_BONUS = 0.4         # how much resting in a proper BED speeds recovery (on top of the roof)
+# Furniture is MADE from materials, not conjured: a soul must hold the makings to set a piece down
+# (a bed is a pallet of leaves over fibre; tables/chairs/chests are timber). Flowers/cairns/art stay
+# free (they're labour over found things). A soul short the makings skips that piece rather than
+# magicking it into being.
+FURNITURE_COST = {"bed": {"leaves": 4, "fiber": 2}, "table": {"wood": 3},
+                  "chair": {"wood": 2}, "chest": {"wood": 3}}
 # Governance — the band's FIRST NORM: pull your weight at the common granary. Judged once a day on
 # a rolling window. Soft enforcement through reputation only (standing + how others regard you),
 # never punishment — it nudges conduct without ever endangering a life.
@@ -3016,6 +3022,19 @@ class World:
             tiles = [tuple(s["core"])]
         return tiles
 
+    def _home_floor(self, p):
+        """The real, walled-IN floor of a soul's PROPER home (a hut/cabin/…) — anchor tile first, so
+        the first bed lands where the soul actually lies down to sleep. EMPTY for a leaf lean-to: it
+        has no enclosed interior to furnish, which is why beds stopped appearing in the open."""
+        s = next((q for q in self.sites if q["id"] == p.get("home_struct")), None)
+        if not s:
+            return []
+        floor = [(t["x"], t["y"]) for t in s.get("tasks", []) if t.get("code") == BLOCK_FLOOR]
+        home = tuple(p.get("home", ()))
+        if home in floor:                                  # sleep where you rest: the bed goes on the anchor
+            floor.remove(home); floor.insert(0, home)
+        return floor
+
     def _form_aspiration(self, p):
         """A settled, content soul DREAMS UP its own project — tidy the overgrown ground around its
         home, or plant a flower garden by the door — and lays a PLAN of primitive skill-steps to
@@ -3074,7 +3093,7 @@ class World:
                 return {"goal": goal, "kind": "tidy", "i": 0,
                         "steps": [["clear", tx, ty] for tx, ty in overgrown[:ASPIRE_MAX_STEPS]]}
             if kind == "furnish":                            # furnish the home: beds first, then a hearth-table, chairs, a chest
-                empty = [t for t in self._home_interior(p)
+                empty = [t for t in self._home_floor(p)      # PROPER home only (a leaf lean-to has no interior)
                          if t not in self.decor and t not in self.station_objs]
                 if empty:
                     want = (["bed"] * max(1, self._household_size(p))  # a bed per soul, then the comforts of a settled home
@@ -3122,8 +3141,18 @@ class World:
             return "wander", (tx - p["x"], ty - p["y"])   # raw delta → pathfind to the plan spot
         if skill == "clear":                                 # primitive skills the body composes
             self._clear_ground(tx, ty, 0)
-        elif skill == "place":                               # plant a flower / raise a stone cairn
-            self.decor[(tx, ty)] = step[3] if len(step) > 3 else "flower"
+        elif skill == "place":                               # plant a flower / raise a cairn / set furniture
+            kind = step[3] if len(step) > 3 else "flower"
+            cost = FURNITURE_COST.get(kind)                  # furniture is MADE from materials, not conjured
+            if cost and not all(p["inv"].get(m, 0) >= n for m, n in cost.items()):
+                plan["i"] = i + 1                            # short the makings — skip this piece, don't fake it
+                return "tend", None
+            if cost:
+                for m, n in cost.items():
+                    p["inv"][m] = p["inv"].get(m, 0) - n
+                    if p["inv"][m] <= 0:
+                        del p["inv"][m]
+            self.decor[(tx, ty)] = kind
             self.version += 1
         plan["i"] = i + 1
         self._bump("aspire_step")
