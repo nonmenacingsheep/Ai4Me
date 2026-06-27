@@ -602,6 +602,7 @@ CIVIC_SQUARE_R = 1           # radius of the paved town square at the civic hear
 # seasonal festival bonds the band a little deeper. Inert with no model, so survival is untouched.
 CIVIC_ID_MIN_RENOWN = 2.0    # standing a soul needs to name the town's square and declare its character
 CIVIC_PRIDE_BOND = 0.03      # extra festival bond-warmth in a town that knows what it is
+SQUARE_STROLL = 14           # how near the town square an idle soul will be, by day, to drift to it
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
@@ -3015,8 +3016,18 @@ class World:
         if off:
             return off
         hx, hy = p["home"]
-        if abs(hx - p["x"]) + abs(hy - p["y"]) > 6:
-            return "wander", (hx - p["x"], hy - p["y"])    # drift home → pathfind round walls
+        px, py = p["x"], p["y"]
+        # By DAY, an idle soul in a planned town drifts to its SQUARE — the civic heart fills with folk
+        # (the designed centre comes alive). The square counts as "home enough" by day, so a soul there
+        # doesn't get yanked back home (no home<->square oscillation); at night the home-rhythm rules.
+        sq = self._town_square()
+        day = 7 <= self.time_of_day() < 19
+        dsq = (abs(sq[0] - px) + abs(sq[1] - py)) if sq else 9999
+        near_square = day and sq is not None and dsq <= SQUARE_STROLL
+        if abs(hx - px) + abs(hy - py) > 6 and not near_square:
+            return "wander", (hx - px, hy - py)            # drift home → pathfind round walls
+        if day and sq is not None and 2 < dsq <= SQUARE_STROLL:
+            return "wander", (sq[0] - px, sq[1] - py)      # gather at the town square → pathfind
         # Drift toward the nearest neighbour within an easy stroll (not a cross-map trek), so
         # the idle band clusters; once beside someone, just amble (the social pass does the rest).
         best, bd = None, 11
@@ -4458,6 +4469,13 @@ class World:
     def _band_settlement(self):
         """The band's settlement (M0 keeps one), or None when the band is still homeless."""
         return self.settlements[0] if self.settlements else None
+
+    def _town_square(self):
+        """The (x,y) of the town's civic square once it's been laid out (Phase D), else None — the
+        heart an idle soul drifts to by day, so the designed centre fills with folk."""
+        s = self._band_settlement()
+        sq = s.get("square") if s else None
+        return (sq[0], sq[1]) if sq else None
 
     def wants_civic_identity(self, p) -> bool:
         """Rule trigger for the LLM city-PLANNER (D.2): a respected soul in a town that's been LAID
