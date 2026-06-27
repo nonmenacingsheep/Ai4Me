@@ -1204,6 +1204,20 @@ async def api_world_ledger():
     return {"enabled": True, "ledger": list(w.ledger)}
 
 
+@app.get("/api/world/ways")
+async def api_world_ways():
+    """The Ways of the band — what the LLM design layer has authored and the band now lives by:
+    the LAWS it has enacted, the TRADITIONS it keeps, and the BUILDINGS it designed itself.
+    Powers the World-tab 'Ways of the band' panel."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"enabled": False}
+    w = await asyncio.to_thread(world_store.get_world)
+    return {"enabled": True,
+            "laws": list(w.laws), "customs": list(w.customs),
+            "designs": [{"name": ab.get("name"), "function": ab.get("function", "home"),
+                         "purpose": ab.get("purpose", "")} for ab in w.authored_blueprints]}
+
+
 @app.get("/api/world/recipes")
 async def api_world_recipes():
     """The crafting registry: every item, raw material, station and the 128 recipes.

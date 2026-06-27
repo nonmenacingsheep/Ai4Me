@@ -5184,6 +5184,30 @@ function _ledgerOpen() {
   const sec = document.querySelector('.wmenu[data-menu="ledger"]');
   return sec && sec.classList.contains('open');
 }
+
+/* Ways of the band — the LLM design layer's output: enacted laws, kept traditions, self-designed buildings. */
+async function loadWays() {
+  const el = document.getElementById('wways-list');
+  if (el && !el.innerHTML) el.innerHTML = '<div class="wways-empty">Loading…</div>';
+  let w = null;
+  try { const j = await (await fetch('/api/world/ways')).json(); w = j.enabled ? j : null; } catch (_) {}
+  if (!el) return;
+  if (!w) { el.innerHTML = '<div class="wways-empty">The World is off.</div>'; return; }
+  const laws = w.laws || [], customs = w.customs || [], designs = w.designs || [];
+  if (!laws.length && !customs.length && !designs.length) {
+    el.innerHTML = '<div class="wways-empty">The band has yet to make its own ways. With a mind (Ollama) running, a leader enacts laws, a soul begins traditions, and a builder designs buildings — they appear here as the band thrives.</div>';
+    return;
+  }
+  const group = (title, items) => items.length
+    ? `<div class="wways-group"><div class="wways-h">${title}</div>${items.join('')}</div>` : '';
+  const card = (icon, name, sub) =>
+    `<div class="wways-card"><div class="wways-name">${icon} ${escapeHtml(name || '')}</div>` +
+    `<div class="wways-sub">${escapeHtml(sub || '')}</div></div>`;
+  el.innerHTML =
+    group('Laws', laws.map(l => card('⚖', l.name, (l.value || '') + (l.by ? ' · ' + l.by : '')))) +
+    group('Traditions', customs.map(c => card('✦', c.name, 'each ' + (c.season || '') + (c.value ? ' · ' + c.value : '')))) +
+    group('Designs', designs.map(d => card('⌂', d.name, (d.function || 'home') + (d.purpose ? ' · ' + d.purpose : ''))));
+}
 function renderLedger() {
   const list = document.getElementById('wledger-list');
   if (!list) return;
@@ -5283,6 +5307,7 @@ function bindWorld() {
       const open = sec.classList.toggle('open');
       if (open && sec.dataset.menu === 'crafting') loadCraftingRecipes();   // lazy-load on first open
       if (open && sec.dataset.menu === 'ledger') loadLedger();
+      if (open && sec.dataset.menu === 'ways') loadWays();   // the band's laws, traditions & designs
       if (open && sec.dataset.menu === 'templates') loadTemplates();
       if (open && sec.dataset.menu === 'settings') loadSnapshots();   // World saves
     });
