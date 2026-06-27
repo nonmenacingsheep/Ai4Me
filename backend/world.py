@@ -589,6 +589,14 @@ CUSTOM_MAX = 4               # most traditions the band carries (≈ one per sea
 CUSTOM_COOLDOWN = 3 * 24 * 60  # game-min between new traditions (~3 days)
 CUSTOM_BOND_WARM = 0.10      # bond warmth at a band's OWN cherished feast (vs CUSTOM_BOND_PLAIN below)
 CUSTOM_BOND_PLAIN = 0.06     # bond warmth at a plain turn-of-season gathering
+
+# Phase D — DESIGNED CITIES (civic layout): once a settlement grows into a real TOWN — folk enough,
+# and a few PUBLIC WORKS raised — it lays out a deliberate plan: a SQUARE at its heart and packed-
+# earth ROADS out to each public building, so a mature town reads as planned, not a scatter of huts.
+# Purely additive (reuses the pathfinder + road system; never moves a home), so survival is untouched.
+CIVIC_MIN_POP = 10           # housed souls a settlement needs before it's worth laying out as a town
+CIVIC_MIN_PUBLICS = 2        # finished communal works (a hall, a well, …) that mark it a real town
+CIVIC_SQUARE_R = 1           # radius of the paved town square at the civic heart
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
@@ -4387,6 +4395,57 @@ class World:
         s["members"] = [q["id"] for q in homed]
         s["pop"] = len(homed)
         s["cx"], s["cy"] = cx, cy
+        # Phase D: once it's grown into a real TOWN (folk + a few public works), lay out its civic
+        # plan — a square and roads — ONCE, so it reads as designed rather than a scatter of huts.
+        if not s.get("planned") and s["pop"] >= CIVIC_MIN_POP:
+            publics = [(t["ox"], t["oy"]) for t in self.sites if t.get("done") and t.get("communal")]
+            if len(publics) >= CIVIC_MIN_PUBLICS:
+                self._plan_civic_roads(s, publics)
+
+    def _civic_heart(self, cx, cy):
+        """A clear, walkable ground tile near a settlement's centroid for its town SQUARE — searched
+        in a small spiral so the heart isn't stuck inside a wall or the water. None if nowhere open."""
+        for r in range(0, 9):
+            for dy in range(-r, r + 1):
+                for dx in range(-r, r + 1):
+                    if max(abs(dx), abs(dy)) != r:
+                        continue
+                    tx, ty = cx + dx, cy + dy
+                    if (self._in(tx, ty) and self.water[ty, tx] == WATER_NONE
+                            and self.blocks.get((tx, ty)) is None):
+                        return (tx, ty)
+        return None
+
+    def _plan_civic_roads(self, s, publics):
+        """Lay a town's deliberate ROAD network — a paved SQUARE at its civic heart and a packed-earth
+        way out to each public work and the granary (A* over open ground; roads only land on bare,
+        dry tiles, never through a building). Additive: it SEEDS the road network the band then keeps
+        up by use, and never moves a home — survival untouched. Phase D, done once per settlement."""
+        heart = self._civic_heart(s["cx"], s["cy"])
+        if heart is None:
+            return 0
+        targets = list(publics)
+        if self.granary.get("x") is not None:
+            targets.append((self.granary["x"], self.granary["y"]))
+        laid = 0
+        for tx, ty in targets:
+            path = self._compute_path(heart[0], heart[1], int(tx), int(ty))
+            for rx, ry in (path or []):
+                if self.water[ry, rx] == WATER_NONE and self.blocks.get((rx, ry)) is None:
+                    self.roads[(rx, ry)] = 1.0
+                    laid += 1
+        for dx in range(-CIVIC_SQUARE_R, CIVIC_SQUARE_R + 1):       # the paved square at the heart
+            for dy in range(-CIVIC_SQUARE_R, CIVIC_SQUARE_R + 1):
+                t = (heart[0] + dx, heart[1] + dy)
+                if self._in(*t) and self.water[t[1], t[0]] == WATER_NONE and self.blocks.get(t) is None:
+                    self.roads[t] = 1.0
+        s["planned"] = True
+        s["square"] = [heart[0], heart[1]]
+        self.version += 1
+        self._bump("civic_planned")
+        self._note("culture", f"{s['name']} laid out a town square and roads between its halls — "
+                              "a planned town now.")
+        return laid
 
     def _nearest_resource_dist(self, cx, cy):
         """Manhattan distance to the nearest stone boulder or ore node, or None if the map has
@@ -7096,6 +7155,30 @@ if __name__ == "__main__":
               and len(st.get("members", [])) == 3 and healed)
     print(f"  settlement test: name={st.get('name')} centre=({st.get('cx')},{st.get('cy')}) "
           f"pop={st.get('pop')} self-heal={healed} -> {'OK' if set_ok else 'FAILED'}")
+
+    # CIVIC LAYOUT (Phase D) — a grown TOWN (folk + public works) lays out a SQUARE and ROADS to its
+    # public buildings, ONCE; roads land only on bare ground, never through a building or the water,
+    # and a home is never moved (siting untouched). Inert below CIVIC_MIN_POP, so the founding-band
+    # canary never triggers it — survival can't move.
+    wd = World().generate(seed=11); wd.people = []; wd.blocks = {}; wd.roads = {}
+    dl = np.argwhere(wd.water == WATER_NONE)[len(np.argwhere(wd.water == WATER_NONE)) // 2]
+    dcy, dcx = int(dl[0]), int(dl[1])
+    for i in range(CIVIC_MIN_POP):
+        ox, oy = dcx + (i % 4), dcy + (i // 4)
+        wd._add_person(ox, oy, name=f"D{i}"); _p = wd.people[-1]
+        _p["age"] = ADULT_AGE + 5; _p["home"] = (ox, oy); _p["home_struct"] = f"d{i}"
+    wd.sites = [{"id": "h", "bp": "gathering", "done": True, "communal": True, "ox": dcx + 9, "oy": dcy, "tasks": []},
+                {"id": "w", "bp": "well", "done": True, "communal": True, "ox": dcx, "oy": dcy + 9, "tasks": []}]
+    wd.granary = {"store": {}, "x": dcx - 7, "y": dcy}
+    wd._tick_settlements()
+    ds = wd.settlements[0]
+    d_clean = all(wd.water[ry, rx] == WATER_NONE and wd.blocks.get((rx, ry)) is None for (rx, ry) in wd.roads)
+    d_reach = (any(abs(rx - (dcx + 9)) + abs(ry - dcy) <= 2 for rx, ry in wd.roads)
+               and any(abs(rx - dcx) + abs(ry - (dcy + 9)) <= 2 for rx, ry in wd.roads))
+    _rb = len(wd.roads); wd._tick_settlements(); d_once = len(wd.roads) == _rb
+    civic_ok = bool(ds.get("planned")) and len(wd.roads) > 5 and d_clean and d_reach and d_once
+    print(f"  civic-layout test (Phase D): planned={bool(ds.get('planned'))} roads={len(wd.roads)} "
+          f"clean={d_clean} reaches-publics={d_reach} once={d_once} -> {'OK' if civic_ok else 'FAILED'}")
 
     # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
     # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.
