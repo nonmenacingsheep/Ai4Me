@@ -786,6 +786,18 @@ async def _mind_think_one():
             if nm:
                 await broadcast({"type": "world_changed",
                                  "changes": [f"{target['name']} began a tradition — {nm}"]})
+        # City-planning (Phase D.2): when a respected soul's town has been LAID OUT but not yet named,
+        # let the model give it its identity — a name for its square and a character. The author
+        # proposes the town's identity; the world records it (a town that knows itself takes pride).
+        if target is not None and w.wants_civic_identity(target):
+            ctx["town_name"] = (w._band_settlement() or {}).get("name", "the town")
+            vsys, vusr = mind_store.author_civic_messages(target, ctx)
+            vraw = await asyncio.wait_for(
+                brain._complete(vsys, vusr, max_tokens=100, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+            sq = w.apply_civic_identity(brain._parse_json_object(vraw), by=target["name"])
+            if sq:
+                await broadcast({"type": "world_changed",
+                                 "changes": [f"{target['name']} named the town's square — {sq}"]})
     except Exception as e:
         print(f"[mind] deliberation fell back to the arbiter ({type(e).__name__}: {e})")
 
@@ -1212,7 +1224,10 @@ async def api_world_ways():
     if not (settings.get("capabilities") or {}).get("world", False):
         return {"enabled": False}
     w = await asyncio.to_thread(world_store.get_world)
-    return {"enabled": True,
+    s = w._band_settlement() or {}
+    town = ({"name": s.get("name"), "square": s.get("square_name"), "character": s.get("character")}
+            if s.get("character") else None)
+    return {"enabled": True, "town": town,
             "laws": list(w.laws), "customs": list(w.customs),
             "designs": [{"name": ab.get("name"), "function": ab.get("function", "home"),
                          "purpose": ab.get("purpose", "")} for ab in w.authored_blueprints]}

@@ -1029,6 +1029,26 @@ def author_custom_messages(p: dict, ctx: dict) -> tuple[str, str]:
     return system, user
 
 
+def author_civic_messages(p: dict, ctx: dict) -> tuple[str, str]:
+    """Build (system, user) asking a respected elder to give a newly-LAID-OUT town its IDENTITY — the
+    LLM as city-PLANNER (Phase D.2): a name for its central square and a one-line character. The
+    engine records it (a town that knows itself takes pride). Proposes; the world disposes."""
+    name = p["name"]
+    town = ctx.get("town_name") or "your town"
+    has = ctx.get("town_has") or "homes and a few public buildings"
+    system = (
+        "You are the civic pride of a respected elder in a small pre-industrial TOWN that has just "
+        "laid out its central SQUARE and the roads between its halls. Give the town its identity — a "
+        "name for the square and a one-line character (what kind of town it is). ONE JSON object only."
+    )
+    user = (
+        f"You are {name}, looked up to in {town} — now a real town with {has}. Name its central "
+        "square and say in a line what kind of town it has become. Reply as JSON:\n"
+        '{"square_name": "<the square\'s name>", "character": "<one line: the town\'s character>"}'
+    )
+    return system, user
+
+
 # ─── LLM touch-points (prompt builders + result appliers; the call itself is in the
 #     server, so this module stays sync/testable and free of the brain dependency) ────
 def deliberate_messages(p: dict, ctx: dict) -> tuple[str, str]:

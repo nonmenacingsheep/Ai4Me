@@ -597,6 +597,11 @@ CUSTOM_BOND_PLAIN = 0.06     # bond warmth at a plain turn-of-season gathering
 CIVIC_MIN_POP = 10           # housed souls a settlement needs before it's worth laying out as a town
 CIVIC_MIN_PUBLICS = 2        # finished communal works (a hall, a well, …) that mark it a real town
 CIVIC_SQUARE_R = 1           # radius of the paved town square at the civic heart
+# Phase D.2 — the LLM as city-PLANNER: a respected soul gives a PLANNED town its civic IDENTITY — a
+# name for its square and a one-line character. A town with an identity takes PRIDE in itself: its
+# seasonal festival bonds the band a little deeper. Inert with no model, so survival is untouched.
+CIVIC_ID_MIN_RENOWN = 2.0    # standing a soul needs to name the town's square and declare its character
+CIVIC_PRIDE_BOND = 0.03      # extra festival bond-warmth in a town that knows what it is
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
@@ -1419,6 +1424,9 @@ class World:
         custom = next((c for c in self.customs if c.get("kind") == "feast"
                        and c.get("season") == season_now), None)
         warm = CUSTOM_BOND_WARM if custom else CUSTOM_BOND_PLAIN
+        st = self._band_settlement()
+        if st and st.get("character"):                     # a town that KNOWS itself (D.2) gathers with pride
+            warm += CIVIC_PRIDE_BOND
         for i, a in enumerate(self.people):
             for b in self.people[i + 1:]:
                 ra, rb = mind._rel(a, b, self.clock), mind._rel(b, a, self.clock)
@@ -4447,6 +4455,36 @@ class World:
                               "a planned town now.")
         return laid
 
+    def _band_settlement(self):
+        """The band's settlement (M0 keeps one), or None when the band is still homeless."""
+        return self.settlements[0] if self.settlements else None
+
+    def wants_civic_identity(self, p) -> bool:
+        """Rule trigger for the LLM city-PLANNER (D.2): a respected soul in a town that's been LAID
+        OUT (planned) but not yet given its identity. Rare — a town is named once."""
+        s = self._band_settlement()
+        if s is None or not s.get("planned") or s.get("character"):
+            return False
+        return p.get("home_struct") is not None and p.get("renown", 0.0) >= CIVIC_ID_MIN_RENOWN
+
+    def apply_civic_identity(self, data, by="the town") -> str | None:
+        """Author→Validate→World for a town's IDENTITY (D.2): a NAME for its square and a one-line
+        CHARACTER. Taken up only if both are given and the town is planned and not already named (the
+        immune system). A named town takes pride — its festivals bond deeper. Returns the square's
+        name, or None."""
+        s = self._band_settlement()
+        if s is None or not s.get("planned") or s.get("character") or not isinstance(data, dict):
+            return None
+        square = (str(data.get("square_name") or "").strip())[:48]
+        character = (str(data.get("character") or "").strip())[:90]
+        if not square or not character:
+            return None
+        s["square_name"], s["character"] = square, character
+        self.version += 1
+        self._bump("civic_identity")
+        self._note("culture", f"{by} named the heart of {s['name']} — {square} — \"{character}\".")
+        return square
+
     def _nearest_resource_dist(self, cx, cy):
         """Manhattan distance to the nearest stone boulder or ore node, or None if the map has
         none — what a smithy/workshop wants close: the stuff it works."""
@@ -7179,6 +7217,21 @@ if __name__ == "__main__":
     civic_ok = bool(ds.get("planned")) and len(wd.roads) > 5 and d_clean and d_reach and d_once
     print(f"  civic-layout test (Phase D): planned={bool(ds.get('planned'))} roads={len(wd.roads)} "
           f"clean={d_clean} reaches-publics={d_reach} once={d_once} -> {'OK' if civic_ok else 'FAILED'}")
+
+    # CIVIC IDENTITY (Phase D.2) — a respected soul names a PLANNED town's square + declares its
+    # character; a town that knows itself bonds deeper at festivals. Only the respected legislate it,
+    # only once, and only with both a name and a character given (the immune system). Inert offline.
+    wd.people[0]["renown"] = 3.0; wd.people[1]["renown"] = 0.2
+    id_wants = wd.wants_civic_identity(wd.people[0]) and not wd.wants_civic_identity(wd.people[1])
+    id_bad = (wd.apply_civic_identity({"square_name": "", "character": "x"}) is None      # no name
+              and wd.apply_civic_identity({"square_name": "x"}) is None)                  # no character
+    id_set = wd.apply_civic_identity({"square_name": "Founders' Square", "character": "a town of makers"},
+                                     by="D0") == "Founders' Square"
+    id_once = wd.apply_civic_identity({"square_name": "Other", "character": "y"}) is None  # already named
+    id_stored = ds.get("square_name") == "Founders' Square" and bool(ds.get("character"))
+    civic_id_ok = id_wants and id_bad and id_set and id_once and id_stored
+    print(f"  civic-identity test (Phase D.2): respected-only={id_wants} rejects-incomplete={id_bad} "
+          f"names={id_set} once={id_once} stored={id_stored} -> {'OK' if civic_id_ok else 'FAILED'}")
 
     # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
     # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.
