@@ -289,6 +289,9 @@ PERSON_AVOID_COST  = 4.0      # souls don't walk INTO each other: a tile another
 ROAM_MIN = 5                  # nearest a roam waypoint is chosen
 ROAM_MAX = 13                 # farthest a roam waypoint is chosen
 ROAM_TIME = 150               # game-min before giving up on a waypoint (e.g. unreachable) and re-picking
+# Perf: per-tick perception masks are precomputed over the box covering all people (big win for a
+# CLUSTERED town); if the band is spread wider than this on either axis, fall back to per-soul windows.
+PMASK_MAX_SPAN = 200
 # Desire-line PATHS — feet wear trails into the ground along the routes the band actually uses (home↔
 # water↔resources), so a cluster of huts reads as a real village. Purely COSMETIC (no movement effect).
 FOOTFALL_CAP       = 60.0     # most a single tile's wear can build to
@@ -2065,6 +2068,7 @@ class World:
         wolf_pos = [(a["x"], a["y"]) for a in self.animals if a["sp"] == "wolf"]
         self._wolf_pos = wolf_pos                          # cached for the danger-aware walker
         self._person_pos = {(q["x"], q["y"]) for q in self.people}   # so souls route around one another
+        self._build_perception_masks()                     # resource masks once/tick (vs np.isin per soul — perf)
 
         dead = []
         for p in self.people:
@@ -2501,27 +2505,64 @@ class World:
             self._note("birth", f"{heir['name']} inherited {dead['name']}'s home.")
             mind.remember(heir, f"I inherited {dead['name']}'s home", 0.8, "build", self.clock)
 
-    def _perceive(self, x, y):
-        """Build this person's small perception windows (edible/drinkable/tree/stone)
-        around (x,y), plus their position (lx,ly) inside the window. Cost is O(vision²),
-        independent of world size — the key to people staying cheap on a 4M-tile map."""
-        v = PERSON["vision"]
-        wy0, wy1 = max(0, y - v - 1), min(H, y + v + 2)
-        wx0, wx1 = max(0, x - v - 1), min(W, x + v + 2)
-        vsp = self.veg_sp[wy0:wy1, wx0:wx1]; vgr = self.veg_growth[wy0:wy1, wx0:wx1]
-        wat = self.water[wy0:wy1, wx0:wx1]; bio = self.biome[wy0:wy1, wx0:wx1]
+    @staticmethod
+    def _resource_masks(vsp, vgr, wat, bio):
+        """The resource boolean masks for a tile region (edible/tree/stone/fiber/leaf/drinkable) —
+        the np.isin work, factored out so it can run ONCE over the whole people-box per tick instead
+        of per soul (the np.isin hotspot at town scale)."""
         edible = np.isin(vsp, EDIBLE_IDS) & (vgr > 0.12)
         tree = np.isin(vsp, WOOD_IDS) & (vgr > BUILD["chop_growth_min"])
         stone = np.isin(bio, [B["rock"], B["mountain"]]) & (wat == WATER_NONE)
-        fiber = np.isin(vsp, FIBER_IDS) & (vgr > 0.20)            # grasses to pull for thatch/rope
-        leaf = np.isin(vsp, LEAF_IDS) & (vgr > 0.25)             # foliage to strip for a leaf shelter
+        fiber = np.isin(vsp, FIBER_IDS) & (vgr > 0.20)           # grasses to pull for thatch/rope
+        leaf = np.isin(vsp, LEAF_IDS) & (vgr > 0.25)            # foliage to strip for a leaf shelter
         watery = wat != WATER_NONE
-        drinkable = np.zeros_like(watery)               # land tiles bordering water
+        drinkable = np.zeros_like(watery)                       # land tiles bordering water
         if watery.shape[0] > 2 and watery.shape[1] > 2:
             drinkable[1:-1, 1:-1] = (
                 (watery[:-2, 1:-1] | watery[2:, 1:-1] | watery[1:-1, :-2] | watery[1:-1, 2:])
                 & (wat[1:-1, 1:-1] == WATER_NONE))
-        return edible, drinkable, tree, stone, fiber, leaf, x - wx0, y - wy0, wx0, wy0
+        return edible, drinkable, tree, stone, fiber, leaf
+
+    def _build_perception_masks(self):
+        """Precompute the resource masks ONCE per tick over the box covering every soul's perception,
+        so _perceive can SLICE them instead of running np.isin per soul — the big perf win at town
+        scale. Survival-NEUTRAL: the masks are identical, just computed in bulk. None when no people."""
+        if not self.people:
+            self._pmask = None
+            return
+        v = PERSON["vision"] + 2                                # a tile of slack so every window sits inside
+        xs = [p["x"] for p in self.people]; ys = [p["y"] for p in self.people]
+        x0, x1 = max(0, min(xs) - v), min(W, max(xs) + v + 1)
+        y0, y1 = max(0, min(ys) - v), min(H, max(ys) + v + 1)
+        if (x1 - x0) > PMASK_MAX_SPAN or (y1 - y0) > PMASK_MAX_SPAN:
+            self._pmask = None             # band too SPREAD to precompute cheaply (the win is for a clustered
+            return                         # town); fall back to each soul computing its own small window
+        ed, dr, tr, st, fi, lf = self._resource_masks(
+            self.veg_sp[y0:y1, x0:x1], self.veg_growth[y0:y1, x0:x1],
+            self.water[y0:y1, x0:x1], self.biome[y0:y1, x0:x1])
+        self._pmask = {"edible": ed, "drinkable": dr, "tree": tr, "stone": st, "fiber": fi,
+                       "leaf": lf, "x0": x0, "y0": y0, "x1": x1, "y1": y1}
+
+    def _perceive(self, x, y):
+        """Build this person's small perception windows (edible/drinkable/tree/stone)
+        around (x,y), plus their position (lx,ly) inside the window. Cost is O(vision²),
+        independent of world size — the key to people staying cheap on a 4M-tile map.
+        Slices the per-tick precomputed masks when they cover the window (the common case), else
+        falls back to computing the window directly."""
+        v = PERSON["vision"]
+        wy0, wy1 = max(0, y - v - 1), min(H, y + v + 2)
+        wx0, wx1 = max(0, x - v - 1), min(W, x + v + 2)
+        pm = getattr(self, "_pmask", None)
+        if pm is not None and pm["x0"] <= wx0 and pm["y0"] <= wy0 and wx1 <= pm["x1"] and wy1 <= pm["y1"]:
+            ry, rx = wy0 - pm["y0"], wx0 - pm["x0"]
+            hy, hx = wy1 - wy0, wx1 - wx0
+            sl = (slice(ry, ry + hy), slice(rx, rx + hx))
+            return (pm["edible"][sl], pm["drinkable"][sl], pm["tree"][sl], pm["stone"][sl],
+                    pm["fiber"][sl], pm["leaf"][sl], x - wx0, y - wy0, wx0, wy0)
+        ed, dr, tr, st, fi, lf = self._resource_masks(
+            self.veg_sp[wy0:wy1, wx0:wx1], self.veg_growth[wy0:wy1, wx0:wx1],
+            self.water[wy0:wy1, wx0:wx1], self.biome[wy0:wy1, wx0:wx1])
+        return ed, dr, tr, st, fi, lf, x - wx0, y - wy0, wx0, wy0
 
     def _nearest_local(self, mask, lx, ly):
         """The RAW delta toward the nearest True tile in a window mask (centre lx,ly) — so the mover
@@ -5621,23 +5662,40 @@ class World:
                 return True
         return False
 
+    def _ensure_bush_index(self):
+        """A spatial bucket of berry bushes by cell, so _nearest_bush checks only the cells near a
+        soul instead of every bush on the map (perf at town scale). Bushes are static, so it rebuilds
+        only when the list changes. Survival-NEUTRAL — same bushes considered, just found faster."""
+        if getattr(self, "_bush_idx_n", -1) == len(self.berry_bushes):
+            return
+        c = max(1, BERRY_SEEK_RANGE)
+        idx = {}
+        for b in self.berry_bushes:
+            idx.setdefault((b["x"] // c, b["y"] // c), []).append(b)
+        self._bush_idx, self._bush_idx_n = idx, len(self.berry_bushes)
+
     def _nearest_bush(self, p):
         """The best ripe bush worth foraging within reach: nearest one this soul doesn't KNOW to
         be poisonous (a known-good bush is preferred, an unknown one is a gamble worth taking).
         Returns the bush dict or None."""
+        self._ensure_bush_index()
         lore = p.get("berry_lore", {})
         x, y = p["x"], p["y"]
+        c = max(1, BERRY_SEEK_RANGE)
+        cx, cy = x // c, y // c
         best = None; best_score = None
-        for b in self.berry_bushes:
-            d = abs(b["x"] - x) + abs(b["y"] - y)
-            if d > BERRY_SEEK_RANGE or not self._bush_ripe(b):
-                continue
-            tag = lore.get(f"{b['x']},{b['y']}")
-            if tag == "bad":
-                continue                                  # known poison — shun it
-            score = d - (BERRY_GOOD_BIAS if tag == "good" else 0)   # mild bias toward a trusted bush
-            if best_score is None or score < best_score:
-                best, best_score = b, score
+        for gx in (cx - 1, cx, cx + 1):                   # cell == seek range, so 3×3 covers the reach
+            for gy in (cy - 1, cy, cy + 1):
+                for b in self._bush_idx.get((gx, gy), ()):
+                    d = abs(b["x"] - x) + abs(b["y"] - y)
+                    if d > BERRY_SEEK_RANGE or not self._bush_ripe(b):
+                        continue
+                    tag = lore.get(f"{b['x']},{b['y']}")
+                    if tag == "bad":
+                        continue                          # known poison — shun it
+                    score = d - (BERRY_GOOD_BIAS if tag == "good" else 0)   # mild bias toward a trusted bush
+                    if best_score is None or score < best_score:
+                        best, best_score = b, score
         return best
 
     def _berry_seek(self, p):
@@ -6956,6 +7014,22 @@ if __name__ == "__main__":
     print(f"  custom test (Phase C): respected-only={c_wants} founds={c_enact} "
           f"rejects-dup/badkind/badseason={c_reject} feast-kept+bonds={c_observe} "
           f"-> {'OK' if custom_ok else 'FAILED'}")
+
+    # PERF — the per-tick precomputed perception masks (the np.isin hotspot at town scale) must be
+    # byte-IDENTICAL to computing each window directly, or survival quietly shifts. The guard for the
+    # optimization that took ~52ms/step at 83 souls down to ~13ms.
+    wpf = World().generate(seed=5); wpf.people = []
+    for (px, py) in [(50, 50), (62, 55), (45, 48), (70, 60)]:
+        wpf._add_person(px, py, name="pf")
+    wpf._build_perception_masks()
+    mask_ok = True
+    for (px, py) in [(50, 50), (55, 52), (66, 58), (45, 48), (70, 60)]:
+        sliced = wpf._perceive(px, py)
+        _sv = wpf._pmask; wpf._pmask = None; direct = wpf._perceive(px, py); wpf._pmask = _sv
+        if not all(np.array_equal(s, d) if isinstance(s, np.ndarray) else s == d
+                   for s, d in zip(sliced, direct)):
+            mask_ok = False
+    print(f"  perf test: perception-masks-identical={mask_ok} -> {'OK' if mask_ok else 'FAILED'}")
 
     # SETTLEMENT (M0) — the housed band becomes a first-class town: named, centred on its homes,
     # with a roll of members; a pre-M0 (empty) save self-heals on the daily tick; none when homeless.
