@@ -965,6 +965,8 @@ def author_building_messages(p: dict, ctx: dict) -> tuple[str, str]:
         "  storehouse — keeps the band's food from spoiling and safe from vermin\n"
         "  smithy    — a forge to smelt ore and make metal tools\n"
         "  hall      — a gathering place that draws the band together\n"
+        "  school    — a place where the band's crafts and lore are taught and spread faster\n"
+        "  infirmary — a house of healing where the sick recover faster\n"
         "  home      — a dwelling for a household\n"
         "RULES: keep it small and buildable — at MOST 8 rows by 8 columns. Wall the floor in. Put at "
         "LEAST one door (D) on an outer edge so people can enter, and make every inside tile reachable "

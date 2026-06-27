@@ -510,7 +510,13 @@ STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
 # form OR one the band designed itself (Phase A.2: the LLM authors the FORM, the function is real).
 BUILTIN_FUNCTION = {WORKSHOP_BP: "workshop", SMITHY_BP: "smithy",
                     STOREHOUSE_BP: "storehouse", MONUMENT_BP: "hall"}
-AUTHORABLE_FUNCTIONS = ("home", "workshop", "smithy", "storehouse", "hall")  # what an LLM may design
+# What an LLM may design — each a real role with a mechanical effect. SCHOOL and INFIRMARY have no
+# built-in form (they exist only once the band DESIGNS one), so they're inert with no model: a school
+# speeds the spread of crafts (teaching), an infirmary speeds a sick soul's recovery.
+AUTHORABLE_FUNCTIONS = ("home", "workshop", "smithy", "storehouse", "hall", "school", "infirmary")
+SCHOOL_RANGE = 6             # tiles from a school within which lessons take faster hold
+SCHOOL_TEACH_BONUS = 0.35    # added chance a lesson lands beside a school
+INFIRMARY_RANGE = 6          # tiles from an infirmary within which a sick soul mends faster (as if tended)
 
 # ─── Renown — social standing (Phase 2) ──────────────────────────────────────
 # A soul's STANDING in the band: it grows from socially-visible achievements (raising a fine
@@ -5911,10 +5917,12 @@ class World:
             mind.remember(p, f"I've fallen ill — {DISEASE[ill['d']]['hint']}", 0.9, "illness", now)
         # A caretaker keeping vigil at the sick soul's side eases the illness: the body loses
         # less health and weathers it sooner — so nursing visibly matters (#11).
-        tended = self._tended(p)
-        hp_rate = DISEASE[ill["d"]]["hp"] * (0.5 if tended else 1.0)
+        # A sick soul mends faster if NURSED, or if lying within reach of an INFIRMARY the band has
+        # designed (its own house of healing — inert until one is built).
+        cared = self._tended(p) or self._near_function(p, "infirmary", INFIRMARY_RANGE)
+        hp_rate = DISEASE[ill["d"]]["hp"] * (0.5 if cared else 1.0)
         p["hp"] = max(0.0, p["hp"] - hp_rate * dt_game_min)
-        if tended:
+        if cared:
             ill["end_t"] -= TEND_RECOVERY_BOOST * dt_game_min   # the sickness runs its course faster
         if now >= ill["end_t"]:                              # weathered it
             p.setdefault("immune", {})[ill["d"]] = now + IMMUNITY_DAYS * 1440.0
@@ -6249,12 +6257,15 @@ class World:
             # A wide skill gap means an eager apprentice and much to impart — teaching takes hold
             # more readily the more the learner has to learn (apprenticeship).
             chance = 0.5 + 0.4 * min(1.0, len(gap) / 4.0)
+            at_school = self._near_function(learner, "school", SCHOOL_RANGE)
+            if at_school:                                    # a school: lessons take faster, knowledge spreads
+                chance = min(1.0, chance + SCHOOL_TEACH_BONUS)
             if trust < 0.4 or self.rng.random() > chance:
                 continue
             rid = gap[int(self.rng.integers(len(gap)))]
             if self._grant_recipe(learner, rid, via=f"taught by {teacher['name']}",
                                   rationale=f"{teacher['name']} showed me how"):
-                learner["learn_cd"] = self.clock + TEACH_BEAT * (0.7 + 0.6 * self.rng.random())
+                learner["learn_cd"] = self.clock + TEACH_BEAT * (0.7 + 0.6 * self.rng.random()) * (0.6 if at_school else 1.0)
                 self._note("discovery",
                            f"{teacher['name']} taught {learner['name']} to make a {rid.replace('_', ' ')}.")
                 self._earn_renown(teacher, RENOWN_GAIN["teach"],
@@ -7133,6 +7144,23 @@ if __name__ == "__main__":
     print(f"  authoring test (Phase A/A.2): registered={bool(a_good)} func_routes={func_ok} "
           f"rejects-walled={a_walled is None} rejects-huge={a_huge is None} "
           f"trigger builder={a_trig_b}/forager={a_trig_f} -> {'OK' if auth_ok else 'FAILED'}")
+
+    # SCHOOL & INFIRMARY functions (A.2 vocabulary) — the LLM can design a SCHOOL (lessons spread
+    # faster nearby) and an INFIRMARY (the sick mend faster nearby). No built-in form, so both are
+    # inert with no model; here we check they register and the effect-gate (_near_function) sees them.
+    ws = World().generate(seed=5)
+    s_id = ws.apply_authored_building({"name": "Schoolhouse", "function": "school",
+                                       "layout": ["WWDWW", "WFCFW", "WFFFW", "WWWWW"]})
+    i_id = ws.apply_authored_building({"name": "Infirmary", "function": "infirmary",
+                                       "layout": ["WWDWW", "WFCFW", "WFFFW", "WWWWW"]})
+    ws.sites = [{"id": "s", "bp": s_id, "done": True, "ox": 40, "oy": 40},
+                {"id": "i", "bp": i_id, "done": True, "ox": 60, "oy": 60}]
+    si_ok = (ws._bp_function(s_id) == "school" and ws._bp_function(i_id) == "infirmary"
+             and BLUEPRINTS[s_id]["communal"] and ws._near_function({"x": 42, "y": 41}, "school", SCHOOL_RANGE)
+             and ws._near_function({"x": 61, "y": 61}, "infirmary", INFIRMARY_RANGE)
+             and not ws._near_function({"x": 99, "y": 99}, "school", SCHOOL_RANGE))
+    print(f"  school/infirmary test (A.2): registers={bool(s_id) and bool(i_id)} effect-gate-sees-them={si_ok} "
+          f"-> {'OK' if si_ok else 'FAILED'}")
 
     # LAWS (Phase B) — a renown-recognised LEADER, facing a recurring wrong, enacts a law the engine
     # then judges by REPUTATION only. An unenforceable/duplicate law is set aside; the unable are
