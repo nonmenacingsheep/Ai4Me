@@ -2931,8 +2931,15 @@ class World:
         if kind == "marvel":
             return self._marvel(p)
         if kind == "aspire":
-            # A self-authored project beyond survival — beautify one's own home (tidy / garden).
-            return self._pursue_aspiration(p)
+            # A self-authored project beyond survival — beautify or FURNISH one's own home. The
+            # getters let a furniture step GATHER its makings (leaves+fibre for a bed, timber for a
+            # table) rather than stall, so a soul actually MAKES the bed instead of pacing.
+            getters = {
+                "wood": lambda: self._seek(p, x, y, bool(tree[ly, lx]), tree, lx, ly, "wood", "chop", "seek_wood"),
+                "fiber": lambda: self._seek(p, x, y, bool(fiber[ly, lx]), fiber, lx, ly, "fiber", "gather_fiber", "seek_fiber"),
+                "leaves": lambda: self._seek(p, x, y, bool(leaf[ly, lx]), leaf, lx, ly, "leaves", "gather_leaves", "seek_leaves"),
+            }
+            return self._pursue_aspiration(p, getters)
         lend = self._offer_help_maybe(p, tree, stone, fiber, leaf, lx, ly)
         if lend is not None:                              # at loose ends — lend a neighbour a hand if one's building
             return lend
@@ -3120,8 +3127,9 @@ class World:
                 return plan
         return None
 
-    def _pursue_aspiration(self, p):
-        """Actuate a self-authored project: form one if none, then run its next plan-step."""
+    def _pursue_aspiration(self, p, getters=None):
+        """Actuate a self-authored project: form one if none, then run its next plan-step. `getters`
+        (material → gather action) lets a furniture step GATHER its makings instead of stalling."""
         plan = p.get("plan")
         if not plan or plan.get("done"):
             plan = self._form_aspiration(p)
@@ -3144,10 +3152,14 @@ class World:
         elif skill == "place":                               # plant a flower / raise a cairn / set furniture
             kind = step[3] if len(step) > 3 else "flower"
             cost = FURNITURE_COST.get(kind)                  # furniture is MADE from materials, not conjured
-            if cost and not all(p["inv"].get(m, 0) >= n for m, n in cost.items()):
-                plan["i"] = i + 1                            # short the makings — skip this piece, don't fake it
-                return "tend", None
             if cost:
+                short = next((m for m, n in cost.items() if p["inv"].get(m, 0) < n), None)
+                if short is not None:
+                    g = getters.get(short) if getters else None
+                    if g is not None:
+                        return g()                          # go GATHER the makings, then come back to place it
+                    plan["i"] = i + 1                        # can't fetch it here — skip this piece (never loop)
+                    return "tend", None
                 for m, n in cost.items():
                     p["inv"][m] = p["inv"].get(m, 0) - n
                     if p["inv"][m] <= 0:
@@ -5101,7 +5113,10 @@ class World:
         if self.water[ny, nx] in (WATER_RIVER, WATER_SHALLOW):
             p["wet_until"] = self.clock + WET_DURATION
             p["_wade"] = True
-        else:                                                  # dry ground remembers where SHARED feet fall:
+        elif self.veg_sp[ny, nx] in WOOD_IDS and self.veg_growth[ny, nx] > 0.2:
+            pass                                               # a TREE stands here — a path is bare earth, you
+            #                                                    don't wear a trail up the trunk; keep it to ground
+        else:                                                  # bare ground remembers where SHARED feet fall:
             last = self._foot_last                             # wear builds only when a DIFFERENT soul treads,
             if last.get((nx, ny)) != p["id"]:                  # so one soul pacing (or a lone household route)
                 ff = self.footfall                             # never wears a path — only a route the band SHARES
@@ -5279,6 +5294,13 @@ class World:
         beaten tracks HARDEN into persistent ROADS. A road still trodden stays in good repair; an
         abandoned one slowly grasses over — so the road network tracks where the band really goes."""
         ff = self.footfall
+        # A path is bare earth: where a TREE has grown over a trail (or one wore through wood), drop
+        # the footfall and the road — paths belong to the open ground, not under the canopy.
+        treed = [t for t in ff if self.veg_sp[t[1], t[0]] in WOOD_IDS and self.veg_growth[t[1], t[0]] > 0.2]
+        for t in treed:
+            del ff[t]
+            self.roads.pop(t, None)
+            self._foot_last.pop(t, None)
         # Harden heavily-trodden ground into roads, and keep trodden roads in repair.
         for t, w in ff.items():
             if w >= ROAD_HARDEN:
