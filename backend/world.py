@@ -2793,6 +2793,13 @@ class World:
             "wonder": (lambda w: {"dist": w[2], "kind": w[3],
                                   "novelty": max(0.1, 1.0 - p.get("insight", 0.0) / WONDER_INSIGHT_TO_LEARN)}
                        if w else None)(self._nearest_wonder(p)),
+            # WHO THIS SOUL'S PEOPLE ARE — the civilisation it belongs to, so a deliberating or
+            # speaking mind can carry the band's identity (its town, its character, its age from
+            # stone to power). Inert offline; gives the LLM a sense of belonging to something.
+            "civ": (lambda s: {"era": self._civilization_era(),
+                               "town": (s.get("name") if s else None),
+                               "square": (s.get("square_name") if s else None),
+                               "character": (s.get("character") if s else None)})(self._band_settlement()),
         }
 
     def _person_decide(self, p, edible, drinkable, tree, stone, fiber, leaf, night, lx, ly):

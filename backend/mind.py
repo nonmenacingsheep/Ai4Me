@@ -1091,12 +1091,22 @@ def deliberate_messages(p: dict, ctx: dict) -> tuple[str, str]:
         peril += " I sense a wolf somewhere near."
     if exposed > 0.4:
         peril += " The weather is harsh and I have no roof over me — I'm chilled to the bone."
+    civ = ctx.get("civ") or {}
+    belong = ""
+    if civ.get("town"):                                     # the soul belongs to a named, charactered town
+        belong = f"My people: I am of {civ['town']}"
+        if civ.get("character"):
+            belong += f", {civ['character']}"
+        belong += f" — we are a people of the {civ.get('era', 'Stone Age')}.\n"
+    elif civ.get("era") and civ["era"] != "Stone Age":      # no town yet, but the band has advanced
+        belong = f"My people have reached the {civ['era']}.\n"
     user = (
         f"It is {ctx.get('time_str','day')}, {ctx.get('season','')}, weather {ctx.get('weather','')}.\n"
         f"My body: {needs}. I carry: {inv}. Home: {'built' if p.get('home_struct') else 'none yet'}.\n"
         f"Nearby: {ctx.get('nearby','no one')}.{peril}\n"
         f"What pulls at me (and how strongly): {pulls}.\n"
         + (f"Who I am becoming: {vals}.\n" if vals else "")
+        + belong
         + "What I remember:\n- " + ("\n- ".join(mems) if mems else "not much yet") + "\n"
         + ("People I know:\n- " + "\n- ".join(rel_lines) + "\n" if rel_lines else "")
         + f"My current aim: {p.get('intent') or 'drifting'}.\n"
