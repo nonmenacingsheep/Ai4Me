@@ -4423,6 +4423,8 @@ class World:
         era = self._civilization_era()                     # the band's stage from stone to power (a watcher's stat)
         if s.get("era") and s["era"] != era:               # a MILESTONE — the civilisation has moved on
             self._note("culture", f"{s['name']} has entered the {era}.")
+            elder = max(self.people, key=lambda q: q.get("renown", 0.0))   # the eldest voices the band's pride
+            mind.speak(elder, f"Look how far we've come — we are a people of the {era} now.", self.clock)
         s["era"] = era
         crossed = [t for t in (15, 25, 40, 60, 80, 100)    # the town's STORY: a note when it passes a size
                    if s["pop"] >= t > s.get("pop_mark", 0)]
