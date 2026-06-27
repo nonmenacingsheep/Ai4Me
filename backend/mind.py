@@ -1008,6 +1008,27 @@ def author_law_messages(p: dict, ctx: dict) -> tuple[str, str]:
     return system, user
 
 
+def author_custom_messages(p: dict, ctx: dict) -> tuple[str, str]:
+    """Build (system, user) asking a much-loved soul to found a TRADITION — the LLM as CULTURE-author
+    (Phase C). It invents a yearly FEAST tied to a season; the engine keeps it (deepening that
+    season's gathering). Proposes a custom; the deterministic world observes it."""
+    name = p["name"]
+    season = ctx.get("season") or "spring"
+    where = ctx.get("settlement") or "your people"
+    system = (
+        "You are the warm imagination of a much-loved soul in a small pre-industrial band, about to "
+        "begin a TRADITION your people will keep every year — a festival or feast tied to a season, "
+        "a day the whole band gathers and celebrates. Reply with ONE JSON object only — no prose."
+    )
+    user = (
+        f"You are {name}, dear to {where}. The season is {season}. Found a yearly festival for a "
+        "season of your choosing. Reply as JSON:\n"
+        '{"kind": "feast", "season": "<spring|summer|autumn|winter>", '
+        '"name": "<the festival\'s name>", "value": "<one line: what it celebrates>"}'
+    )
+    return system, user
+
+
 # ─── LLM touch-points (prompt builders + result appliers; the call itself is in the
 #     server, so this module stays sync/testable and free of the brain dependency) ────
 def deliberate_messages(p: dict, ctx: dict) -> tuple[str, str]:

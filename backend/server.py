@@ -774,6 +774,18 @@ async def _mind_think_one():
                 if norm:
                     await broadcast({"type": "world_changed",
                                      "changes": [f"{target['name']} gave the band a law"]})
+        # Culture (Phase C): when a much-loved soul in a grown band is at ease, let the model found a
+        # TRADITION — a yearly feast the band keeps. The engine observes it (deepening that season's
+        # gathering). The author proposes a custom, the deterministic world disposes.
+        if target is not None and w.wants_new_custom(target):
+            ctx["season"] = w.season()
+            csys, cusr = mind_store.author_custom_messages(target, ctx)
+            craw = await asyncio.wait_for(
+                brain._complete(csys, cusr, max_tokens=120, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+            nm = w.apply_authored_custom(brain._parse_json_object(craw), by=target["name"])
+            if nm:
+                await broadcast({"type": "world_changed",
+                                 "changes": [f"{target['name']} began a tradition — {nm}"]})
     except Exception as e:
         print(f"[mind] deliberation fell back to the arbiter ({type(e).__name__}: {e})")
 

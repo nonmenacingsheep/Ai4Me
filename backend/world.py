@@ -568,6 +568,18 @@ LAW_PEACE_FOES = 3           # bandmates a soul holds in real enmity (sentiment 
 LAW_REPROACH = {"hoarding": "hoards food while the commons runs low",
                 "labour": "never lends a hand when the band builds",
                 "peace": "sows discord among us"}
+
+# Phase C — CULTURE: a much-loved soul begins a TRADITION the band keeps each year. The LLM invents
+# the festival (its name, its season, what it celebrates); the engine OBSERVES it — when that season
+# turns, the band's own named feast deepens the seasonal gathering (bonds warm more than a generic
+# one). Inert with no model (only the plain seasonal gathering runs), so it can't move survival.
+CUSTOM_KINDS = ("feast",)    # what an LLM may found (festivals tied to a season; more kinds later)
+CUSTOM_MIN_RENOWN = 1.5      # standing a soul needs for the band to take up the tradition they start
+CUSTOM_MIN_POP = 8           # a band must have grown this big to have the leisure for traditions
+CUSTOM_MAX = 4               # most traditions the band carries (≈ one per season)
+CUSTOM_COOLDOWN = 3 * 24 * 60  # game-min between new traditions (~3 days)
+CUSTOM_BOND_WARM = 0.10      # bond warmth at a band's OWN cherished feast (vs CUSTOM_BOND_PLAIN below)
+CUSTOM_BOND_PLAIN = 0.06     # bond warmth at a plain turn-of-season gathering
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
@@ -816,6 +828,7 @@ class World:
         self.roads: dict = {}            # (x,y) -> condition: paths trodden hard enough HARDEN into roads
         self.settlements: list[dict] = []  # first-class SETTLEMENTS (the band's town(s)) — M0 foundation
         self.laws: list[dict] = []         # the band's enacted LAWS (LLM-authored, validated) — Phase B
+        self.customs: list[dict] = []      # the band's TRADITIONS (LLM-authored festivals) — Phase C
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
@@ -1381,17 +1394,60 @@ class World:
 
     def _festival(self, season_now):
         """A turn-of-the-season gathering: the band comes together, every bond warms a little, and
-        the most-esteemed soul calls the festival — a shared rite that knits the group (#18)."""
+        the most-esteemed soul calls the festival — a shared rite that knits the group (#18). If the
+        band has founded its OWN tradition for this season (Phase C), it is kept BY NAME and bonds
+        deeper — a cherished feast means more than a generic gathering."""
         if len(self.people) < 2:
             return
+        custom = next((c for c in self.customs if c.get("kind") == "feast"
+                       and c.get("season") == season_now), None)
+        warm = CUSTOM_BOND_WARM if custom else CUSTOM_BOND_PLAIN
         for i, a in enumerate(self.people):
             for b in self.people[i + 1:]:
                 ra, rb = mind._rel(a, b, self.clock), mind._rel(b, a, self.clock)
-                mind._adjust(ra, 0.02, 0.06); mind._adjust(rb, 0.02, 0.06)
+                mind._adjust(ra, 0.02, warm); mind._adjust(rb, 0.02, warm)
             a["last_social_t"] = self.clock
         elder = max(self.people, key=lambda q: q.get("renown", 0.0))
-        mind.speak(elder, f"Gather, all — we've come through to {season_now}!", self.clock)
-        self._note("social", f"The band gathered to mark the turn to {season_now}.")
+        if custom:
+            mind.speak(elder, f"Gather, all — it's {custom['name']}!", self.clock)
+            self._note("culture", f"The band kept {custom['name']}"
+                                  + (f" — {custom['value']}" if custom.get("value") else "") + ".")
+        else:
+            mind.speak(elder, f"Gather, all — we've come through to {season_now}!", self.clock)
+            self._note("social", f"The band gathered to mark the turn to {season_now}.")
+
+    def wants_new_custom(self, p) -> bool:
+        """Rule trigger for the LLM culture-author: a much-loved, settled soul in a grown band with
+        room for another tradition and lawmaking/custom rested (cooldown). Rare — a tradition is a
+        lasting thing the whole band takes up."""
+        if len(self.customs) >= CUSTOM_MAX or self.clock < getattr(self, "_custom_cd", 0.0):
+            return False
+        if p.get("home_struct") is None or p.get("renown", 0.0) < CUSTOM_MIN_RENOWN:
+            return False
+        return len(self.people) >= CUSTOM_MIN_POP
+
+    def apply_authored_custom(self, data, by="the band") -> str | None:
+        """Author→Validate→World for CULTURE (mirrors apply_authored_law): a soul founds a yearly
+        FEAST. It is taken up only if its kind is one the band can actually keep (CUSTOM_KINDS), it's
+        pinned to a real season, and the band hasn't a feast that season already. Returns the new
+        tradition's name, or None."""
+        if not isinstance(data, dict):
+            return None
+        kind = str(data.get("kind") or "feast").strip().lower()
+        season = str(data.get("season") or "").strip().lower()
+        name = (str(data.get("name") or "").strip())[:48]
+        if kind not in CUSTOM_KINDS or season not in SEASONS or not name:
+            return None
+        if any(c.get("kind") == kind and c.get("season") == season for c in self.customs):
+            return None
+        value = (str(data.get("value") or "").strip())[:90]
+        self.customs.append({"kind": kind, "season": season, "name": name, "value": value,
+                             "by": by, "born": self.clock})
+        self._custom_cd = self.clock + CUSTOM_COOLDOWN
+        self.version += 1
+        self._bump("custom_born")
+        self._note("culture", f"{by} began a tradition — {name}, kept each {season}.")
+        return name
 
     # ── active region & dormancy (the key to a huge, smooth world) ───────────────
     def _active_region(self):
@@ -6405,6 +6461,7 @@ class World:
                 "settlements": self.settlements,
                 "authored_blueprints": self.authored_blueprints,   # the band's own designs (Phase A)
                 "laws": self.laws,                                 # the band's enacted laws (Phase B)
+                "customs": self.customs,                           # the band's traditions (Phase C)
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -6502,6 +6559,7 @@ class World:
             self.settlements = meta.get("settlements", []) or []   # M0; a pre-M0 save self-heals on the daily tick
             self.authored_blueprints = meta.get("authored_blueprints", []) or []   # the band's own designs
             self.laws = meta.get("laws", []) or []                                  # enacted laws (Phase B)
+            self.customs = meta.get("customs", []) or []                            # traditions (Phase C)
             self._register_authored()                     # re-inject them into BLUEPRINTS for the build machinery
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
@@ -6875,6 +6933,29 @@ if __name__ == "__main__":
     law_ok = l_problem and l_leader and l_enact and l_reject and l_enforce
     print(f"  law test (Phase B): problem={l_problem} leader-only={l_leader} enacts={l_enact} "
           f"rejects-dup/bad={l_reject} enforces-soft={l_enforce} -> {'OK' if law_ok else 'FAILED'}")
+
+    # CUSTOMS (Phase C) — a much-loved soul founds a yearly FEAST; the engine keeps it, deepening
+    # that season's gathering. A bad kind/season or a second feast for a taken season is set aside.
+    # Inert offline (only the plain seasonal gathering runs), so it can't move survival.
+    wcu = World().generate(seed=5); wcu.people = []
+    for i in range(CUSTOM_MIN_POP):
+        wcu._add_person(50 + i, 50, name=f"K{i}"); _p = wcu.people[i]
+        _p["age"] = ADULT_AGE + 5; _p["renown"] = 0.3; _p["hp"] = 1.0; _p["home_struct"] = "h"
+    wcu.people[0]["renown"] = 2.0; wcu._custom_cd = 0.0
+    c_wants = wcu.wants_new_custom(wcu.people[0]) and not wcu.wants_new_custom(wcu.people[1])
+    c_enact = wcu.apply_authored_custom({"kind": "feast", "season": "autumn", "name": "Harvest Home",
+                                         "value": "the gathering-in"}, by="K0") == "Harvest Home"
+    c_reject = (wcu.apply_authored_custom({"kind": "feast", "season": "autumn", "name": "x"}) is None
+                and wcu.apply_authored_custom({"kind": "rave", "season": "autumn", "name": "x"}) is None
+                and wcu.apply_authored_custom({"kind": "feast", "season": "monsoon", "name": "x"}) is None)
+    _cb = mind._rel(wcu.people[0], wcu.people[1], wcu.clock)["sentiment"]
+    wcu._festival("autumn")
+    c_observe = (mind._rel(wcu.people[0], wcu.people[1], wcu.clock)["sentiment"] > _cb
+                 and any(e["kind"] == "culture" and "Harvest Home" in e.get("text", "") for e in wcu.log))
+    custom_ok = c_wants and c_enact and c_reject and c_observe
+    print(f"  custom test (Phase C): respected-only={c_wants} founds={c_enact} "
+          f"rejects-dup/badkind/badseason={c_reject} feast-kept+bonds={c_observe} "
+          f"-> {'OK' if custom_ok else 'FAILED'}")
 
     # SETTLEMENT (M0) — the housed band becomes a first-class town: named, centred on its homes,
     # with a roll of members; a pre-M0 (empty) save self-heals on the daily tick; none when homeless.
