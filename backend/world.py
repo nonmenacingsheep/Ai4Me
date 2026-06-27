@@ -570,7 +570,7 @@ GOV_LEDGER_DECAY   = 0.6      # daily decay of the give/take ledger — recent c
 # never punishment that could endanger a life. Each law codifies one norm from an ENFORCEABLE
 # vocabulary (the immune system: a law the engine can't actually judge is rejected). Inert with no
 # model (only the default granary norm runs), so it can't move survival.
-LAW_NORMS = ("hoarding", "labour", "peace")   # what an LLM may codify, beyond the always-on granary norm
+LAW_NORMS = ("hoarding", "labour", "peace", "tend")   # what an LLM may codify, beyond the always-on granary norm
 LAW_MIN_RENOWN  = 2.5        # standing a soul needs to be heeded as the band's law-giver
 LAW_PROBLEM_FRAC = 0.34      # a wrong is "recurring" once this share of able adults are in it
 LAW_MAX = 3                  # most enacted laws the band carries (beyond the granary norm)
@@ -580,9 +580,11 @@ LAW_HOARD_CAP = 14           # personal food store above which (while the common
 LAW_GRANARY_LOW = 6          # commons food below which hoarding is a real wrong, not mere thrift
 LAW_LABOUR_MIN = 1.0         # rolling "aided a build" credit below which an able soul shirks the work
 LAW_PEACE_FOES = 3           # bandmates a soul holds in real enmity (sentiment < -0.3) to be a discord-sower
+LAW_TEND_MIN = 1.0           # rolling "nursed the sick" credit below which an able soul never helps the ill
 LAW_REPROACH = {"hoarding": "hoards food while the commons runs low",
                 "labour": "never lends a hand when the band builds",
-                "peace": "sows discord among us"}
+                "peace": "sows discord among us",
+                "tend": "turns away from the sick when they could help"}
 
 # Phase C — CULTURE: a much-loved soul begins a TRADITION the band keeps each year. The LLM invents
 # the festival (its name, its season, what it celebrates); the engine OBSERVES it — when that season
@@ -2946,6 +2948,7 @@ class World:
             move = self._seek_toward(p, target)
             if move is not None:
                 return "socialize", move
+            p["nursed"] = p.get("nursed", 0.0) + 1.0       # rolling credit for nursing the sick (the tend norm)
             return "tend", None
         if kind == "avoid" and target:
             t = next((q for q in self.people if q["id"] == target), None)
@@ -5712,6 +5715,10 @@ class World:
         if norm == "peace":
             return sum(1 for r in (p.get("rel") or {}).values()
                        if r.get("sentiment", 0.0) < -0.3) >= LAW_PEACE_FOES
+        if norm == "tend":
+            sick = any(q is not p and q.get("illness") and self.clock >= q["illness"]["onset_t"]
+                       for q in self.people)
+            return sick and p.get("nursed", 0.0) < LAW_TEND_MIN   # the ill go untended while this one could help
         return False
 
     def _sanction(self, p, norm) -> None:
@@ -5807,6 +5814,7 @@ class World:
                     self._sanction(p, law["norm"])
             p["gran_given"], p["gran_taken"] = given * GOV_LEDGER_DECAY, taken * GOV_LEDGER_DECAY
             p["aided"] = p.get("aided", 0.0) * GOV_LEDGER_DECAY   # the labour-credit window rolls too
+            p["nursed"] = p.get("nursed", 0.0) * GOV_LEDGER_DECAY  # …and the nursing-credit window
 
     def _tick_pests(self):
         """A fat larder of fresh food draws vermin. Each game-day, a store past the threshold
