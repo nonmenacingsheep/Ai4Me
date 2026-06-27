@@ -1759,9 +1759,9 @@ class World:
         x, y = p["x"], p["y"]
         if mind._trait(p, "caution") > mind._trait(p, "curiosity") and dist < 7:
             hx, hy = p["home"]                                # recoil — keep clear of the thing
-            return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+            return "wander", (hx - x, hy - y)
         if dist > 2:                                          # curious — go closer to see
-            return "wander", (int(np.sign(wx - x)), int(np.sign(wy - y)))
+            return "wander", (wx - x, wy - y)            # raw delta → pathfind round walls
         self._study_wonder(p, _kind, wx, wy)                 # at its foot — study it (and reason about it)
         return "rest", None
 
@@ -2816,7 +2816,7 @@ class World:
             hx, hy = p["home"]
             hd = abs(hx - x) + abs(hy - y)
             if p.get("home_struct") and 1 < hd <= REST_HOMEWARD_MAX and p.get("fatigue", 0) < 0.8:
-                return "wander", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+                return "wander", (hx - x, hy - y)
             return "rest", None
         if kind == "flee":
             return self._flee(p)
@@ -2934,7 +2934,7 @@ class World:
             if best is None or score > best[0]:
                 best = (score, nx, ny)
         if best is not None:
-            return "wander", (int(np.sign(best[1] - x)), int(np.sign(best[2] - y)))
+            return "wander", (best[1] - x, best[2] - y)   # raw delta → pathfind round walls
         return None
 
     def _idle(self, p):
@@ -3078,7 +3078,7 @@ class World:
         step = steps[i]
         skill, tx, ty = step[0], step[1], step[2]
         if max(abs(tx - p["x"]), abs(ty - p["y"])) > 1:      # walk to the spot
-            return "wander", (int(np.sign(tx - p["x"])), int(np.sign(ty - p["y"])))
+            return "wander", (tx - p["x"], ty - p["y"])   # raw delta → pathfind to the plan spot
         if skill == "clear":                                 # primitive skills the body composes
             self._clear_ground(tx, ty, 0)
         elif skill == "place":                               # plant a flower / raise a stone cairn
@@ -3115,7 +3115,7 @@ class World:
         hx, hy = p["home"]
         if abs(hx - p["x"]) + abs(hy - p["y"]) <= reach:
             return None
-        return "wander", (int(np.sign(hx - p["x"])), int(np.sign(hy - p["y"])))
+        return "wander", (hx - p["x"], hy - p["y"])       # raw delta → pathfind home
 
     def _flee(self, p):
         """Bolt for safety: home is shelter and the band is protection, so run there. Once on
@@ -3123,7 +3123,7 @@ class World:
         hx, hy = p["home"]
         x, y = p["x"], p["y"]
         if abs(hx - x) + abs(hy - y) > 0:
-            return "flee", (int(np.sign(hx - x)), int(np.sign(hy - y)))
+            return "flee", (hx - x, hy - y)
         return "rest", None
 
     def _guard(self, p):
@@ -3144,7 +3144,7 @@ class World:
         if ward is None:
             return self._idle(p)
         if wd > 1:                                   # close in to put myself between ward and wolf
-            return "guard", (int(np.sign(ward["x"] - x)), int(np.sign(ward["y"] - y)))
+            return "guard", (ward["x"] - x, ward["y"] - y)   # raw delta → pathfind to the ward
         return "guard", None                         # at their side — hold the watch
 
     def _person_build_decide(self, p, tree, stone, fiber, leaf, lx, ly):
@@ -5388,7 +5388,7 @@ class World:
         if abs(dx) + abs(dy) <= 1:
             p["_prey"] = prey["id"]                 # stash the quarry for the strike handler
             return "hunt", None
-        return "hunt", (int(np.sign(dx)), int(np.sign(dy)))
+        return "hunt", (dx, dy)
 
     def _fish(self, p, drinkable, lx, ly):
         """Fish the water's edge: cast in place when beside water, else step toward the nearest
@@ -5649,7 +5649,7 @@ class World:
         dx, dy = b["x"] - p["x"], b["y"] - p["y"]
         if dx == 0 and dy == 0:
             return "forage_berry", None
-        return "seek_berry", (int(np.sign(dx)), int(np.sign(dy)))
+        return "seek_berry", (dx, dy)
 
     def _tended(self, p) -> bool:
         """Is a well band-mate keeping vigil at this sick soul's side — standing within a tile
