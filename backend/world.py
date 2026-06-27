@@ -4424,6 +4424,11 @@ class World:
         if s.get("era") and s["era"] != era:               # a MILESTONE — the civilisation has moved on
             self._note("culture", f"{s['name']} has entered the {era}.")
         s["era"] = era
+        crossed = [t for t in (15, 25, 40, 60, 80, 100)    # the town's STORY: a note when it passes a size
+                   if s["pop"] >= t > s.get("pop_mark", 0)]
+        if crossed:
+            s["pop_mark"] = crossed[-1]                    # the highest passed (no slow catch-up after a jump)
+            self._note("culture", f"{s['name']} has grown to {s['pop']} souls — a thriving town.")
         # Phase D: once it's grown into a real TOWN (folk + a few public works), lay out its civic
         # plan — a square and roads — ONCE, so it reads as designed rather than a scatter of huts.
         if not s.get("planned") and s["pop"] >= CIVIC_MIN_POP:
