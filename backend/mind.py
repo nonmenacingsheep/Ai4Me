@@ -967,6 +967,7 @@ def author_building_messages(p: dict, ctx: dict) -> tuple[str, str]:
         "  hall      — a gathering place that draws the band together\n"
         "  school    — a place where the band's crafts and lore are taught and spread faster\n"
         "  infirmary — a house of healing where the sick recover faster\n"
+        "  watchtower — a high post the band keeps; wolves slink away from those near it\n"
         "  home      — a dwelling for a household\n"
         "RULES: keep it small and buildable — at MOST 8 rows by 8 columns. Wall the floor in. Put at "
         "LEAST one door (D) on an outer edge so people can enter, and make every inside tile reachable "
@@ -977,7 +978,7 @@ def author_building_messages(p: dict, ctx: dict) -> tuple[str, str]:
         f"You are {name}, in {where}. Your people are prospering and could use a building they don't "
         f"have yet. They can build with: {have}. What they already raise: {existing}.\n"
         "Design ONE useful building and give its function. Reply as JSON:\n"
-        '{"name": "<short name>", "function": "<workshop|storehouse|smithy|hall|home>", '
+        '{"name": "<short name>", "function": "<workshop|storehouse|smithy|hall|school|infirmary|watchtower|home>", '
         '"purpose": "<one short phrase>", "layout": ["WWDWW","WFCFW","WFFFW","WWWWW"]}'
     )
     return system, user

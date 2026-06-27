@@ -509,11 +509,13 @@ STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
 # not a fixed blueprint id, so the band's workshop/storehouse/hall works whether it's the built-in
 # form OR one the band designed itself (Phase A.2: the LLM authors the FORM, the function is real).
 BUILTIN_FUNCTION = {WORKSHOP_BP: "workshop", SMITHY_BP: "smithy",
-                    STOREHOUSE_BP: "storehouse", MONUMENT_BP: "hall"}
+                    STOREHOUSE_BP: "storehouse", MONUMENT_BP: "hall",
+                    "watchtower": "watchtower"}        # the built-in watchtower fills the "watchtower" role
 # What an LLM may design — each a real role with a mechanical effect. SCHOOL and INFIRMARY have no
 # built-in form (they exist only once the band DESIGNS one), so they're inert with no model: a school
-# speeds the spread of crafts (teaching), an infirmary speeds a sick soul's recovery.
-AUTHORABLE_FUNCTIONS = ("home", "workshop", "smithy", "storehouse", "hall", "school", "infirmary")
+# speeds the spread of crafts (teaching), an infirmary speeds a sick soul's recovery. WATCHTOWER has a
+# built-in form (raised after a wolf draws blood); a designed one fills the same role — wolves back off near it.
+AUTHORABLE_FUNCTIONS = ("home", "workshop", "smithy", "storehouse", "hall", "school", "infirmary", "watchtower")
 SCHOOL_RANGE = 6             # tiles from a school within which lessons take faster hold
 SCHOOL_TEACH_BONUS = 0.35    # added chance a lesson lands beside a school
 INFIRMARY_RANGE = 6          # tiles from an infirmary within which a sick soul mends faster (as if tended)
@@ -1848,8 +1850,8 @@ class World:
             if guards >= WOLF_GUARDS_SAFE or self._shelter_factor(best) > 0.5 \
                     or self._guardian_near(best["x"], best["y"], exclude=best) \
                     or self._powered(best["x"], best["y"]) \
-                    or self._near_building("watchtower", WATCH_RADIUS, best["x"], best["y"]):
-                continue                                 # band, roof, guardian, light, or WATCHTOWER — the wolf backs off
+                    or self._near_function(best, "watchtower", WATCH_RADIUS):
+                continue                                 # band, roof, guardian, light, or WATCHTOWER (built-in OR designed) — the wolf backs off
             if bd <= 1:                                  # in reach — strike
                 if self.rng.random() < ANIMALS["wolf"]["kill_chance"] * bold / (1 + guards):
                     best["hp"] = max(0.0, best["hp"] - WOLF_BITE)
@@ -4178,8 +4180,9 @@ class World:
         unhoused = sum(1 for q in self.people if q["age"] >= ADULT_AGE and not q.get("home_struct"))
         if unhoused >= INN_NEED_UNHOUSED and not self._has_building("inn"):
             out.append(("inn", "raise an inn — a roof for those who have none"))
-        if getattr(self, "_wolf_blooded", False) and not self._has_building("watchtower"):
-            out.append(("watchtower", "raise a watchtower — to keep the wolves off us"))
+        if getattr(self, "_wolf_blooded", False) and not self._has_function("watchtower"):
+            out.append((self._authored_for("watchtower") or "watchtower",
+                        "raise a watchtower — to keep the wolves off us"))
         # Once the band trades in COIN, it raises a MARKETPLACE — a civic heart for its new economy.
         if getattr(self, "money_invented", False) and not self._has_building("market"):
             out.append(("market", "raise a marketplace — a place to trade now that we have coin"))
