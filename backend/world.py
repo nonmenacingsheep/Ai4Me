@@ -3201,11 +3201,10 @@ class World:
             return self._idle(p)
         step = steps[i]
         skill, tx, ty = step[0], step[1], step[2]
-        if max(abs(tx - p["x"]), abs(ty - p["y"])) > 1:      # walk to the spot
-            return "wander", (tx - p["x"], ty - p["y"])   # raw delta → pathfind to the plan spot
-        if skill == "clear":                                 # primitive skills the body composes
-            self._clear_ground(tx, ty, 0)
-        elif skill == "place":                               # plant a flower / raise a cairn / set furniture
+        # A piece of FURNITURE is MADE from materials — gather them FIRST, wherever they grow, BEFORE
+        # walking in to set it. (Checking the spot first made a short soul VIBRATE: it walked to the
+        # bed tile, stepped out for leaves, was pulled back before reaching them, and paced forever.)
+        if skill == "place":
             kind = step[3] if len(step) > 3 else "flower"
             cost = FURNITURE_COST.get(kind)                  # furniture is MADE from materials, not conjured
             if cost:
@@ -3213,9 +3212,17 @@ class World:
                 if short is not None:
                     g = getters.get(short) if getters else None
                     if g is not None:
-                        return g()                          # go GATHER the makings, then come back to place it
+                        return g()                          # go GATHER the makings first, then come place it
                     plan["i"] = i + 1                        # can't fetch it here — skip this piece (never loop)
                     return "tend", None
+        if max(abs(tx - p["x"]), abs(ty - p["y"])) > 1:      # have the makings — now walk in to the spot
+            return "wander", (tx - p["x"], ty - p["y"])   # raw delta → pathfind to the plan spot
+        if skill == "clear":                                 # primitive skills the body composes
+            self._clear_ground(tx, ty, 0)
+        elif skill == "place":                               # plant a flower / raise a cairn / set furniture
+            kind = step[3] if len(step) > 3 else "flower"
+            cost = FURNITURE_COST.get(kind)
+            if cost:                                         # pay the makings (we've gathered them by now)
                 for m, n in cost.items():
                     p["inv"][m] = p["inv"].get(m, 0) - n
                     if p["inv"][m] <= 0:
@@ -4964,15 +4971,27 @@ class World:
                 store.pop("food", None)
         return True
 
-    def _dismantle_site(self, site_id):
+    def _dismantle_site(self, site_id, salvage_to=None):
         """Tear down a finished building: pull its blocks and roof off the map and drop the site —
-        used when a soul upgrades, so the old leaf shelter doesn't linger as an abandoned husk."""
+        used when a soul upgrades, so the old leaf shelter doesn't linger as an abandoned husk. If
+        `salvage_to` (a person) is given, about HALF the timber that went into it is RECLAIMED into
+        their pack, so moving up the dwelling ladder isn't a dead loss of everything they gathered."""
         s = next((q for q in self.sites if q["id"] == site_id), None)
         if not s:
             return None
+        recovered = {}
         for t in s["tasks"]:
             self.blocks.pop((t["x"], t["y"]), None)
             self.roofs.discard((t["x"], t["y"]))
+            iq = BLOCK_COST.get(t["code"])               # what this tile cost to raise → what to salvage
+            if iq:
+                recovered[iq[0]] = recovered.get(iq[0], 0) + iq[1]
+        if salvage_to is not None:
+            inv = salvage_to.setdefault("inv", {})
+            for m, q in recovered.items():
+                got = q // 2                             # half reclaimed; the rest is spoilt in the teardown
+                if got > 0:
+                    inv[m] = inv.get(m, 0) + got
         self.sites = [q for q in self.sites if q is not s]
         self.version += 1
         return s
@@ -5002,7 +5021,8 @@ class World:
         # The HOME belongs to whoever raised it (the owner), not whoever happened to lay the last
         # tile — so a band-mate who lent a hand finishing the walls doesn't end up claiming it. For a
         # COMMISSION the owner is the CLIENT it was built for; they move in (their anchor shifts here).
-        owner = next((q for q in self.people if q["id"] == site.get("owner")), None) or p
+        real_owner = next((q for q in self.people if q["id"] == site.get("owner")), None)
+        owner = real_owner or p
         commission = bool(site.get("commission"))
         if commission:
             core = site.get("core")
@@ -5010,13 +5030,17 @@ class World:
                                                  if t["code"] == BLOCK_FLOOR), None)
             if hxy:
                 owner["home"] = (int(hxy[0]), int(hxy[1]))
-        # Moving up the dwelling ladder: pull down the owner's old, lesser home now that a finer
-        # one stands, so the settlement isn't littered with the husks of outgrown shelters.
+        # Moving up the dwelling ladder: pull down the owner's old, lesser home now that a finer one
+        # stands, so the settlement isn't littered with husks — but ONLY for a genuine self-upgrade,
+        # where the home's TRUE owner is the one moving up. If the owner can't be resolved (they died
+        # mid-build and a band-mate merely laid the last tile), leave every standing house alone, so
+        # no one's home is razed by mistake. Half the old timber is salvaged back to the owner.
         old = owner.get("home_struct")
-        if old and old != site["id"]:
-            gone = self._dismantle_site(old)
+        if real_owner is not None and old and old != site["id"]:
+            gone = self._dismantle_site(old, salvage_to=owner)
             if gone:
-                self._note("build", f"{owner['name']} pulled down their old {gone['name'].lower()}.")
+                self._note("build", f"{owner['name']} pulled down their old {gone['name'].lower()}, "
+                                    "salvaging what timber they could.")
         owner["home_struct"] = site["id"]
         owner["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
         if commission:                              # the builder raised it FOR the client
