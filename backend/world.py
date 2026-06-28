@@ -281,6 +281,7 @@ LEAF_BRUSH_COST    = 3.5      # leaf panels are passable but "collide": a soul r
                               # ground when it can, brushing through only when that's the easy way — never
                               # BLOCKED (hard-solid leaf forced long detours into water → fatal disease)
 PERSON_AVOID_COST  = 4.0      # souls don't walk INTO each other: a tile another soul stands on costs this
+REVERSAL_PENALTY   = 2.5      # cost to step straight back to the tile just left — kills the a→b→a jitter in a crowd
                               # much more, so they route round one another — but it's soft (never a hard
                               # block), so a crowd can't deadlock and no one is ever trapped by a neighbour
 # Wandering with no errand: a soul picks a reachable ROAM waypoint a little way off and walks to it
@@ -2285,7 +2286,8 @@ class World:
             if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
                           "seek_fiber", "seek_leaves", "seek_berry", "hunt", "fish",
                           "haul", "wander", "socialize", "flee", "guard"):
-                self._move_person(p, movedir)
+                if p.get("_moved_t") != self.clock:      # not already shifted aside by another's yield this beat
+                    self._move_person(p, movedir)
 
             # Health couples to the physiological RESERVES (never to comfort). Any reserve in
             # the danger zone erodes hp — the deeper, and the more reserves at once, the faster.
@@ -5315,8 +5317,8 @@ class World:
         """'Ask' soul q to step aside to a free neighbouring tile so another can pass — the yield that
         keeps a doorway from jamming. Prefers a tile AWAY from the asker; never rouses a resting soul.
         Returns True iff q actually stepped aside."""
-        if (q.get("intention") or {}).get("kind") == "rest":
-            return False
+        if (q.get("intention") or {}).get("kind") == "rest" or q.get("_moved_t") == self.clock:
+            return False                                # resting, or already shifted this beat — don't jostle it twice
         qx, qy = q["x"], q["y"]
         best, bd = None, -1.0e9
         for dx, dy in _STEP_DIRS:
@@ -5363,7 +5365,9 @@ class World:
             if occ.get((p["x"], p["y"])) is p:
                 del occ[(p["x"], p["y"])]
             occ[(nx, ny)] = p
+        p["_prev"] = (p["x"], p["y"])                  # the tile just left — discourage an immediate U-turn back to it
         p["x"], p["y"] = nx, ny
+        p["_moved_t"] = self.clock                     # MOVED this beat → a soul shoved aside by a yield won't move again
 
     def _compute_path(self, x, y, gx, gy, cap=700):
         """A bounded, terrain-aware shortest path from (x,y) toward (gx,gy) — A* (Dijkstra + a
@@ -5533,12 +5537,17 @@ class World:
                 cost -= PATH_PULL                           # a worn path is easy going — feet follow the beaten track
             if self._occupant(nx, ny, exclude=p) is not None:
                 cost += PERSON_AVOID_COST                   # another awake soul stands here — route around them
+            if (nx, ny) == p.get("_prev"):
+                cost += REVERSAL_PENALTY                    # just came from here — don't bounce straight back
             for wx, wy in near_wolves:                      # usually empty → skipped
                 d = abs(wx - nx) + abs(wy - ny)
                 if d < DANGER_AVOID_R:
                     cost += (DANGER_AVOID_R - d) * DANGER_AVOID_COST
             progress = dx * sx + dy * sy                    # -2..2 (0 when ambling — cost decides)
-            score = progress * MOVE_PROGRESS_W - cost + float(rng.random()) * 0.5
+            # Random tie-break ONLY when AMBLING (no goal) — for a directed step the pick is
+            # deterministic, so a soul threading a crowd doesn't skitter on coin-flips.
+            noise = float(rng.random()) * 0.5 if (sx == 0 and sy == 0) else 0.0
+            score = progress * MOVE_PROGRESS_W - cost + noise
             if score > best_score:
                 best, best_score = (nx, ny), score
         if best is not None:
