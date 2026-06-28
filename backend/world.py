@@ -5447,6 +5447,19 @@ class World:
                 return
             # nothing reachable found → fall through to the greedy step (using the sign direction)
         else:
+            # A short DIRECTED hop whose first step is WALLED — the classic "stuck inside" case: a
+            # soul standing in its home eyes a resource just outside the wall (a straight-line delta
+            # of only 1–2), so the greedy step grinds on the wall because the DOOR is the "wrong way".
+            # Route around via the pathfinder so it walks OUT and over to the thing, instead of trying
+            # to reach it through the wall. (Flee/repulsion sign-vectors onto OPEN ground are untouched
+            # — their direct tile is passable, so they fall straight through to the cheap greedy step.)
+            if mag >= 1 and direction:
+                sx0, sy0 = int(np.sign(direction[0])), int(np.sign(direction[1]))
+                if (sx0 or sy0) and not self._passable(x + sx0, y + sy0):
+                    step = self._path_step(p, x + int(direction[0]), y + int(direction[1]))
+                    if step is not None:
+                        self._step_to(p, step[0], step[1])
+                        return
             p.pop("_path", None)                           # a short hop / blind amble → greedy
         if not direction or (direction[0] == 0 and direction[1] == 0):
             direction = self._explore_dir(p)               # a steady wander heading, not a dither
