@@ -5490,11 +5490,13 @@ class World:
         if mag > 2:                                        # DIRECTED toward a real goal → pathfind round walls
             gx, gy = x + int(direction[0]), y + int(direction[1])
             step = self._path_step(p, gx, gy)
-            if step is not None:
+            if step is not None and tuple(step) != p.get("_prev"):
                 if not self._take_step(p, step[0], step[1]):
                     p.pop("_path", None)               # a soul blocks the way and can't budge — re-route next beat
                 return
-            # nothing reachable found → fall through to the greedy step (using the sign direction)
+            # No route, OR one that U-TURNS straight back to the tile we just left (goal flickered) →
+            # drop it and let the greedy step (which shuns _prev and heads goalward) take this beat.
+            p.pop("_path", None)
         else:
             # A short DIRECTED hop whose first step is WALLED — the classic "stuck inside" case: a
             # soul standing in its home eyes a resource just outside the wall (a straight-line delta
