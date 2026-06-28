@@ -2103,7 +2103,7 @@ class World:
         night = hod < 6 or hod >= 21
         wolf_pos = [(a["x"], a["y"]) for a in self.animals if a["sp"] == "wolf"]
         self._wolf_pos = wolf_pos                          # cached for the danger-aware walker
-        self._person_pos = {(q["x"], q["y"]) for q in self.people}   # so souls route around one another
+        self._occ = {(q["x"], q["y"]): q for q in self.people}   # LIVE occupancy → souls don't share a tile
         self._build_perception_masks()                     # resource masks once/tick (vs np.isin per soul — perf)
 
         dead = []
@@ -5302,6 +5302,45 @@ class World:
         return (self._in(nx, ny) and self.water[ny, nx] in FORDABLE_WATER
                 and self.blocks.get((nx, ny)) not in SOLID_BLOCKS)
 
+    def _occupant(self, nx, ny, exclude=None):
+        """The soul on (nx,ny) who BLOCKS movement onto it — another AWAKE soul. A RESTING soul does
+        not block (so a whole family still beds down together on one home tile), and `exclude` (the
+        mover itself) never blocks. None if the tile is free to step onto. Underpins hard collision."""
+        q = getattr(self, "_occ", {}).get((nx, ny))
+        if q is None or q is exclude or (q.get("intention") or {}).get("kind") == "rest":
+            return None
+        return q
+
+    def _ask_to_move(self, q, away_from):
+        """'Ask' soul q to step aside to a free neighbouring tile so another can pass — the yield that
+        keeps a doorway from jamming. Prefers a tile AWAY from the asker; never rouses a resting soul.
+        Returns True iff q actually stepped aside."""
+        if (q.get("intention") or {}).get("kind") == "rest":
+            return False
+        qx, qy = q["x"], q["y"]
+        best, bd = None, -1.0e9
+        for dx, dy in _STEP_DIRS:
+            nx, ny = qx + dx, qy + dy
+            if not self._passable(nx, ny) or self._occupant(nx, ny, exclude=q) is not None:
+                continue
+            score = (abs(nx - away_from[0]) + abs(ny - away_from[1])) + float(self.rng.random()) * 0.3
+            if score > bd:
+                best, bd = (nx, ny), score
+        if best is None:
+            return False
+        self._step_to(q, best[0], best[1])
+        return True
+
+    def _take_step(self, p, nx, ny) -> bool:
+        """Commit p's step to (nx,ny) under HARD collision: if an awake soul stands there, ASK it to
+        move aside first, and only step once the tile is free. Returns True if p moved, False if it's
+        blocked and the other couldn't budge — then p simply waits this beat and re-routes next."""
+        q = self._occupant(nx, ny, exclude=p)
+        if q is not None and not self._ask_to_move(q, away_from=(p["x"], p["y"])):
+            return False
+        self._step_to(p, nx, ny)
+        return True
+
     def _step_to(self, p, nx, ny):
         """Commit a step. Wading water wets the soul AND slows them: stepping into a river/shallow
         sets a flag that costs them their next move beat (half-speed through water). Each footfall
@@ -5319,6 +5358,11 @@ class World:
                 w = ff.get((nx, ny), 0.0) + 1.0
                 ff[(nx, ny)] = w if w < FOOTFALL_CAP else FOOTFALL_CAP
                 last[(nx, ny)] = p["id"]
+        occ = getattr(self, "_occ", None)              # keep the live occupancy map in step with the move
+        if occ is not None:
+            if occ.get((p["x"], p["y"])) is p:
+                del occ[(p["x"], p["y"])]
+            occ[(nx, ny)] = p
         p["x"], p["y"] = nx, ny
 
     def _compute_path(self, x, y, gx, gy, cap=700):
@@ -5443,7 +5487,8 @@ class World:
             gx, gy = x + int(direction[0]), y + int(direction[1])
             step = self._path_step(p, gx, gy)
             if step is not None:
-                self._step_to(p, step[0], step[1])
+                if not self._take_step(p, step[0], step[1]):
+                    p.pop("_path", None)               # a soul blocks the way and can't budge — re-route next beat
                 return
             # nothing reachable found → fall through to the greedy step (using the sign direction)
         else:
@@ -5458,7 +5503,8 @@ class World:
                 if (sx0 or sy0) and not self._passable(x + sx0, y + sy0):
                     step = self._path_step(p, x + int(direction[0]), y + int(direction[1]))
                     if step is not None:
-                        self._step_to(p, step[0], step[1])
+                        if not self._take_step(p, step[0], step[1]):
+                            p.pop("_path", None)
                         return
             p.pop("_path", None)                           # a short hop / blind amble → greedy
         if not direction or (direction[0] == 0 and direction[1] == 0):
@@ -5485,8 +5531,8 @@ class World:
                 cost -= ROAD_PULL                           # a real ROAD is the easiest going — souls follow it
             elif self.footfall.get((nx, ny), 0.0) >= FOOTFALL_PATH_MIN:
                 cost -= PATH_PULL                           # a worn path is easy going — feet follow the beaten track
-            if (nx, ny) in getattr(self, "_person_pos", ()):
-                cost += PERSON_AVOID_COST                   # don't walk into another soul — route around them
+            if self._occupant(nx, ny, exclude=p) is not None:
+                cost += PERSON_AVOID_COST                   # another awake soul stands here — route around them
             for wx, wy in near_wolves:                      # usually empty → skipped
                 d = abs(wx - nx) + abs(wy - ny)
                 if d < DANGER_AVOID_R:
@@ -5496,7 +5542,7 @@ class World:
             if score > best_score:
                 best, best_score = (nx, ny), score
         if best is not None:
-            self._step_to(p, best[0], best[1])
+            self._take_step(p, best[0], best[1])           # hard collision: yield-or-wait if a soul's on that tile
 
     def _decay_footfall(self):
         """Once a day: worn paths fade and grass back over where feet stop falling, while the most
