@@ -689,6 +689,9 @@ WATERBORNE = ("cholera", "dysentery", "typhoid_fever")   # only these come from 
 WATER_INFECT_CHANCE = 0.012        # chance a single raw drink from a natural source infects
 IMMUNITY_DAYS = 90.0               # how long recovery shields against that same disease
 TEND_RECOVERY_BOOST = 0.6          # extra game-min shaved off an illness per game-min it's nursed
+GRAVE_HP = 0.4                     # hp below which a sickness has a soul's LIFE in danger — they take to bed
+CARETAKER_REVIEW = 1440.0          # game-min between re-choosing the band's caretaker (~a day; no churn)
+CARETAKER_HYST = 0.15              # fitness edge the sitting caretaker keeps, so the role doesn't change hands lightly
 HEARTH_COST = {"wood": 3, "stone": 2, "leaves": 1}   # the campfire a soul raises to boil water by
 
 # ─── Berry bushes (P3 gathering overhaul) ────────────────────────────────────
@@ -2679,12 +2682,13 @@ class World:
         needy_id = needy_name = None
         nd = 999
         ail_id = ail_name = None
-        ad = 999
+        ail_sev = (0, -1.0e9)                      # (severity, -distance): the gravest, then the nearest
         mentor_id = mentor_name = None
         mgap = 1
         owes = p.get("owes", {})
         my_recipes = p.get("recipes") or []
         healthy = p.get("hp", 1.0) > 0.6 and not (p.get("illness") and self.clock >= p["illness"]["onset_t"])
+        am_caretaker = healthy and p["id"] == self._caretaker()   # only the designated caretaker makes the rounds
         for q in self.people:
             if q is p:
                 continue
@@ -2694,11 +2698,13 @@ class World:
                 eff = d * (0.4 if q["id"] in owes else 1.0)
                 if eff < nd:
                     needy_id, needy_name, nd = q["id"], q["name"], eff
-            # A band-mate laid low by sickness (symptoms showing) within reach — only a soul who
-            # is itself well goes to nurse them (#11 tend the sick / #10 rescue).
-            if healthy and d < ad and d <= PERSON["vision"] * 3 \
-                    and q.get("illness") and self.clock >= q["illness"]["onset_t"]:
-                ail_id, ail_name, ad = q["id"], q["name"], d
+            # A band-mate laid low by sickness (symptoms showing). Only the band's CARETAKER answers
+            # it — and band-wide, the gravest first — so one steady hand makes the rounds while the
+            # rest of the band keeps working, instead of everyone downing tools to nurse (#11).
+            if am_caretaker and q.get("illness") and self.clock >= q["illness"]["onset_t"]:
+                sev = (2 if self._gravely_ill(q) else 1, -float(d))
+                if sev > ail_sev:
+                    ail_id, ail_name, ail_sev = q["id"], q["name"], sev
             # A markedly more-skilled band-mate to apprentice oneself to — the soul seeks them out
             # to learn their crafts (apprenticeship; the teaching itself happens on contact).
             if d <= PERSON["vision"] * 3 and len(my_recipes) < 8:
@@ -2790,6 +2796,11 @@ class World:
                                default=0.0),
             "exposed": p.get("_exposed", 0.0),
             "build_progress": build_progress,
+            # Sickness, weighed by the body: a MILD bout, the soul pushes through and keeps working;
+            # only when a sickness turns GRAVE (life in danger) do they take to their bed to recover.
+            "sick": bool(p.get("illness") and self.clock >= p["illness"]["onset_t"]),
+            "grave": self._gravely_ill(p),
+            "caretaker": am_caretaker,
             # The sublime: a machine far beyond the band's craft in sight. `novelty` fades as the
             # soul studies it, so awe gives way to understanding (then they go back to building).
             "wonder": (lambda w: {"dist": w[2], "kind": w[3],
@@ -5926,6 +5937,41 @@ class World:
             return "forage_berry", None
         return "seek_berry", (dx, dy)
 
+    def _gravely_ill(self, p) -> bool:
+        """Is a sickness threatening this soul's LIFE — symptomatic and health worn dangerously
+        low? Only then do they take to bed; a milder bout, they carry on with the day's work."""
+        ill = p.get("illness")
+        return bool(ill and self.clock >= ill["onset_t"] and p.get("hp", 1.0) < GRAVE_HP)
+
+    def _bedridden(self, p) -> bool:
+        """Is this soul lying abed at home to recover — resting at (or beside) its own hearth?
+        Rest under a roof helps the body fight a sickness off, so this counts as being cared for."""
+        if p.get("home_struct") is None or not p.get("home"):
+            return False
+        return ((p.get("intention") or {}).get("kind") == "rest"
+                and abs(p["x"] - p["home"][0]) + abs(p["y"] - p["home"][1]) <= 1)
+
+    def _caretaker(self):
+        """The id of the band's one designated CARETAKER — the soul who tends the sick, so the rest
+        of the band keeps working instead of everyone downing tools to nurse. The most caring settled
+        adult, chosen stably (kept for a day at a time, with an edge to the sitting one, so the role
+        doesn't pass around). None if the band has no able, settled adult to fill it."""
+        cur = getattr(self, "_caretaker_cache", None)
+        cur_p = next((q for q in self.people if q["id"] == cur), None) if cur else None
+        cur_ok = bool(cur_p and cur_p.get("home_struct") and cur_p["age"] >= ADULT_AGE
+                      and cur_p.get("hp", 1.0) > 0.5 and not self._gravely_ill(cur_p))
+        if cur_ok and self.clock < getattr(self, "_caretaker_picked_t", -1e9) + CARETAKER_REVIEW:
+            return cur
+        pool = [q for q in self.people if q["age"] >= ADULT_AGE and q.get("home_struct")
+                and q.get("hp", 1.0) > 0.5 and not self._gravely_ill(q)]
+        if not pool:
+            return cur if cur_ok else None
+        pick = max(pool, key=lambda q: q.get("traits", {}).get("sociability", 0.5)
+                   + (CARETAKER_HYST if q["id"] == cur else 0.0))   # a gentle hand, kept stably
+        self._caretaker_cache = pick["id"]
+        self._caretaker_picked_t = self.clock
+        return pick["id"]
+
     def _tended(self, p) -> bool:
         """Is a well band-mate keeping vigil at this sick soul's side — standing within a tile
         with the resolve to tend them? Their nursing eases the illness."""
@@ -5962,9 +6008,12 @@ class World:
             mind.remember(p, f"I've fallen ill — {DISEASE[ill['d']]['hint']}", 0.9, "illness", now)
         # A caretaker keeping vigil at the sick soul's side eases the illness: the body loses
         # less health and weathers it sooner — so nursing visibly matters (#11).
-        # A sick soul mends faster if NURSED, or if lying within reach of an INFIRMARY the band has
-        # designed (its own house of healing — inert until one is built).
-        cared = self._tended(p) or self._near_function(p, "infirmary", INFIRMARY_RANGE)
+        # A sick soul mends faster if NURSED, if lying within reach of an INFIRMARY the band has
+        # designed (its own house of healing — inert until one is built), OR simply by lying ABED at
+        # home — rest under a roof lets the body fight the sickness off (so the gravely-ill who take
+        # to bed recover even when the lone caretaker is busy with someone else).
+        cared = (self._tended(p) or self._near_function(p, "infirmary", INFIRMARY_RANGE)
+                 or self._bedridden(p))
         hp_rate = DISEASE[ill["d"]]["hp"] * (0.5 if cared else 1.0)
         p["hp"] = max(0.0, p["hp"] - hp_rate * dt_game_min)
         if cared:

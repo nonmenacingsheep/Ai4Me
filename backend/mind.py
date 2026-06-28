@@ -551,15 +551,24 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         # the body's true-exhaustion ramp is not.
         fatigue_u *= REST_BY_DAY_DAMP
     # Injury — a hurt body wants to lie low and mend rather than carry on into harm. Scales with
-    # how badly wounded; keeps the soul resting (where hp heals) until it has recovered (#9).
+    # how badly wounded; keeps the soul resting (where hp heals) until it has recovered (#9). But a
+    # MILD sickness is the exception: the soul works through it (only a GRAVE bout sends them to bed,
+    # via the dedicated pull below), so a wave of sniffles doesn't halt the whole band.
     hp_deficit = 1.0 - _clamp01(p.get("hp", 1.0))
-    if hp_deficit > 0.3:
+    mild_sick = ctx.get("sick") and not ctx.get("grave")
+    if hp_deficit > 0.3 and not mild_sick:
         fatigue_u = max(fatigue_u, 0.45 + 0.4 * hp_deficit)
     # Exposure — caught out in the cold/wet, a soul is pulled to get under cover (rest at home).
     if exposed > 0.1:
         fatigue_u = max(fatigue_u, 0.4 + 0.45 * exposed)
     out.append(("rest", None, fatigue_u, "I should get out of this weather" if exposed > 0.3
                 else "weariness drags at me"))
+    # Gravely ill — a sickness with a soul's life in danger sends them HOME to their bed to recover
+    # (the rest behaviour walks them home and mends faster under a roof). Strong enough to drop the
+    # day's work and projects, but still under the body's danger ramp, so a parched/starving soul
+    # drinks or eats first and then lies back down — bed-rest never costs a life.
+    if ctx.get("grave") and p.get("home_struct") is not None:
+        out.append(("rest", None, 0.9, "I'm gravely ill — I must lie abed until I mend"))
 
     # Fear — a prowling predator nearby overrides ordinary wants: get to safety, the home or the
     # band (a roof and company are protection). Keenest in cautious souls; scales with how close
