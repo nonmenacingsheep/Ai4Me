@@ -2214,6 +2214,9 @@ def _apply_world_action(spec: dict, by: str) -> str:
             res = w.build_town(cx, cy, tier, True)
             return (f"{by} raised a whole {tier} in one stroke — {res.get('homes', 0)} homes, "
                     f"{res.get('civic', 0)} civic buildings, {res.get('souls', 0)} folk") if res.get("ok") else ""
+        if tool == "farm":                             # sow a field of cultivated grain
+            n = w._plant_farm(x, y, max(1, r))
+            return f"{by} sowed a field of grain at ({x},{y})" if n else ""
     except Exception as e:
         print(f"[world] action {tool!r} failed: {e}")
     return ""
@@ -2230,6 +2233,7 @@ _WORLD_ARGS = {
     "whisper": ("x", "y", "text"),
     "place_power": ("x", "y", "kind"),
     "build_town": ("tier",),
+    "farm": ("x", "y", "r"),
 }
 
 
@@ -2544,6 +2548,7 @@ _HIDDEN_SPECS = [
     ("person", "<person>", "</person>", False),        # World: bring people into being
     ("whisper", "<whisper>", "</whisper>", False),     # World: nudge a soul (no-op until people)
     ("build_town", "<build_town>", "</build_town>", False),  # World: FAST-BUILD a whole village/town/city at once
+    ("farm", "<farm>", "</farm>", False),              # World: sow a field of cultivated grain
 ]
 
 # <code file="name.py">…python…</code> — parse the filename + body out of the block.

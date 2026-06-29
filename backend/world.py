@@ -145,6 +145,12 @@ PLANTS = {
             t=(0.35, 0.85), m=(0.70, 1.00), grow=0.040, spread=0.012, icon="🌾"),
     7: dict(name="palm",      biomes={"rainforest", "beach"},
             t=(0.65, 1.00), m=(0.60, 1.00), grow=0.014, spread=0.005, icon="🌴"),
+    # CULTIVATED grain — the heart of agriculture. spread=0 so it NEVER seeds wild or creeps (it
+    # exists only where a farmer/the planner tills it), but it grows back FAST once foraged, so a
+    # sown field feeds a settlement far better than grazing the wilds. Wide bands → thrives anywhere
+    # a town is dropped.
+    8: dict(name="wheat",     biomes={"grassland", "savanna", "forest", "beach", "rainforest", "swamp"},
+            t=(0.18, 0.98), m=(0.12, 0.98), grow=0.10, spread=0.0, icon="🌾"),
 }
 PLANT_BY_NAME = {v["name"]: k for k, v in PLANTS.items()}
 
@@ -226,7 +232,7 @@ GRANARY_CUSHION = {"food": 8, "safe_water": 4}  # keep this much in your OWN lar
 PROVISION_LOAD = 4          # gather this much above the travel reserve before hauling it home to bank
 PROVISION_LEASH = 12        # stockpiling stays near home — never range far from water to lay in food
 
-EDIBLE_PLANTS = {"grass", "oak", "reeds", "palm", "shrub"}   # plants people can forage
+EDIBLE_PLANTS = {"grass", "oak", "reeds", "palm", "shrub", "wheat"}   # plants people can forage (wheat = cultivated)
 EDIBLE_IDS = [sp for sp, info in PLANTS.items() if info["name"] in EDIBLE_PLANTS]
 NAMES_M = ("Aren", "Bram", "Cael", "Doran", "Eli", "Finn", "Garreth", "Holt",
            "Ivo", "Joss", "Korin", "Lugh", "Mato", "Niall", "Osric", "Pell")
@@ -5351,6 +5357,23 @@ class World:
         yy, xx = land[len(land) // 2]
         return int(xx), int(yy)
 
+    def _plant_farm(self, cx, cy, r):
+        """Till a FARM of cultivated grain (wheat) — a dense, fast-regrowing crop — in a square of
+        radius r, so a settlement FEEDS ITSELF off its fields instead of foraging the wilds bare.
+        Skips water, buildings and roads. Returns the number of tiles sown."""
+        wheat = PLANT_BY_NAME["wheat"]
+        n = 0
+        for gx in range(int(cx) - r, int(cx) + r + 1):
+            for gy in range(int(cy) - r, int(cy) + r + 1):
+                if (self._in(gx, gy) and self.water[gy, gx] == WATER_NONE
+                        and (gx, gy) not in self.blocks and (gx, gy) not in self.roads):
+                    self.veg_sp[gy, gx] = wheat
+                    self.veg_growth[gy, gx] = 0.85
+                    n += 1
+        if n:
+            self.version += 1
+        return n
+
     def build_town(self, cx=None, cy=None, tier="town", populate=True):
         """FAST-BUILD: lay out and instantly STAMP a whole settlement — a road grid, a paved civic
         square, civic buildings near the heart and homes around them (using the band's AUTHORED designs
@@ -5359,11 +5382,11 @@ class World:
         if cx is None or cy is None:
             cx, cy = self._find_town_site()
         cx, cy = int(cx), int(cy)
-        tiers = {"village": dict(r=12, homes=6, civic=2),
-                 "town":    dict(r=20, homes=18, civic=6),
-                 "city":    dict(r=32, homes=44, civic=12)}
+        tiers = {"village": dict(r=12, homes=6, civic=2, farms=4),
+                 "town":    dict(r=20, homes=18, civic=6, farms=8),
+                 "city":    dict(r=32, homes=44, civic=12, farms=16)}
         spec = tiers.get(tier, tiers["town"])
-        R, want_homes, want_civic = spec["r"], spec["homes"], spec["civic"]
+        R, want_homes, want_civic, want_farms = spec["r"], spec["homes"], spec["civic"], spec["farms"]
         STRIDE = 6
         # 1) a road GRID over dry, in-bounds tiles within a roughly round radius
         for gx in range(cx - R, cx + R + 1):
@@ -5417,9 +5440,18 @@ class World:
                                 owner = q["id"]
                             souls += 1
                         site["owner"] = owner
+        # 5) FARMS on the outskirts — cultivated grain so the town feeds itself off its fields
+        farms = 0
+        for i in range(want_farms):
+            ang = 2.0 * np.pi * i / max(1, want_farms)
+            fx = cx + int(round((R + 5) * np.cos(ang)))
+            fy = cy + int(round((R + 5) * np.sin(ang)))
+            if self._in(fx, fy) and self.water[fy, fx] == WATER_NONE and self._plant_farm(fx, fy, 3) >= 10:
+                farms += 1
         self._tick_settlements()                                   # fold the new homes into a settlement
         self.version += 1
-        return {"ok": True, "centre": [cx, cy], "tier": tier, "homes": homes, "civic": civic, "souls": souls}
+        return {"ok": True, "centre": [cx, cy], "tier": tier,
+                "homes": homes, "civic": civic, "souls": souls, "farms": farms}
 
     def _work_ready(self, p, key, dt, work: float) -> bool:
         """Spread a piece of manual labour over visible game-time: returns True (and resets the
@@ -6991,6 +7023,7 @@ class World:
             "  <person>x y n</person>  bring n people into being near (x,y); they forage, drink, rest and can die\n"
             "  <whisper>x y a thought to slip into a nearby soul</whisper>  (lands as a vivid memory they weigh when next they decide — inspiration, not a command)\n"
             "  <build_town>tier</build_town>  FAST-BUILD a whole settlement at once (tier = village|town|city): roads, a civic square, civic buildings, homes and folk to live in them, designed and stamped in one stroke\n"
+            "  <farm>x y r</farm>  sow a field of cultivated grain in radius r — a dense, fast-regrowing crop that feeds a settlement far better than foraging the wilds\n"
             "Act only when you mean to; the world is alive and persists between visits."
         )
 
@@ -7642,6 +7675,16 @@ if __name__ == "__main__":
              and len(wt2.roads) > 100 and bt_home_ok)
     print(f"  fast-build town test: homes={bt_homes} civic={bt_civic} souls={bt_souls} "
           f"roads={len(wt2.roads)} homes-liveable={bt_home_ok} -> {'OK' if bt_ok else 'FAILED'}")
+
+    # FARMS — the town sowed cultivated grain FIELDS (build_town §5) that feed it; wheat NEVER seeds
+    # wild (spread=0 → 0 chance in _seed_initial_vegetation), so it's inert in the natural world.
+    wheat_id = PLANT_BY_NAME["wheat"]
+    farm_fields = int((wt2.veg_sp == wheat_id).sum())
+    farm_no_wild = PLANTS[wheat_id]["spread"] == 0
+    farm_edible = wheat_id in EDIBLE_IDS
+    farm_ok = farm_no_wild and bt.get("farms", 0) >= 4 and farm_fields > 200 and farm_edible
+    print(f"  farm test: never-wild={farm_no_wild} farms={bt.get('farms')} field_tiles={farm_fields} "
+          f"edible={farm_edible} -> {'OK' if farm_ok else 'FAILED'}")
 
     # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
     # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.
