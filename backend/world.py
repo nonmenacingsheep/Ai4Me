@@ -452,6 +452,14 @@ BLUEPRINTS = {
         "FFF",
         "WFW",
     ]),
+    # A FACTORY — where a company turns raw stuff into refined goods (the industrial workhouse).
+    "factory": dict(name="Factory", roof=True, insulation=1.0, communal=True, layout=[
+        "WWDWW",
+        "WFFFW",
+        "WFFFW",
+        "WFFFW",
+        "WWWWW",
+    ]),
 }
 
 # The dwelling ladder — ascending comfort. Once a soul has any roof and is kitted out,
@@ -544,6 +552,20 @@ CONTRACTOR_COIN = 6          # …or, once money exists, this many coins instead
 COMMISSION_RANGE = 16        # how near an unhoused soul must be for a settled builder to offer to build for them
 MONEY_TRADE_XP = 6           # trades under a soul's belt before it could conceive of MONEY
 COIN_MINT = 20               # coins the inventor of money strikes into being
+# ─── Companies & industry (the town economy) ─────────────────────────────────
+# Once a settlement is prosperous, enterprising souls found COMPANIES that own a FACTORY, employ
+# workers, turn raw stuff into refined GOODS, sell them for coin and pay wages — the first stir of
+# an industrial economy. It's an abstracted daily ledger, kept entirely off the survival path.
+COMPANY_KINDS = {
+    "mill":    {"good": "flour",  "raw": "wheat"},
+    "sawmill": {"good": "planks", "raw": "wood"},
+    "forge":   {"good": "tools",  "raw": "ore"},
+    "weavery": {"good": "cloth",  "raw": "fiber"},
+    "pottery": {"good": "pots",   "raw": "clay"},
+}
+CO_PROD_PER_WORKER = 3.0     # units of refined goods a worker turns out per game-day
+CO_GOOD_PRICE      = 2.0     # coin a unit of goods fetches at market
+CO_WAGE            = 3.0     # coin a worker is paid per game-day
 # Self-authored projects ("aspirations") — a settled, content soul forms its OWN goal beyond mere
 # survival (tidy the ground round its home, plant a garden by the door) and a PLAN of primitive
 # skills carries it out. This is the open-vocabulary layer: the rule body seeds a few projects so
@@ -872,6 +894,7 @@ class World:
         self.settlements: list[dict] = []  # first-class SETTLEMENTS (the band's town(s)) — M0 foundation
         self.laws: list[dict] = []         # the band's enacted LAWS (LLM-authored, validated) — Phase B
         self.customs: list[dict] = []      # the band's TRADITIONS (LLM-authored festivals) — Phase C
+        self.companies: list[dict] = []    # COMPANIES that own factories, employ folk, make goods — the town economy
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
@@ -1428,6 +1451,7 @@ class World:
             self._tick_governance()                                # judge the commons-norm once a day
             self._decay_footfall()                                 # worn paths fade where feet stop falling
             self._tick_settlements()                               # keep the band's town (name/centre/roll) current
+            self._tick_companies(1440.0)                           # the town's industry: goods made, sold, wages paid
             self._last_pest = self.clock
         season_now = self.season()
         if season_now != getattr(self, "_last_season", season_now):
@@ -5448,10 +5472,89 @@ class World:
             fy = cy + int(round((R + 5) * np.sin(ang)))
             if self._in(fx, fy) and self.water[fy, fx] == WATER_NONE and self._plant_farm(fx, fy, 3) >= 10:
                 farms += 1
+        # 6) INDUSTRY — a few factories + the companies that run them, employing the town's folk
+        cos = 0
+        if populate:
+            workers = [p["id"] for p in self.people if p.get("home_struct")
+                       and any(s["id"] == p["home_struct"] for s in self.sites)
+                       and p.get("age", 0) >= ADULT_AGE]
+            kinds = list(COMPANY_KINDS.keys())
+            n_co = min({"village": 1, "town": 3, "city": 6}.get(tier, 3), max(1, len(workers) // 3))
+            fi = 0
+            for kp in range(n_co):
+                ang = 2.0 * np.pi * (kp + 0.5) / max(1, n_co)      # spread factories round the town's edge
+                fsite = None
+                for rr in (R + 2, R + 4, R - 2):                   # just outside the homes, with fallbacks
+                    fx = cx + int(round(rr * np.cos(ang)))
+                    fy = cy + int(round(rr * np.sin(ang)))
+                    if self._in(fx, fy) and self.water[fy, fx] == WATER_NONE:
+                        fsite = self._stamp_building("factory", fx, fy, communal=True)
+                        if fsite:
+                            break
+                owner = workers[fi % len(workers)] if workers else None
+                c = self._found_company(owner, kinds[kp % len(kinds)], fsite["id"] if fsite else None)
+                for _ in range(3):                                 # a few hands on the payroll
+                    if fi < len(workers):
+                        c["workers"].append(workers[fi])
+                        fi += 1
+                cos += 1
         self._tick_settlements()                                   # fold the new homes into a settlement
         self.version += 1
-        return {"ok": True, "centre": [cx, cy], "tier": tier,
-                "homes": homes, "civic": civic, "souls": souls, "farms": farms}
+        return {"ok": True, "centre": [cx, cy], "tier": tier, "homes": homes, "civic": civic,
+                "souls": souls, "farms": farms, "companies": cos}
+
+    def _company_name(self, owner_name, kind):
+        """A plausible company name from its founder and trade."""
+        good = COMPANY_KINDS.get(kind, {}).get("good", "goods").title()
+        forms = [f"{owner_name}'s {kind.title()}", f"{owner_name} & Kin", f"The {good} Works",
+                 f"{good} Company", f"{owner_name} {good} Co."]
+        return forms[int(self.rng.integers(len(forms)))]
+
+    def _found_company(self, owner_id, kind, building_id=None, name=None):
+        """Found a COMPANY of the given trade, owned by `owner_id`, optionally tied to a factory. It
+        will employ workers, make goods, sell them and pay wages each day. Returns the company dict."""
+        if kind not in COMPANY_KINDS:
+            kind = "mill"
+        owner = next((q for q in self.people if q["id"] == owner_id), None)
+        oname = owner["name"] if owner else "a founder"
+        c = {"id": "co_" + uuid.uuid4().hex[:8], "name": name or self._company_name(oname, kind),
+             "kind": kind, "good": COMPANY_KINDS[kind]["good"], "owner": owner_id,
+             "building": building_id, "workers": [], "goods": 0.0, "coin": 0.0,
+             "founded_t": round(self.clock, 1)}
+        self.companies.append(c)
+        self.money_invented = True                  # a company runs on coin — money is a going concern now
+        self._note("culture", f"{oname} founded {c['name']} — a {kind} making {c['good']}.")
+        return c
+
+    def _tick_companies(self, dt_game_min):
+        """Once a game-day, each company's workers turn out GOODS, sell them at market for coin, and
+        draw their WAGES — the town's industrial economy. An abstracted ledger kept OFF the survival
+        path (it only ever moves coin), so it can never starve anyone. Inert until a company exists."""
+        if not self.companies:
+            return
+        self._co_acc = getattr(self, "_co_acc", 0.0) + dt_game_min
+        if self._co_acc < 1440.0:
+            return
+        self._co_acc = 0.0
+        alive = {q["id"] for q in self.people}
+        people_by_id = {q["id"]: q for q in self.people}
+        for c in self.companies:
+            c["workers"] = [w for w in c.get("workers", []) if w in alive]   # the dead leave the payroll
+            nw = len(c["workers"])
+            if nw == 0:
+                continue
+            made = nw * CO_PROD_PER_WORKER                 # the day's making, sold at market for coin
+            c["coin"] = c.get("coin", 0.0) + made * CO_GOOD_PRICE
+            due = nw * CO_WAGE                             # wages out of the takings (what it can cover)
+            pay = min(c["coin"], due)
+            per = pay / nw if nw else 0.0
+            for wid in c["workers"]:
+                q = people_by_id.get(wid)
+                if q is not None:
+                    q.setdefault("inv", {})["coin"] = q["inv"].get("coin", 0) + per
+            c["coin"] -= pay
+        self.companies = [c for c in self.companies        # drop a company with no owner AND no hands
+                          if (c.get("owner") in alive) or c.get("workers")]
 
     def _work_ready(self, p, key, dt, work: float) -> bool:
         """Spread a piece of manual labour over visible game-time: returns True (and resets the
@@ -7064,6 +7167,7 @@ class World:
                 "authored_blueprints": self.authored_blueprints,   # the band's own designs (Phase A)
                 "laws": self.laws,                                 # the band's enacted laws (Phase B)
                 "customs": self.customs,                           # the band's traditions (Phase C)
+                "companies": self.companies,                       # the town's companies/industry
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -7162,6 +7266,7 @@ class World:
             self.authored_blueprints = meta.get("authored_blueprints", []) or []   # the band's own designs
             self.laws = meta.get("laws", []) or []                                  # enacted laws (Phase B)
             self.customs = meta.get("customs", []) or []                            # traditions (Phase C)
+            self.companies = meta.get("companies", []) or []                        # the town's companies/industry
             self._register_authored()                     # re-inject them into BLUEPRINTS for the build machinery
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
@@ -7685,6 +7790,17 @@ if __name__ == "__main__":
     farm_ok = farm_no_wild and bt.get("farms", 0) >= 4 and farm_fields > 200 and farm_edible
     print(f"  farm test: never-wild={farm_no_wild} farms={bt.get('farms')} field_tiles={farm_fields} "
           f"edible={farm_edible} -> {'OK' if farm_ok else 'FAILED'}")
+
+    # COMPANIES — the town's INDUSTRY: factories raised, companies founded to run them, employing folk
+    # who make goods, sell them and draw wages. An abstracted ledger off the survival path.
+    co_n = len(wt2.companies)
+    co_facs = sum(1 for s in wt2.sites if s.get("bp") == "factory")
+    co_workers = sum(len(c.get("workers", [])) for c in wt2.companies)
+    wt2._tick_companies(1440.0); wt2._tick_companies(1440.0)       # two game-days of industry
+    co_paid = sum(p.get("inv", {}).get("coin", 0) for p in wt2.people)
+    co_ok = co_n >= 2 and co_facs >= 1 and co_workers >= 4 and co_paid > 0
+    print(f"  company test: companies={co_n} factories={co_facs} workers={co_workers} "
+          f"wages-paid={co_paid:.0f} -> {'OK' if co_ok else 'FAILED'}")
 
     # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
     # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.
