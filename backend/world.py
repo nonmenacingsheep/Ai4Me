@@ -525,12 +525,14 @@ STORE_PEST_FACTOR = 0.4           # and cuts the chance of a vermin raid
 # form OR one the band designed itself (Phase A.2: the LLM authors the FORM, the function is real).
 BUILTIN_FUNCTION = {WORKSHOP_BP: "workshop", SMITHY_BP: "smithy",
                     STOREHOUSE_BP: "storehouse", MONUMENT_BP: "hall",
-                    "watchtower": "watchtower"}        # the built-in watchtower fills the "watchtower" role
+                    "watchtower": "watchtower",        # the built-in watchtower fills the "watchtower" role
+                    "factory": "factory"}              # …and the factory fills the "factory" role (industry)
 # What an LLM may design — each a real role with a mechanical effect. SCHOOL and INFIRMARY have no
 # built-in form (they exist only once the band DESIGNS one), so they're inert with no model: a school
 # speeds the spread of crafts (teaching), an infirmary speeds a sick soul's recovery. WATCHTOWER has a
 # built-in form (raised after a wolf draws blood); a designed one fills the same role — wolves back off near it.
-AUTHORABLE_FUNCTIONS = ("home", "workshop", "smithy", "storehouse", "hall", "school", "infirmary", "watchtower")
+AUTHORABLE_FUNCTIONS = ("home", "workshop", "smithy", "storehouse", "hall", "school", "infirmary",
+                        "watchtower", "factory")
 SCHOOL_RANGE = 6             # tiles from a school within which lessons take faster hold
 SCHOOL_TEACH_BONUS = 0.35    # added chance a lesson lands beside a school
 INFIRMARY_RANGE = 6          # tiles from an infirmary within which a sick soul mends faster (as if tended)
@@ -5480,6 +5482,7 @@ class World:
                        and p.get("age", 0) >= ADULT_AGE]
             kinds = list(COMPANY_KINDS.keys())
             n_co = min({"village": 1, "town": 3, "city": 6}.get(tier, 3), max(1, len(workers) // 3))
+            factory_bp = self._authored_for("factory") or "factory"   # the band's OWN factory design if it has one
             fi = 0
             for kp in range(n_co):
                 ang = 2.0 * np.pi * (kp + 0.5) / max(1, n_co)      # spread factories round the town's edge
@@ -5488,7 +5491,7 @@ class World:
                     fx = cx + int(round(rr * np.cos(ang)))
                     fy = cy + int(round(rr * np.sin(ang)))
                     if self._in(fx, fy) and self.water[fy, fx] == WATER_NONE:
-                        fsite = self._stamp_building("factory", fx, fy, communal=True)
+                        fsite = self._stamp_building(factory_bp, fx, fy, communal=True)
                         if fsite:
                             break
                 owner = workers[fi % len(workers)] if workers else None
@@ -7801,6 +7804,26 @@ if __name__ == "__main__":
     co_ok = co_n >= 2 and co_facs >= 1 and co_workers >= 4 and co_paid > 0
     print(f"  company test: companies={co_n} factories={co_facs} workers={co_workers} "
           f"wages-paid={co_paid:.0f} -> {'OK' if co_ok else 'FAILED'}")
+
+    # DEEP DESIGNER-AI TEST — the design layer authors the WHOLE civic vocabulary (homes → FACTORIES),
+    # and the fast-build raises the band's OWN designs (not just the built-ins). Offline we drive
+    # apply_authored_building directly; the LLM authoring path feeds these very functions, so this
+    # proves the plumbing the model designs into — a complex civilisation the AI can shape end-to-end.
+    wd2 = World().generate(seed=42)
+    glayout = ["WWDWW", "WFFFW", "WFFFW", "WFFFW", "WWWWW"]
+    authored = {}
+    for fn in AUTHORABLE_FUNCTIONS:
+        abp = wd2.apply_authored_building({"name": f"A {fn}", "function": fn, "layout": glayout})
+        if abp and wd2._bp_function(abp) == fn:
+            authored[fn] = abp
+    rd2 = wd2.build_town(tier="town")
+    own_fac = any(s.get("done") and s.get("bp") == wd2._authored_for("factory") for s in wd2.sites)
+    own_home = any(s.get("done") and s.get("bp") == wd2._authored_for("home") for s in wd2.sites)
+    designer_ok = (len(authored) == len(AUTHORABLE_FUNCTIONS) and own_fac and own_home
+                   and rd2.get("companies", 0) >= 1)
+    print(f"  designer-AI deep test: authored {len(authored)}/{len(AUTHORABLE_FUNCTIONS)} functions "
+          f"(incl. factory), fast-build raised band's OWN factory={own_fac} home={own_home} "
+          f"-> {'OK' if designer_ok else 'FAILED'}")
 
     # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
     # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.
