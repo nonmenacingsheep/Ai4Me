@@ -3390,6 +3390,19 @@ class World:
         if hearth:
             return hearth
 
+        # THE DEEP TREE — a settled soul makes its own WORKBENCH and then climbs the craft tree (planks,
+        # stone tools, …), so the band actually UPGRADES instead of staying bare-handed. Done BEFORE
+        # piling onto more communal monuments, but strictly above the survival floor. (Tech-craft used
+        # to sit at the very bottom of this list, so souls — always mid some communal project — never
+        # reached it; they made the odd stick but never a bench.)
+        bench = self._workbench_decide(p, getters)
+        if bench:
+            return bench
+        if self._stations_for(p):                          # a bench (its own or a workshop's) in reach → climb
+            tech = self._tech_craft_decide(p, getters)
+            if tech:
+                return tech
+
         # The life-project: climb the dwelling ladder to a snugger home (hut, then cabin).
         # This is what fills the once-empty hours after survival is met — a real, visible goal.
         proj = p.get("project")
@@ -3426,13 +3439,8 @@ class World:
                 if act:
                     return act
 
-        # With home, gear, hearth and dwelling all handled, a settled soul beside a station turns
-        # to the DEEP craft tree — planks, tools, cooking, pottery, and (with ore to hand) metal.
-        # The whole tree is now open to the band, gated by stations/tools/materials, not knowledge.
-        tech = self._tech_craft_decide(p, getters)
-        if tech:
-            return tech
-
+        # (The deep craft tree is now climbed UP-FRONT — workbench + tools — right after the hearth, so
+        # the band actually upgrades; see _workbench_decide / the station-gated tech-craft above.)
         # Otherwise lay in stone for the next slice (stone houses, workshops).
         if inv.get("stone", 0) < BUILD["stone_stock"]:
             return self._seek(p, x, y, bool(stone[ly, lx]), stone, lx, ly,
@@ -3459,6 +3467,32 @@ class World:
         self._add_structure("campfire", hx, hy, by=p["name"])
         mind.remember(p, "raised a hearth — now I can boil my water clean", 0.8, "build", self.clock)
         return "tend", None
+
+    def _workbench_decide(self, p, getters):
+        """A settled soul makes its OWN WORKBENCH — the cheap first station (wood + sticks, no station
+        needed) that OPENS the deep craft tree, so the band can UPGRADE (planks, stone tools, …) instead
+        of staying bare-handed. Prioritised over piling onto yet more communal monuments, but strictly
+        above the survival floor. Returns a body action, or None when a bench already stands / it isn't
+        safe to spare the time. (Without this the deep tree was buried so deep souls never reached it.)"""
+        if p.get("home_struct") is None:
+            return None
+        if "workbench" in set(p.get("stations", [])) or p["inv"].get("workbench", 0) >= 1:
+            return None
+        if p.get("thirst", 0) > 0.3 or p.get("hunger", 0) > 0.3 or p.get("fatigue", 0) > 0.6:
+            return None                                    # the bench is a luxury — never on the survival path
+        if p.get("craft"):
+            return "craft", None
+        inv = p["inv"]
+        if inv.get("stick", 0) < 2:                        # the two sticks first (whittled from wood)
+            if inv.get("wood", 0) >= 1 and self._begin_craft(p, "stick", stations=()):
+                return "craft", None
+            return getters["wood"]()
+        if inv.get("wood", 0) < 4:                         # then gather the timber for the bench itself
+            return getters["wood"]()
+        if self._begin_craft(p, "workbench", stations=()):  # have it all — build the bench
+            self._bump("workbench_built")
+            return "craft", None
+        return None
 
     def _boil_at_home(self, p):
         """Tend the home fire: convert a measure of raw flask water into SAFE (boiled) water, up
@@ -7723,6 +7757,28 @@ if __name__ == "__main__":
     era_ok = era_stone and era_found and era_craft and era_iron and era_industry and era_power
     print(f"  civilisation-era test: stone={era_stone} founding={era_found} craft={era_craft} "
           f"iron={era_iron} industry={era_industry} power={era_power} -> {'OK' if era_ok else 'FAILED'}")
+
+    # WORKBENCH — a settled soul makes its OWN bench (the deep-tree gateway), so the band can UPGRADE.
+    # Before this, tech-craft sat at the very bottom of the build priority and souls — always mid some
+    # communal project — never reached it (a 12-day band built 0 benches); now it's done up-front.
+    wbw = World().generate(seed=42)
+    bpb = wbw.people[0]
+    bpb["home_struct"] = "h"; bpb["home"] = (int(bpb["x"]), int(bpb["y"]))
+    bpb["thirst"] = bpb["hunger"] = bpb["fatigue"] = 0.1
+    bpb["inv"] = {"wood": 30}; bpb.setdefault("stations", [])
+    _wg = {"wood": (lambda: ("seek_wood", (1, 0)))}
+    wb_made = False
+    for _wi in range(80):
+        wbw._workbench_decide(bpb, _wg)
+        if bpb.get("craft"):
+            for _ in range(60):
+                if not bpb.get("craft"):
+                    break
+                wbw._advance_craft(bpb, 60.0)
+        if "workbench" in (bpb.get("stations") or []):
+            wb_made = True
+            break
+    print(f"  workbench test: settled soul builds its own bench={wb_made} -> {'OK' if wb_made else 'FAILED'}")
 
     # LAWS (Phase B) — a renown-recognised LEADER, facing a recurring wrong, enacts a law the engine
     # then judges by REPUTATION only. An unenforceable/duplicate law is set aside; the unable are
