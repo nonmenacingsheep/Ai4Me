@@ -3080,11 +3080,20 @@ class World:
             return off
         hx, hy = p["home"]
         px, py = p["x"], p["y"]
+        day = 7 <= self.time_of_day() < 19
+        # By DAY, a soul EMPLOYED at a factory goes to WORK — it commutes to its workplace and labours
+        # there, so a town reads as folk at their trades rather than milling idle. Only the idle "what
+        # now?" drift; survival pulls and the night home-rhythm still out-score it, so no one starves
+        # or sleeps at the bench. (Inert for anyone without a job.)
+        wk = p.get("works_at")
+        if day and wk:
+            if abs(wk[0] - px) + abs(wk[1] - py) > 1:
+                return "wander", (wk[0] - px, wk[1] - py)      # commute to the factory → pathfind round walls
+            return "tend", None                                # at the bench — work in place
         # By DAY, an idle soul in a planned town drifts to its SQUARE — the civic heart fills with folk
         # (the designed centre comes alive). The square counts as "home enough" by day, so a soul there
         # doesn't get yanked back home (no home<->square oscillation); at night the home-rhythm rules.
         sq = self._town_square()
-        day = 7 <= self.time_of_day() < 19
         dsq = (abs(sq[0] - px) + abs(sq[1] - py)) if sq else 9999
         near_square = day and sq is not None and dsq <= SQUARE_STROLL
         if abs(hx - px) + abs(hy - py) > 6 and not near_square:
@@ -5483,6 +5492,7 @@ class World:
             kinds = list(COMPANY_KINDS.keys())
             n_co = min({"village": 1, "town": 3, "city": 6}.get(tier, 3), max(1, len(workers) // 3))
             factory_bp = self._authored_for("factory") or "factory"   # the band's OWN factory design if it has one
+            pbyid = {p["id"]: p for p in self.people}
             fi = 0
             for kp in range(n_co):
                 ang = 2.0 * np.pi * (kp + 0.5) / max(1, n_co)      # spread factories round the town's edge
@@ -5498,7 +5508,12 @@ class World:
                 c = self._found_company(owner, kinds[kp % len(kinds)], fsite["id"] if fsite else None)
                 for _ in range(3):                                 # a few hands on the payroll
                     if fi < len(workers):
-                        c["workers"].append(workers[fi])
+                        wid = workers[fi]
+                        c["workers"].append(wid)
+                        if fsite:                                   # they have a factory to commute to
+                            q = pbyid.get(wid)
+                            if q is not None:
+                                q["works_at"] = [int(fx), int(fy)]
                         fi += 1
                 cos += 1
         self._tick_settlements()                                   # fold the new homes into a settlement
@@ -7804,6 +7819,11 @@ if __name__ == "__main__":
     co_ok = co_n >= 2 and co_facs >= 1 and co_workers >= 4 and co_paid > 0
     print(f"  company test: companies={co_n} factories={co_facs} workers={co_workers} "
           f"wages-paid={co_paid:.0f} -> {'OK' if co_ok else 'FAILED'}")
+
+    # GO TO WORK — a fast-built town's factory hands are given a WORKPLACE they commute to by day, so
+    # the city reads as folk at their trades (the commute logic itself is unit-tested separately).
+    employed = sum(1 for p in wt2.people if p.get("works_at"))
+    print(f"  go-to-work test: {employed} folk employed at a factory -> {'OK' if employed >= 4 else 'FAILED'}")
 
     # DEEP DESIGNER-AI TEST — the design layer authors the WHOLE civic vocabulary (homes → FACTORIES),
     # and the fast-build raises the band's OWN designs (not just the built-ins). Offline we drive
