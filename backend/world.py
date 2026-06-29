@@ -568,6 +568,8 @@ COMPANY_KINDS = {
 CO_PROD_PER_WORKER = 3.0     # units of refined goods a worker turns out per game-day
 CO_GOOD_PRICE      = 2.0     # coin a unit of goods fetches at market
 CO_WAGE            = 3.0     # coin a worker is paid per game-day
+CO_HIRE_AT         = 24      # treasury coin at which a flush company takes on another hand
+CO_MAX_WORKERS     = 8       # most hands one company employs (then it's at capacity)
 # Self-authored projects ("aspirations") — a settled, content soul forms its OWN goal beyond mere
 # survival (tidy the ground round its home, plant a garden by the door) and a PLAN of primitive
 # skills carries it out. This is the open-vocabulary layer: the rule body seeds a few projects so
@@ -5506,6 +5508,8 @@ class World:
                             break
                 owner = workers[fi % len(workers)] if workers else None
                 c = self._found_company(owner, kinds[kp % len(kinds)], fsite["id"] if fsite else None)
+                if fsite:
+                    c["site_at"] = [int(fx), int(fy)]              # where new hires will commute to work
                 for _ in range(3):                                 # a few hands on the payroll
                     if fi < len(workers):
                         wid = workers[fi]
@@ -5556,6 +5560,7 @@ class World:
         self._co_acc = 0.0
         alive = {q["id"] for q in self.people}
         people_by_id = {q["id"]: q for q in self.people}
+        employed = {w for co in self.companies for w in co.get("workers", [])}
         for c in self.companies:
             c["workers"] = [w for w in c.get("workers", []) if w in alive]   # the dead leave the payroll
             nw = len(c["workers"])
@@ -5571,8 +5576,25 @@ class World:
                 if q is not None:
                     q.setdefault("inv", {})["coin"] = q["inv"].get("coin", 0) + per
             c["coin"] -= pay
+            # GROW — a flush company takes on another hand from the settled unemployed (the workforce,
+            # and the town, swell over time). Capped, and it costs coin to take someone on.
+            if c.get("coin", 0) >= CO_HIRE_AT and len(c["workers"]) < CO_MAX_WORKERS and c.get("site_at"):
+                hire = next((q for q in self.people
+                             if q.get("home_struct") and not q.get("works_at")
+                             and q.get("age", 0) >= ADULT_AGE and q["id"] not in employed), None)
+                if hire is not None:
+                    c["workers"].append(hire["id"])
+                    hire["works_at"] = list(c["site_at"])
+                    employed.add(hire["id"])
+                    c["coin"] -= CO_HIRE_AT * 0.4
         self.companies = [c for c in self.companies        # drop a company with no owner AND no hands
                           if (c.get("owner") in alive) or c.get("workers")]
+
+    def _town_wealth(self):
+        """The settlement's total WEALTH — coin in folks' pockets plus company treasuries — a rough
+        gauge of how PROSPEROUS the town has grown. 0 in a coinless founding band."""
+        purse = sum(p.get("inv", {}).get("coin", 0) for p in self.people)
+        return round(purse + sum(c.get("coin", 0.0) for c in self.companies))
 
     def _work_ready(self, p, key, dt, work: float) -> bool:
         """Spread a piece of manual labour over visible game-time: returns True (and resets the
@@ -7824,6 +7846,18 @@ if __name__ == "__main__":
     # the city reads as folk at their trades (the commute logic itself is unit-tested separately).
     employed = sum(1 for p in wt2.people if p.get("works_at"))
     print(f"  go-to-work test: {employed} folk employed at a factory -> {'OK' if employed >= 4 else 'FAILED'}")
+
+    # COMPANY GROWTH + PROSPERITY — flush companies take on the settled unemployed, so the workforce
+    # and the town's WEALTH swell over time (the fast-built city visibly develops).
+    grow_w0 = sum(len(c.get("workers", [])) for c in wt2.companies)
+    grow_wealth0 = wt2._town_wealth()
+    for _gd in range(20):
+        wt2._tick_companies(1440.0)
+    grow_w1 = sum(len(c.get("workers", [])) for c in wt2.companies)
+    grow_wealth1 = wt2._town_wealth()
+    grow_ok = grow_w1 > grow_w0 and grow_wealth1 > grow_wealth0
+    print(f"  company-growth test: workers {grow_w0}->{grow_w1} town-wealth {grow_wealth0}->{grow_wealth1} "
+          f"-> {'OK' if grow_ok else 'FAILED'}")
 
     # DEEP DESIGNER-AI TEST — the design layer authors the WHOLE civic vocabulary (homes → FACTORIES),
     # and the fast-build raises the band's OWN designs (not just the built-ins). Offline we drive

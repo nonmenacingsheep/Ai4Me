@@ -1233,7 +1233,8 @@ async def api_world_ways():
                          "purpose": ab.get("purpose", "")} for ab in w.authored_blueprints],
             "companies": [{"name": c.get("name"), "kind": c.get("kind"), "good": c.get("good"),
                            "workers": len(c.get("workers", [])), "coin": round(c.get("coin", 0.0))}
-                          for c in getattr(w, "companies", [])]}
+                          for c in getattr(w, "companies", [])],
+            "wealth": w._town_wealth()}
 
 
 @app.get("/api/world/recipes")
