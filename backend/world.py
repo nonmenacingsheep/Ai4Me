@@ -5276,6 +5276,151 @@ class World:
         self._note("build", f"{by} placed a {bp['name']} at ({x},{y}).")
         return {"ok": True, "result": f"placed a {bp['name']} at ({x},{y})", "struct": sid}
 
+    # ════════════════════════════════════════════════════════════════════════════
+    #  FAST-BUILD — the designer lays out a whole settlement and it's STAMPED at once,
+    #  so a village → town → city appears in one stroke (for fast iteration/testing).
+    # ════════════════════════════════════════════════════════════════════════════
+    def _stamp_building(self, bp_id, px, py, owner_id=None, communal=False):
+        """Stamp a FINISHED building instantly as a DONE SITE (not just a structure) centred at
+        (px,py), so the home/function/render logic all recognise it like a hand-raised one. Returns
+        the site dict, or None if the footprint won't fit there."""
+        if bp_id not in BLUEPRINTS:
+            return None
+        bp = BLUEPRINTS[bp_id]
+        bw, bh = len(bp["layout"][0]), len(bp["layout"])
+        ox, oy = int(px) - bw // 2, int(py) - bh // 2
+        tasks, core = self._blueprint_tasks(bp_id, ox, oy)
+        if not tasks:
+            return None
+        for t in tasks:
+            if t["layer"] == "roof":
+                self.roofs.add((t["x"], t["y"]))
+            else:
+                self.blocks[(t["x"], t["y"])] = t["code"]
+        site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": bp_id, "name": bp["name"],
+                "ox": int(ox), "oy": int(oy), "by": "the planners",
+                "core": [int(core[0]), int(core[1])] if core else None,
+                "insul": float(bp.get("insulation", 1.0)),
+                "tasks": tasks, "done": True, "t": round(self.clock, 1),
+                "communal": bool(communal or bp.get("communal"))}
+        if owner_id is not None:
+            site["owner"] = owner_id
+        if bp_id == "well" and core and self._in(int(core[0]), int(core[1])):
+            self.water[int(core[1]), int(core[0])] = WATER_RIVER   # a well is a real drinking source (the _finish_site fill is skipped on an instant stamp)
+        self.sites.append(site)
+        self.version += 1
+        return site
+
+    def _town_home_bps(self):
+        """Dwelling templates to fill a town with — the band's OWN authored home design first (so the
+        designer's work is used), then the built-in cabin/hut."""
+        a = self._authored_for("home")
+        return ([a] if a and a in BLUEPRINTS else []) + ["cabin", "hut"]
+
+    def _town_civic_bps(self):
+        """Civic templates for a town — each is the band's authored design for that role if it has one,
+        else the built-in form, plus a well/market/inn."""
+        out = []
+        for fn, builtin in (("hall", "gathering"), ("workshop", "workshop"),
+                            ("storehouse", "storehouse"), ("smithy", "smithy"), ("watchtower", "watchtower")):
+            bp = self._authored_for(fn) or builtin
+            if bp in BLUEPRINTS:
+                out.append(bp)
+        out += [b for b in ("well", "market", "inn") if b in BLUEPRINTS]
+        return out
+
+    def _find_town_site(self):
+        """A big DRY clearing with water in reach — room to actually lay out a town. Samples grassland
+        and scores each by how much open land surrounds it (so a town isn't crammed against a lake)."""
+        land = np.argwhere((self.water == WATER_NONE) & (self.biome == B["grassland"]))
+        if len(land) == 0:
+            land = np.argwhere(self.water == WATER_NONE)
+        best, bestscore = None, -1
+        for _ in range(80):
+            yy, xx = land[int(self.rng.integers(len(land)))]
+            cx, cy = int(xx), int(yy)
+            if not self._water_within(cx, cy, 28):                  # folk still need a drink in reach
+                continue
+            x0, y0 = max(0, cx - 34), max(0, cy - 34)
+            x1, y1 = min(W, cx + 34), min(H, cy + 34)
+            dry = int((self.water[y0:y1, x0:x1] == WATER_NONE).sum())   # buildable room around here
+            if dry > bestscore:
+                best, bestscore = (cx, cy), dry
+        if best:
+            return best
+        yy, xx = land[len(land) // 2]
+        return int(xx), int(yy)
+
+    def build_town(self, cx=None, cy=None, tier="town", populate=True):
+        """FAST-BUILD: lay out and instantly STAMP a whole settlement — a road grid, a paved civic
+        square, civic buildings near the heart and homes around them (using the band's AUTHORED designs
+        where it has them, else the built-ins), and optionally folk to live in each home. So a village
+        / town / city springs up in one stroke for quick iteration. Returns a small summary."""
+        if cx is None or cy is None:
+            cx, cy = self._find_town_site()
+        cx, cy = int(cx), int(cy)
+        tiers = {"village": dict(r=12, homes=6, civic=2),
+                 "town":    dict(r=20, homes=18, civic=6),
+                 "city":    dict(r=32, homes=44, civic=12)}
+        spec = tiers.get(tier, tiers["town"])
+        R, want_homes, want_civic = spec["r"], spec["homes"], spec["civic"]
+        STRIDE = 6
+        # 1) a road GRID over dry, in-bounds tiles within a roughly round radius
+        for gx in range(cx - R, cx + R + 1):
+            for gy in range(cy - R, cy + R + 1):
+                if abs(gx - cx) + abs(gy - cy) > R:
+                    continue
+                if (((gx - cx) % STRIDE == 0) or ((gy - cy) % STRIDE == 0)) \
+                        and self._in(gx, gy) and self.water[gy, gx] == WATER_NONE \
+                        and (gx, gy) not in self.blocks:
+                    self.roads[(gx, gy)] = 1.0
+        # 2) a paved civic SQUARE at the heart
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                if self._in(cx + dx, cy + dy) and self.water[cy + dy, cx + dx] == WATER_NONE:
+                    self.roads[(cx + dx, cy + dy)] = 1.0
+        # 3) building PLOTS = cell centres between the roads, nearest the heart first
+        plots = []
+        span = R // STRIDE + 1
+        for k in range(-span, span + 1):
+            for j in range(-span, span + 1):
+                px, py = cx + k * STRIDE + STRIDE // 2, cy + j * STRIDE + STRIDE // 2
+                d = abs(px - cx) + abs(py - cy)
+                if d <= R and self._in(px, py) and self.water[py, px] == WATER_NONE:
+                    plots.append((d, px, py))
+        plots.sort()
+        civic_bps, home_bps = self._town_civic_bps(), self._town_home_bps()
+        homes = civic = souls = 0
+        ci = hi = 0
+        for d, px, py in plots:
+            if civic < want_civic and civic_bps:                  # civic near the heart
+                site = self._stamp_building(civic_bps[ci % len(civic_bps)], px, py, communal=True)
+                if site:
+                    civic += 1; ci += 1
+                    continue
+            if homes < want_homes:                                 # then homes around
+                site = self._stamp_building(home_bps[hi % len(home_bps)], px, py)
+                if site is None:
+                    site = self._stamp_building("hut", px, py)      # fall back to the smallest footprint
+                if site:
+                    homes += 1; hi += 1
+                    if populate:
+                        floor = [(t["x"], t["y"]) for t in site["tasks"] if t["code"] == BLOCK_FLOOR]
+                        ax, ay = (site["core"][0], site["core"][1]) if site.get("core") else (floor[0] if floor else (px, py))
+                        owner = None
+                        for _ in range(int(self.rng.integers(1, 3))):   # a household of 1–2 adults
+                            q = self._add_person(int(ax), int(ay), age=float(self.rng.integers(ADULT_AGE + 200, ADULT_AGE + 1400)))
+                            q["home"] = (int(ax), int(ay))
+                            q["home_struct"] = site["id"]
+                            q["insul"] = site["insul"]
+                            if owner is None:
+                                owner = q["id"]
+                            souls += 1
+                        site["owner"] = owner
+        self._tick_settlements()                                   # fold the new homes into a settlement
+        self.version += 1
+        return {"ok": True, "centre": [cx, cy], "tier": tier, "homes": homes, "civic": civic, "souls": souls}
+
     def _work_ready(self, p, key, dt, work: float) -> bool:
         """Spread a piece of manual labour over visible game-time: returns True (and resets the
         timer) only once `work` game-minutes have accrued at this task. Keyed by `key`, so
@@ -6845,6 +6990,7 @@ class World:
             "  <plant>x y species r</plant>  seed flora in radius r (grass|oak|pine|reeds|palm|cactus|shrub)\n"
             "  <person>x y n</person>  bring n people into being near (x,y); they forage, drink, rest and can die\n"
             "  <whisper>x y a thought to slip into a nearby soul</whisper>  (lands as a vivid memory they weigh when next they decide — inspiration, not a command)\n"
+            "  <build_town>tier</build_town>  FAST-BUILD a whole settlement at once (tier = village|town|city): roads, a civic square, civic buildings, homes and folk to live in them, designed and stamped in one stroke\n"
             "Act only when you mean to; the world is alive and persists between visits."
         )
 
@@ -7483,6 +7629,19 @@ if __name__ == "__main__":
     civic_id_ok = id_wants and id_bad and id_set and id_once and id_stored
     print(f"  civic-identity test (Phase D.2): respected-only={id_wants} rejects-incomplete={id_bad} "
           f"names={id_set} once={id_once} stored={id_stored} -> {'OK' if civic_id_ok else 'FAILED'}")
+
+    # FAST-BUILD — the designer's instant settlement: one stroke stamps roads + a civic square + civic
+    # buildings + homes + folk, so a village→town→city appears at once for fast iteration/testing.
+    wt2 = World().generate(seed=42)
+    bt = wt2.build_town(tier="town")
+    bt_homes = sum(1 for s in wt2.sites if s.get("done") and not s.get("communal"))
+    bt_civic = sum(1 for s in wt2.sites if s.get("done") and s.get("communal"))
+    bt_souls = sum(1 for p in wt2.people if p.get("home_struct") and any(s["id"] == p["home_struct"] for s in wt2.sites))
+    bt_home_ok = bool(wt2.people) and any(wt2._home_floor(p) for p in wt2.people if p.get("home_struct"))
+    bt_ok = (bt["ok"] and bt_homes >= 12 and bt_civic >= 3 and bt_souls >= bt_homes
+             and len(wt2.roads) > 100 and bt_home_ok)
+    print(f"  fast-build town test: homes={bt_homes} civic={bt_civic} souls={bt_souls} "
+          f"roads={len(wt2.roads)} homes-liveable={bt_home_ok} -> {'OK' if bt_ok else 'FAILED'}")
 
     # Axe is EARNED, not innate (P-competence): no one is born knowing how to make a tool; a soul
     # WORKS IT OUT after chopping wood by hand KNAP_CHOPS times, and it then spreads by teaching.

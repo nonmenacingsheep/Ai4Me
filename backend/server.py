@@ -1302,6 +1302,26 @@ async def api_world_template_place(req: Request):
     return res
 
 
+@app.post("/api/world/build_town")
+async def api_world_build_town(req: Request):
+    """FAST-BUILD: instantly stamp a whole settlement — roads, a civic square, civic buildings, homes
+    and folk to live in them — so a village/town/city springs up in one stroke for quick iteration.
+    Body: {tier: village|town|city, x?, y?}. Uses the band's AUTHORED designs where it has them."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "result": "World is off — enable it in Settings."}
+    body = await req.json()
+    w = world_store.get_world()
+    tier = str(body.get("tier", "town")).strip().lower()
+    x, y = body.get("x"), body.get("y")
+    res = await asyncio.to_thread(w.build_town, (int(x) if x is not None else None),
+                                  (int(y) if y is not None else None), tier, True)
+    if res.get("ok"):
+        await broadcast({"type": "world_changed",
+                         "changes": [f"a {tier} of {res.get('homes', 0)} homes and "
+                                     f"{res.get('civic', 0)} civic buildings sprang up"]})
+    return res
+
+
 @app.post("/api/world/reset")
 async def api_world_reset(req: Request):
     """Generate a fresh world (new seed). Guarded by the capability toggle."""
@@ -2185,6 +2205,15 @@ def _apply_world_action(spec: dict, by: str) -> str:
             return res.get("result", "") if res.get("ok") else ""
         if tool == "place_power":
             return w.place_power(str(spec.get("kind", "generator")).strip().lower(), x, y, by=by)
+        if tool == "build_town":                       # FAST-BUILD: a whole settlement in one stroke
+            tier = str(spec.get("tier", "town")).strip().lower()
+            if tier not in ("village", "town", "city"):
+                tier = "town"
+            cx = x if (spec.get("x") is not None) else None
+            cy = y if (spec.get("y") is not None) else None
+            res = w.build_town(cx, cy, tier, True)
+            return (f"{by} raised a whole {tier} in one stroke — {res.get('homes', 0)} homes, "
+                    f"{res.get('civic', 0)} civic buildings, {res.get('souls', 0)} folk") if res.get("ok") else ""
     except Exception as e:
         print(f"[world] action {tool!r} failed: {e}")
     return ""
@@ -2200,6 +2229,7 @@ _WORLD_ARGS = {
     "person": ("x", "y", "n"),
     "whisper": ("x", "y", "text"),
     "place_power": ("x", "y", "kind"),
+    "build_town": ("tier",),
 }
 
 
@@ -2513,6 +2543,7 @@ _HIDDEN_SPECS = [
     ("plant", "<plant>", "</plant>", False),           # World: seed flora
     ("person", "<person>", "</person>", False),        # World: bring people into being
     ("whisper", "<whisper>", "</whisper>", False),     # World: nudge a soul (no-op until people)
+    ("build_town", "<build_town>", "</build_town>", False),  # World: FAST-BUILD a whole village/town/city at once
 ]
 
 # <code file="name.py">…python…</code> — parse the filename + body out of the block.
