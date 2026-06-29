@@ -570,6 +570,8 @@ CO_GOOD_PRICE      = 2.0     # coin a unit of goods fetches at market
 CO_WAGE            = 3.0     # coin a worker is paid per game-day
 CO_HIRE_AT         = 24      # treasury coin at which a flush company takes on another hand
 CO_MAX_WORKERS     = 8       # most hands one company employs (then it's at capacity)
+CO_FOUND_MIN_HOUSED = 6      # housed adults a band needs before an enterprising soul founds a company
+CO_FOUND_PER        = 8      # one home-grown company per this many housed adults (so industry scales with the town)
 # Self-authored projects ("aspirations") — a settled, content soul forms its OWN goal beyond mere
 # survival (tidy the ground round its home, plant a garden by the door) and a PLAN of primitive
 # skills carries it out. This is the open-vocabulary layer: the rule body seeds a few projects so
@@ -1455,6 +1457,7 @@ class World:
             self._tick_governance()                                # judge the commons-norm once a day
             self._decay_footfall()                                 # worn paths fade where feet stop falling
             self._tick_settlements()                               # keep the band's town (name/centre/roll) current
+            self._maybe_found_company()                            # a prosperous band grows its own industry
             self._tick_companies(1440.0)                           # the town's industry: goods made, sold, wages paid
             self._last_pest = self.clock
         season_now = self.season()
@@ -4573,10 +4576,12 @@ class World:
     def _civilization_era(self) -> str:
         """The band's place on the long road from stone to power — read from what it has BUILT and
         LEARNED, so a watcher can feel the civilisation advancing. A derived stat (like population),
-        no mechanical effect: Stone Age -> Founding Age -> Age of Craft -> Age of Iron -> Age of Power."""
+        no mechanical effect: Stone -> Founding -> Craft -> Iron -> Industry -> Power."""
         if (any(s.get("kind") in POWER_SOURCES for s in self.structures)
                 or WONDER_RECIPE in self.known_recipes):
             return "Age of Power"                          # a generator/reactor stands, or its secret is known
+        if self.companies or self._has_function("factory"):
+            return "Age of Industry"                       # factories and companies turn raws into goods for wages
         if self._has_function("smithy"):
             return "Age of Iron"                           # a forge to smelt ore and work metal
         if self._has_function("workshop"):
@@ -5595,6 +5600,32 @@ class World:
         gauge of how PROSPEROUS the town has grown. 0 in a coinless founding band."""
         purse = sum(p.get("inv", {}).get("coin", 0) for p in self.people)
         return round(purse + sum(c.get("coin", 0.0) for c in self.companies))
+
+    def _maybe_found_company(self):
+        """In a PROSPEROUS, money-using band, an enterprising soul founds a COMPANY on an industrial
+        building the band has already raised (a workshop/smithy/factory), taking on a few of the
+        settled unemployed — so an OFFLINE band evolves toward industry on its own, not only via the
+        fast-build. Gated on money + a real settled population, so it's inert in a small founding band."""
+        if not self.money_invented:
+            return
+        housed = [p for p in self.people if p.get("home_struct") and p.get("age", 0) >= ADULT_AGE]
+        if len(housed) < CO_FOUND_MIN_HOUSED or len(self.companies) >= max(1, len(housed) // CO_FOUND_PER):
+            return
+        runs = {"workshop": "sawmill", "smithy": "forge", "factory": "mill"}   # what each building can run as
+        fac = next((s for s in self.sites if s.get("done") and self._bp_function(s.get("bp")) in runs), None)
+        if fac is None:
+            return
+        founder = max(housed, key=lambda q: q.get("renown", 0.0))
+        c = self._found_company(founder["id"], runs[self._bp_function(fac["bp"])], fac["id"])
+        c["site_at"] = [int(fac["ox"]) + 2, int(fac["oy"]) + 2]
+        employed = {w for co in self.companies for w in co.get("workers", [])}
+        for q in housed:                                   # take on a few of the settled unemployed
+            if len(c["workers"]) >= 3:
+                break
+            if q["id"] not in employed and not q.get("works_at"):
+                c["workers"].append(q["id"])
+                q["works_at"] = list(c["site_at"])
+                employed.add(q["id"])
 
     def _work_ready(self, p, key, dt, work: float) -> bool:
         """Spread a piece of manual labour over visible game-time: returns True (and resets the
@@ -7677,7 +7708,7 @@ if __name__ == "__main__":
     # CIVILISATION ERA — a derived stat (no effect) reading the band's stage from stone to power,
     # so a watcher can feel the civilisation advance: Stone -> Founding -> Craft -> Iron -> Power.
     we = World().generate(seed=5); we.people = []; we.sites = []; we.structures = []
-    we.known_recipes = set(); we.settlements = []
+    we.known_recipes = set(); we.settlements = []; we.companies = []
     era_stone = we._civilization_era() == "Stone Age"
     we.sites = [{"id": "h", "bp": "gathering", "done": True, "communal": True, "ox": 1, "oy": 1}]
     era_found = we._civilization_era() == "Founding Age"
@@ -7685,11 +7716,13 @@ if __name__ == "__main__":
     era_craft = we._civilization_era() == "Age of Craft"
     we.sites.append({"id": "sm", "bp": "smithy", "done": True, "ox": 3, "oy": 3})
     era_iron = we._civilization_era() == "Age of Iron"
+    we.sites.append({"id": "fac", "bp": "factory", "done": True, "ox": 4, "oy": 4})
+    era_industry = we._civilization_era() == "Age of Industry"
     we.structures = [{"kind": "reactor", "x": 5, "y": 5}]
     era_power = we._civilization_era() == "Age of Power"
-    era_ok = era_stone and era_found and era_craft and era_iron and era_power
+    era_ok = era_stone and era_found and era_craft and era_iron and era_industry and era_power
     print(f"  civilisation-era test: stone={era_stone} founding={era_found} craft={era_craft} "
-          f"iron={era_iron} power={era_power} -> {'OK' if era_ok else 'FAILED'}")
+          f"iron={era_iron} industry={era_industry} power={era_power} -> {'OK' if era_ok else 'FAILED'}")
 
     # LAWS (Phase B) — a renown-recognised LEADER, facing a recurring wrong, enacts a law the engine
     # then judges by REPUTATION only. An unenforceable/duplicate law is set aside; the unable are
@@ -7858,6 +7891,14 @@ if __name__ == "__main__":
     grow_ok = grow_w1 > grow_w0 and grow_wealth1 > grow_wealth0
     print(f"  company-growth test: workers {grow_w0}->{grow_w1} town-wealth {grow_wealth0}->{grow_wealth1} "
           f"-> {'OK' if grow_ok else 'FAILED'}")
+
+    # NATURAL INDUSTRY — a prosperous, money-using band founds companies on its own workshops (offline
+    # evolution toward industry). INERT without money, which the founding band never invents → no
+    # company forms in the canary → survival untouched. (The full founding path is unit-tested.)
+    wn2 = World().generate(seed=42)
+    wn2._maybe_found_company()
+    nat_ok = len(wn2.companies) == 0 and not wn2.money_invented
+    print(f"  natural-industry test: inert-without-money={nat_ok} -> {'OK' if nat_ok else 'FAILED'}")
 
     # DEEP DESIGNER-AI TEST — the design layer authors the WHOLE civic vocabulary (homes → FACTORIES),
     # and the fast-build raises the band's OWN designs (not just the built-ins). Offline we drive
