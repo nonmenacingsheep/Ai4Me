@@ -350,6 +350,11 @@ BLOCK_NAMES = {BLOCK_FLOOR: "floor", BLOCK_WALL: "wall", BLOCK_DOOR: "door",
 BLOCK_CHARS = {".": BLOCK_EMPTY, "F": BLOCK_FLOOR, "W": BLOCK_WALL,
                "D": BLOCK_DOOR, "O": BLOCK_WINDOW, "#": BLOCK_FENCE, "L": BLOCK_LEAF}
 GLYPH_CORE = "C"
+# FURNITURE glyphs — a designed building can carry its OWN furnishings: each is a walkable FLOOR tile
+# with a piece of furniture set on it, so a home is built complete (a bed inside) instead of souls
+# trekking off to "furnish" it separately (which kept dropping beds out in the open). The DESIGNER AI
+# draws these into a layout; the built-in homes use them too.
+FURNITURE_CHARS = {"b": "bed", "t": "table", "c": "chair", "x": "chest"}
 # Material a single block costs (item, qty). Wood/fiber/leaf based so a band can
 # build straight from what it forages, no workshop required.
 BLOCK_COST = {BLOCK_FLOOR: ("wood", 1), BLOCK_WALL: ("wood", 2), BLOCK_DOOR: ("wood", 2),
@@ -375,14 +380,14 @@ BLUEPRINTS = {
     ]),
     "hut": dict(name="Hut", roof=True, insulation=1.0, layout=[
         "WDW",
-        "WFW",
+        "WbW",                                              # a bed, built right in (no more beds in the open)
         "WWW",
     ]),
     "cabin": dict(name="Cabin", roof=True, insulation=1.0, layout=[
         "WWDWW",
-        "WFFFW",
-        "WFFFW",
-        "WFFFW",
+        "WbFbW",                                            # two beds…
+        "WcFcW",                                            # …two chairs…
+        "WFtFW",                                            # …and a table — a home furnished by design
         "WWWWW",
     ]),
     # A communal Gathering Hall — not a home but a MONUMENT the band shares: a big, costly,
@@ -579,7 +584,9 @@ CO_FOUND_PER        = 8      # one home-grown company per this many housed adult
 ASPIRE_COOLDOWN = 2880.0      # game-min before a soul takes on another beautify-project (~2 days)
 ASPIRE_RING = 2              # how far around home a tidy/garden project reaches
 ASPIRE_MAX_STEPS = 10        # cap a plan's length so a project is bounded work
-ASPIRE_KINDS = ("tidy", "garden", "art", "furnish")   # the executable project vocabulary the LLM can author into
+ASPIRE_KINDS = ("tidy", "garden", "art")   # the executable project vocabulary the LLM can author into
+# (FURNISH was retired: furniture is now built INTO a home's design — see FURNITURE_CHARS — so souls
+#  no longer trek off to "make beds" and drop them in the open. The kind is still handled for old saves.)
 DEFAULT_ASPIRE_GOAL = {"tidy": "tend the ground around my home",
                        "garden": "plant a garden by my door",
                        "art": "raise a grand work the whole band will marvel at",
@@ -3223,8 +3230,8 @@ class World:
                 return plan
         # OFFLINE / fallback — choose by TASTE: ambitious raise standing stones, curious plant a
         # garden, the orderly tidy the thicket. Each weighed by temperament, the best-fit chosen.
-        weights = {"furnish": 0.34 + 0.10 * self._household_size(p),   # a soul with family wants beds most
-                   "art": 0.30 + 0.55 * amb, "garden": 0.30 + 0.55 * cur, "tidy": 0.30 + 0.35 * (1.0 - cur)}
+        weights = {"art": 0.30 + 0.55 * amb, "garden": 0.30 + 0.55 * cur,   # (furnish retired — beds are by design)
+                   "tidy": 0.30 + 0.35 * (1.0 - cur)}
         for kind in sorted(weights, key=lambda k: -weights[k]):
             plan = build(kind, None)
             if plan:
@@ -3796,7 +3803,8 @@ class World:
         Ww = max(len(r) for r in layout)
         grid = [r.ljust(Ww, ".") for r in layout]
         solid = {"W", "O"}                                # walls & windows block; leaf is soft-passable
-        floors = [(x, y) for y in range(Hh) for x in range(Ww) if grid[y][x] in ("F", "C")]
+        walkable = {"F", "C"} | set(FURNITURE_CHARS)      # a furniture tile is a walkable floor too
+        floors = [(x, y) for y in range(Hh) for x in range(Ww) if grid[y][x] in walkable]
         if not floors:
             return False, "no floor"
         if Hh * Ww > 144 or len(floors) > 60:
@@ -4404,6 +4412,16 @@ class World:
                                  "cost": list(roof_cost), "done": False})
                     core = (tx, ty)
                     continue
+                furn = FURNITURE_CHARS.get(ch)
+                if furn:                                       # a furniture tile = a FLOOR with a piece set on it
+                    if bad(tx, ty):
+                        return None, None
+                    blocks.append({"x": tx, "y": ty, "code": int(BLOCK_FLOOR), "layer": "block",
+                                   "cost": list(BLOCK_COST[BLOCK_FLOOR]), "done": False, "furn": furn})
+                    if bp.get("roof"):
+                        roof.append({"x": tx, "y": ty, "code": int(BLOCK_FLOOR), "layer": "roof",
+                                     "cost": list(roof_cost), "done": False})
+                    continue
                 code = BLOCK_CHARS.get(ch, BLOCK_EMPTY)
                 if code == BLOCK_EMPTY:
                     continue
@@ -4984,6 +5002,8 @@ class World:
         else:
             self.blocks[(task["x"], task["y"])] = task["code"]
             self._clear_ground(task["x"], task["y"])     # trample the growth under & around the tile
+            if task.get("furn"):                         # a furnished tile: set the bed/table/… on it
+                self.decor[(task["x"], task["y"])] = task["furn"]
         task["done"] = True
         self._grow_skill(p, "building", CHILD_SKILL_GAIN)   # hands learn the trade by laying tile
         if site.get("owner") and p.get("id") != site["owner"]:   # remember who built it FOR the owner
@@ -5288,7 +5308,7 @@ class World:
         w = len(layout[0])
         if not (1 <= w <= 16):
             return False
-        ok = set(BLOCK_CHARS) | {GLYPH_CORE}
+        ok = set(BLOCK_CHARS) | {GLYPH_CORE} | set(FURNITURE_CHARS)   # …including furniture glyphs (b/t/c/x)
         return all(isinstance(r, str) and len(r) == w and all(c in ok for c in r) for r in layout)
 
     def list_templates(self) -> list:
@@ -5353,6 +5373,8 @@ class World:
                 self.roofs.add((t["x"], t["y"]))
             else:
                 self.blocks[(t["x"], t["y"])] = t["code"]
+                if t.get("furn"):
+                    self.decor[(t["x"], t["y"])] = t["furn"]
         sid = self._add_structure(bp_id, ox, oy, by=by)
         self.version += 1
         self._note("build", f"{by} placed a {bp['name']} at ({x},{y}).")
@@ -5379,6 +5401,8 @@ class World:
                 self.roofs.add((t["x"], t["y"]))
             else:
                 self.blocks[(t["x"], t["y"])] = t["code"]
+                if t.get("furn"):
+                    self.decor[(t["x"], t["y"])] = t["furn"]
         site = {"id": "b_" + uuid.uuid4().hex[:8], "bp": bp_id, "name": bp["name"],
                 "ox": int(ox), "oy": int(oy), "by": "the planners",
                 "core": [int(core[0]), int(core[1])] if core else None,
@@ -6631,13 +6655,15 @@ class World:
                 continue
             if rid in tool_rids and not self._can_make_tools(p):
                 continue                                       # tools are the toolmaker's craft (tool-gating)
-            is_station = r["out"] in crafting.STATION_KINDS
-            if is_station:
-                if r["out"] in built or inv.get(rid, 0) >= 1:  # one of each station is enough — keep climbing
+            out = "axe" if rid == "crude_axe" else r["out"]    # the OUTPUT ITEM — cap on THIS, not the recipe id.
+            is_station = out in crafting.STATION_KINDS         # (crude_axe's recipe says "crude_axe" but it MAKES
+            if is_station:                                     #  the "axe" item, so capping on the recipe id never
+                #                                                 fired → it spewed 176 axes. Cap on "axe".
+                if out in built or inv.get(out, 0) >= 1:       # one of each station is enough — keep climbing
                     continue
             else:
                 cap = 3 if r["tier"] <= 1 else 1               # keep a few staples; one of the finer goods
-                if inv.get(rid, 0) >= cap:
+                if inv.get(out, 0) >= cap:
                     continue
             if r["station"] and r["station"] not in stations:
                 continue
@@ -6678,6 +6704,7 @@ class World:
             if c["out"] not in stations:
                 stations.append(c["out"])
                 self._place_station_obj(p, c["out"])
+            p["inv"].pop(c["out"], None)                  # a station is PLACED in the home, not carried in the pack
         self.version += 1
         rid = c["rid"]
         p["craft"] = None

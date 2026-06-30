@@ -969,6 +969,8 @@ def author_building_messages(p: dict, ctx: dict) -> tuple[str, str]:
         "A plan is a grid of single-character GLYPHS, one string per row, every row the same length:\n"
         "  W = wall   F = floor (inside)   D = door (on an OUTER edge, opening outward)\n"
         "  O = window (set in a wall)   C = hearth / heart of the room   . = open ground (outside)\n"
+        "  FURNITURE (walkable floor with a piece set on it — design it RIGHT IN, indoors): "
+        "b = bed   t = table   c = chair   x = chest. A home should have a bed per soul.\n"
         "Pick a FUNCTION — the real job the building does for the band:\n"
         "  workshop  — a bench where tools and goods are crafted faster\n"
         "  storehouse — keeps the band's food from spoiling and safe from vermin\n"
