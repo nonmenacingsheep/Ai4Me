@@ -498,7 +498,10 @@ def catalog() -> dict:
 #  whole tree. Each rung is just a recipe id to aim for, cheapest/earliest first.
 # ════════════════════════════════════════════════════════════════════════════
 TECH_LADDER = [
-    "crude_axe", "stick", "workbench", "plank", "stone_axe", "stone_pickaxe",
+    # rope (fiber → rope) sits before the stone tools that need it: the autonomous climber only
+    # auto-fetches RAW materials, so without rope on the ladder every stone/metal tool dead-ended on
+    # a missing rope it never thought to twist — the whole tool branch silently stalled at planks.
+    "crude_axe", "stick", "workbench", "plank", "rope", "stone_axe", "stone_pickaxe",
     "campfire", "cooked_meat", "kiln", "brick", "furnace", "charcoal",
     "copper_ingot", "copper_axe", "tin_ingot", "bronze_ingot", "bronze_axe",
     "forge", "iron_ingot", "iron_axe", "iron_pickaxe", "loom", "thread", "cloth",

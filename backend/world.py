@@ -3660,6 +3660,22 @@ class World:
         inv = p["inv"]
         hx, hy = p["home"]
         site = self._person_site(p)
+        if site is None and communal:
+            # Never found a SECOND building of a role the band already has. If one's STANDING there's
+            # nothing to found; if one's RISING, JOIN it when its crew has room, else stand down this
+            # beat and do other work. Capping duplication HERE (at founding) instead of by gating the
+            # WANT is what stops eight watchtowers from sprouting WITHOUT starving a communal build of
+            # the crew it needs to rise — every free hand is still pulled toward the ONE site. (A
+            # dwelling/commission is per-soul and never communal, so this only ever guards monuments.)
+            key = self._bp_function(bp_name) or bp_name
+            same = [s for s in self.sites if (self._bp_function(s.get("bp")) or s.get("bp")) == key]
+            if same:
+                rising = [s for s in same if not s.get("done")
+                          and len(self._site_crew(s["id"])) < CO_OP_CREW_MAX]
+                if not rising:
+                    return None                                # finished, or rising with a full crew — don't duplicate
+                twin = min(rising, key=lambda s: abs(s["ox"] - x) + abs(s["oy"] - y))
+                p["site"], site = twin["id"], twin
         if site is None:                                       # no footprint yet — lay one at home
             if p.get("build_cd", 0) > self.clock:              # nowhere to build last time; bide
                 return None
@@ -3950,6 +3966,20 @@ class World:
         if my_site is not None and my_site.get("commission"):
             return {"kind": "commission", "bp": my_site["bp"], "client": my_site.get("owner"),
                     "why": "finish the home I'm raising for them"}
+        # OWN HOME FIRST — a soul perfects its dwelling up to a snug CABIN before turning to communal
+        # works. This climb used to be the LAST fallback, so any soul with a vocation was forever handed
+        # a communal monument it couldn't crew alone (a tiny band rarely keeps two builders at one site),
+        # and so NONE of them ever climbed past a hut — the band flatlined (cabins=0, workshops=0). The
+        # climb is NON-communal (a lone soul raises it tile by tile, no crew), so it reliably advances
+        # every settled soul's home; the workshop/storehouse/hall ambitions below then fire once a soul
+        # is cabin-housed — by which point the larger, settled band can actually crew them. (A build
+        # already underway is honoured above, so this never abandons a half-raised hall mid-wall.)
+        cabin_i = DWELLING_LADDER.index("cabin")
+        if i < cabin_i:
+            nxt = DWELLING_LADDER[i + 1]
+            bp_id = self._design_dwelling(p, nxt)
+            return {"kind": "dwelling", "bp": bp_id, "rung": nxt,
+                    "why": f"design and raise a {BLUEPRINTS[bp_id]['name'].lower()} to fit my own"}
         # A TOOLMAKER's specialty project: raise the communal WORKSHOP (the band's bench) if there
         # isn't one yet — gear, tools and everyone's crafting go faster beside it. It's their
         # answer to the ambitious soul's gathering hall.
@@ -7560,6 +7590,22 @@ def restore_world(sid: str) -> "World | None":
 # ════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     import sys
+    # Reproducible canary. A handful of decision paths iterate string sets, whose order Python
+    # randomizes per-process (PYTHONHASHSEED) — harmless variety for the LIVE sandbox, but it made
+    # the test harness swing run-to-run so a real change couldn't be told from noise. The harness
+    # therefore re-execs itself ONCE with a pinned hash seed, so `python world.py` is byte-for-byte
+    # repeatable and A/B'ing against a stashed baseline is trustworthy. (The live game never does this.)
+    if os.environ.get("PYTHONHASHSEED") != "0":
+        import subprocess
+        sys.exit(subprocess.run([sys.executable, *sys.argv],
+                                env={**os.environ, "PYTHONHASHSEED": "0"}).returncode)
+    # Force UTF-8 output: the harness prints ✓/→/× glyphs, and a redirected run on a Windows cp1252
+    # console would otherwise crash mid-suite on the first one. (Cosmetic, but it aborted the tests.)
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     t0 = time.time()
     w = World().generate(seed=42)
     gen_ms = (time.time() - t0) * 1000
