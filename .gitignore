@@ -36,3 +36,6 @@ Thumbs.db
 *.bin
 *.pt
 *.safetensors
+
+# ─── Windows folder-view junk ─
+desktop.ini
