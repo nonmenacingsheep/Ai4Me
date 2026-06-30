@@ -1321,8 +1321,13 @@ const PRESET_DEFAULTS = {
   rose:    { accent: '#f472b6', bg: '#160810', orb: '#f472b6' },
   ocean:   { accent: '#2dd4bf', bg: '#061413', orb: '#2dd4bf' },
   mono:    { accent: '#9aa7b8', bg: '#0b0d12', orb: '#9aa7b8' },
+  crimson: { accent: '#dc2626', bg: '#160606', orb: '#dc2626' },
+  gold:    { accent: '#facc15', bg: '#141005', orb: '#facc15' },
+  lime:    { accent: '#84cc16', bg: '#0c1405', orb: '#84cc16' },
+  midnight:{ accent: '#4f7cff', bg: '#05060f', orb: '#4f7cff' },
+  orchid:  { accent: '#d946ef', bg: '#11061a', orb: '#d946ef' },
 };
-const ALL_PRESET_CLASSES = ['sky', 'warm', 'moody', 'magma', 'forge', 'foundry', 'hearth', 'forest', 'rose', 'ocean', 'mono']
+const ALL_PRESET_CLASSES = ['sky', 'warm', 'moody', 'magma', 'forge', 'foundry', 'hearth', 'forest', 'rose', 'ocean', 'mono', 'crimson', 'gold', 'lime', 'midnight', 'orchid']
   .map(p => 'chat-theme-' + p);
 
 // Each app-tab remembers its own full theme. Sky (chat) mirrors the backend —
@@ -1408,11 +1413,345 @@ function showTabTheme(view) {
   applyThemeObject(tabThemes[view] || TAB_DEFAULTS[view] || {});
 }
 
-// Backend echo for the SHARED Sky/chat theme (she or he changed it).
+// The accent colour a tab actually wears: its custom accent if set, else its
+// preset's accent. (Drives the per-tab nav hover tint.)
+function tabAccent(view) {
+  const t = tabThemes[view] || TAB_DEFAULTS[view] || emptyTheme();
+  if (t.accent && hexToRgb(t.accent)) return t.accent;
+  const d = PRESET_DEFAULTS[t.preset] || PRESET_DEFAULTS.default;
+  return d.accent;
+}
+// Stamp each nav item with its live theme colour so hover reflects customisation.
+function refreshTabColors() {
+  document.querySelectorAll('.nav-item[data-view]').forEach(n =>
+    n.style.setProperty('--tab-color', tabAccent(n.dataset.view)));
+}
+refreshTabColors();
+// Apply the saved theme for the starting tab right away, so a customised look
+// shows on launch instead of flashing default until the first tab switch / sync.
+showTabTheme(activeView);
+
+/* ═══════════════════════════════════════════════════════════════════
+   PER-TAB BACKGROUNDS — animated canvas effects + custom PNG/GIF images.
+   Stored locally (not synced to the backend, so big images don't travel).
+   ═══════════════════════════════════════════════════════════════════ */
+const BG_EFFECTS = ['embers', 'snow', 'stars', 'startrails', 'lavalamp'];
+const BINDER_LABELS = { chat:'Sky', mantle:'Mantle', notes:'Magma', forge:'Forge', foundry:'Foundry', hearth:'Hearth', world:'World', room:'Room' };
+
+let tabBackgrounds = (() => {
+  try { return JSON.parse(localStorage.getItem('tabBackgrounds') || '{}') || {}; } catch (_) { return {}; }
+})();
+// localStorage only holds the small config ({type}); the (potentially huge)
+// image data URLs live in IndexedDB so they can't exhaust the localStorage quota
+// and silently break theme persistence.
+const bgImages = {};   // view -> data URL, hydrated from IndexedDB on boot
+function saveTabBackgrounds() {
+  // never persist image data URLs into localStorage — strip them to {type} only
+  const light = {};
+  for (const k in tabBackgrounds) light[k] = { type: tabBackgrounds[k].type };
+  try { localStorage.setItem('tabBackgrounds', JSON.stringify(light)); return true; }
+  catch (_) { return false; }
+}
+const BGImageDB = {
+  _p: null,
+  _open() {
+    if (this._p) return this._p;
+    this._p = new Promise((res) => {
+      let req; try { req = indexedDB.open('ai4me-bg', 1); } catch (_) { return res(null); }
+      req.onupgradeneeded = () => { try { req.result.createObjectStore('images'); } catch (_) {} };
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => res(null);
+    });
+    return this._p;
+  },
+  async get(key) {
+    const db = await this._open(); if (!db) return null;
+    return new Promise((res) => {
+      try { const r = db.transaction('images', 'readonly').objectStore('images').get(key); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null); }
+      catch (_) { res(null); }
+    });
+  },
+  async set(key, val) {
+    const db = await this._open(); if (!db) return false;
+    return new Promise((res) => {
+      try { const r = db.transaction('images', 'readwrite').objectStore('images').put(val, key); r.onsuccess = () => res(true); r.onerror = () => res(false); }
+      catch (_) { res(false); }
+    });
+  },
+  async del(key) {
+    const db = await this._open(); if (!db) return;
+    try { db.transaction('images', 'readwrite').objectStore('images').delete(key); } catch (_) {}
+  },
+};
+
+// Lightweight particle engine for the animated effects.
+const TabBG = (() => {
+  const wrap = document.getElementById('tab-bg');
+  const canvas = document.getElementById('tab-bg-canvas');
+  const ctx = canvas ? canvas.getContext('2d') : null;
+  let raf = null, parts = [], effect = 'none', W = 0, H = 0, last = 0;
+
+  function resize() {
+    if (!canvas || !wrap) return;
+    const r = wrap.getBoundingClientRect();
+    W = r.width; H = r.height;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.max(1, Math.round(W * dpr));
+    canvas.height = Math.max(1, Math.round(H * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  let pole = { x: 0, y: 0 };
+  function make(initial) {
+    if (effect === 'embers') return { x: rnd(0, W), y: initial ? rnd(0, H) : H + rnd(0, 30), vx: rnd(-0.15, 0.15), vy: rnd(-0.6, -1.4), r: rnd(1, 2.6), life: 0, max: rnd(180, 420), sway: rnd(0, 6.28) };
+    if (effect === 'snow')   return { x: rnd(0, W), y: initial ? rnd(0, H) : -10, vx: rnd(-0.2, 0.2), vy: rnd(0.4, 1.1), r: rnd(1, 3), sway: rnd(0, 6.28), swaySpd: rnd(0.01, 0.03) };
+    return { x: rnd(0, W), y: rnd(0, H), r: rnd(0.6, 1.8), phase: rnd(0, 6.28), spd: rnd(0.01, 0.04) }; // stars
+  }
+  function spawn() {
+    if (effect === 'startrails') {
+      pole = { x: W * 0.72, y: H * 0.20 };
+      const diag = Math.hypot(W, H);
+      const n = Math.max(40, Math.min(300, Math.round((W * H) / 3500)));
+      const cols = ['214,224,255', '255,240,220', '255,255,255', '200,210,255', '255,224,200'];
+      parts = Array.from({ length: n }, () => ({
+        rad: rnd(8, diag * 1.05), a: rnd(0, 6.2832), r: rnd(0.5, 1.7),
+        bright: rnd(0.35, 1), col: cols[(Math.random() * cols.length) | 0],
+      }));
+      return;
+    }
+    if (effect === 'lavalamp') {
+      const minD = Math.min(W, H);
+      const n = Math.max(5, Math.min(11, Math.round(W / 120)));
+      parts = Array.from({ length: n }, () => ({
+        x: rnd(W * 0.2, W * 0.8), y: rnd(H * 0.2, H * 0.8),
+        r: rnd(minD * 0.07, minD * 0.14), temp: Math.random(),
+        vx: rnd(-0.1, 0.1), vy: rnd(-0.3, 0.3), ph: rnd(0, 6.28),
+      }));
+      return;
+    }
+    const density = effect === 'stars' ? 9000 : 14000;
+    const n = Math.max(24, Math.min(220, Math.round((W * H) / density)));
+    parts = Array.from({ length: n }, () => make(true));
+  }
+  // Long-exposure star trails: stars orbit a celestial pole, leaving glowing arcs.
+  function drawTrails(dt) {
+    ctx.globalCompositeOperation = 'destination-out';   // fade old trail (transparent-safe)
+    ctx.fillStyle = 'rgba(0,0,0,0.012)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+    const om = 0.0016 * dt;
+    for (const s of parts) {
+      s.a += om;
+      const x = pole.x + Math.cos(s.a) * s.rad, y = pole.y + Math.sin(s.a) * s.rad;
+      if (x < -6 || x > W + 6 || y < -6 || y > H + 6) continue;
+      const rr = s.r * 2.2;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, rr);
+      g.addColorStop(0, `rgba(${s.col},${s.bright})`);
+      g.addColorStop(1, `rgba(${s.col},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, y, rr, 0, 6.2832); ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  // Lava lamp: buoyant blobs heat at the bottom, rise, cool at the top, fall.
+  // A CSS SVG "goo" filter on the canvas merges/splits them like real wax.
+  function lavaColor(temp) {
+    const lerp = (a, b, t) => Math.round(a + (b - a) * t);
+    const cool = [224, 52, 74], mid = [255, 122, 24], hot = [255, 210, 63];
+    let c;
+    if (temp < 0.5) { const t = temp / 0.5; c = [lerp(cool[0], mid[0], t), lerp(cool[1], mid[1], t), lerp(cool[2], mid[2], t)]; }
+    else { const t = (temp - 0.5) / 0.5; c = [lerp(mid[0], hot[0], t), lerp(mid[1], hot[1], t), lerp(mid[2], hot[2], t)]; }
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+  function drawLava(dt) {
+    ctx.clearRect(0, 0, W, H);
+    for (const b of parts) {
+      if (b.y > H * 0.80) b.temp = Math.min(1, b.temp + 0.006 * dt);   // reheat at the base
+      if (b.y < H * 0.22) b.temp = Math.max(0, b.temp - 0.005 * dt);   // cool near the top
+      b.vy += (0.5 - b.temp) * 0.05 * dt;          // hot rises, cool sinks
+      b.vy *= 0.97; b.vy = Math.max(-1.6, Math.min(1.6, b.vy));
+      b.ph += 0.02 * dt; b.vx += Math.sin(b.ph) * 0.015; b.vx *= 0.95;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x < b.r) { b.x = b.r; b.vx *= -0.4; } else if (b.x > W - b.r) { b.x = W - b.r; b.vx *= -0.4; }
+      if (b.y < b.r) { b.y = b.r; b.vy *= -0.3; } else if (b.y > H - b.r) { b.y = H - b.r; b.vy *= -0.3; }
+    }
+    for (const b of parts) {
+      ctx.fillStyle = lavaColor(b.temp);
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 6.2832); ctx.fill();
+    }
+  }
+  function step(t) {
+    raf = requestAnimationFrame(step);
+    const dt = Math.min(50, t - last) / 16.67; last = t;
+    if (effect === 'startrails') { drawTrails(dt); return; }
+    if (effect === 'lavalamp') { drawLava(dt); return; }
+    ctx.clearRect(0, 0, W, H);
+    if (effect === 'embers') {
+      ctx.globalCompositeOperation = 'lighter';
+      for (const p of parts) {
+        p.life += dt; p.sway += 0.03 * dt;
+        p.x += (p.vx + Math.sin(p.sway) * 0.3) * dt; p.y += p.vy * dt;
+        const k = 1 - p.life / p.max;
+        if (p.y < -10 || k <= 0) Object.assign(p, make(false));
+        const a = Math.max(0, k) * (0.5 + 0.5 * Math.sin(p.life * 0.2));
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 3);
+        g.addColorStop(0, `rgba(255,200,120,${a})`);
+        g.addColorStop(0.4, `rgba(255,120,40,${a * 0.7})`);
+        g.addColorStop(1, 'rgba(255,80,20,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 3, 0, 6.2832); ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    } else if (effect === 'snow') {
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      for (const p of parts) {
+        p.sway += p.swaySpd * dt; p.x += (p.vx + Math.sin(p.sway) * 0.3) * dt; p.y += p.vy * dt;
+        if (p.y > H + 10) Object.assign(p, make(false));
+        ctx.globalAlpha = 0.75;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.2832); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    } else { // stars
+      ctx.globalCompositeOperation = 'lighter';
+      for (const p of parts) {
+        p.phase += p.spd * dt;
+        const a = 0.25 + 0.55 * (0.5 + 0.5 * Math.sin(p.phase));
+        ctx.fillStyle = `rgba(214,224,255,${a})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 6.2832); ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  }
+  function start(fx) {
+    if (!ctx) return;
+    stop();
+    effect = fx;
+    resize();
+    if (!W || !H) return;
+    spawn();
+    last = performance.now();
+    raf = requestAnimationFrame(step);
+  }
+  function stop() {
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    if (ctx && W && H) ctx.clearRect(0, 0, W, H);
+  }
+  window.addEventListener('resize', () => { if (raf) { resize(); spawn(); } });
+  return { start, stop };
+})();
+
+// Paint (or clear) the background for whichever tab is on screen.
+function applyTabBackground(view) {
+  const wrap = document.getElementById('tab-bg');
+  if (!wrap) return;
+  const cfg = tabBackgrounds[view] || { type: 'none' };
+  const img = bgImages[view];
+  wrap.classList.toggle('is-lava', cfg.type === 'lavalamp');   // CSS goo filter on the canvas
+  if (cfg.type === 'image' && img) {
+    TabBG.stop();
+    wrap.classList.add('is-image');
+    wrap.style.backgroundImage = `url("${img}")`;
+    wrap.style.display = 'block';
+  } else if (BG_EFFECTS.includes(cfg.type)) {
+    wrap.classList.remove('is-image');
+    wrap.style.backgroundImage = '';
+    wrap.style.display = 'block';   // must be shown before the canvas measures itself
+    TabBG.start(cfg.type);
+  } else {
+    TabBG.stop();
+    wrap.classList.remove('is-image');
+    wrap.style.backgroundImage = '';
+    wrap.style.display = 'none';
+  }
+}
+
+function setTabBackground(view, patch) {
+  const type = patch.type || 'none';
+  if (type === 'image' && patch.image) {
+    bgImages[view] = patch.image;
+    tabBackgrounds[view] = { type: 'image' };
+    BGImageDB.set(view, patch.image).then(ok => { if (!ok) themeToast?.('Couldn\'t save that image'); });
+  } else {
+    tabBackgrounds[view] = { type };
+    if (bgImages[view]) { delete bgImages[view]; BGImageDB.del(view); }
+  }
+  saveTabBackgrounds();
+  if (activeView === view) applyTabBackground(view);
+  syncBgControls();
+}
+
+function syncBgControls() {
+  const cfg = tabBackgrounds[editTarget] || { type: 'none' };
+  document.querySelectorAll('.bg-opt').forEach(b => b.classList.toggle('active', b.dataset.bg === cfg.type));
+  const info = document.getElementById('bg-image-info');
+  if (info) info.style.display = (cfg.type === 'image' && bgImages[editTarget]) ? '' : 'none';
+  const name = document.getElementById('bg-target-name');
+  if (name) name.textContent = BINDER_LABELS[editTarget] || editTarget;
+}
+
+document.getElementById('bg-options')?.addEventListener('click', (e) => {
+  const b = e.target.closest('.bg-opt'); if (!b) return;
+  if (b.dataset.bg === 'image') { document.getElementById('bg-image-input')?.click(); return; }
+  setTabBackground(editTarget, { type: b.dataset.bg });
+});
+document.getElementById('bg-image-input')?.addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => setTabBackground(editTarget, { type: 'image', image: reader.result });
+  reader.readAsDataURL(file);
+});
+document.getElementById('bg-image-clear')?.addEventListener('click', () => setTabBackground(editTarget, { type: 'none' }));
+
+// Boot: hydrate image backgrounds from IndexedDB (migrating any legacy data URLs
+// that were stored in localStorage), then paint the starting tab.
+applyTabBackground(activeView);   // effects show immediately; images after hydrate
+(async () => {
+  let migrated = false;
+  for (const v of Object.keys(tabBackgrounds)) {
+    const cfg = tabBackgrounds[v];
+    if (!cfg || cfg.type !== 'image') continue;
+    if (cfg.image) {                              // legacy data URL in localStorage → move to IDB
+      bgImages[v] = cfg.image; await BGImageDB.set(v, cfg.image);
+      tabBackgrounds[v] = { type: 'image' }; migrated = true;
+    } else {
+      const img = await BGImageDB.get(v);
+      if (img) bgImages[v] = img; else { tabBackgrounds[v] = { type: 'none' }; migrated = true; }
+    }
+  }
+  if (migrated) saveTabBackgrounds();
+  applyTabBackground(activeView);
+})();
+
+function chatThemeIsCustom(t) {
+  return !!t && (t.preset && t.preset !== 'default' || t.accent || t.bg || t.orb);
+}
+
+// Backend messages for the SHARED Sky/chat theme.
+//  • by 'init'  → the backend's saved copy on connect. We keep OUR locally-saved
+//    look (so it persists even if the backend rejected/forgot a preset) and push
+//    it back up to re-sync; we only adopt the backend's copy if ours is untouched.
+//  • by 'him'/'her' → a live change: adopt and persist it.
 function applyTheme(theme, by) {
-  tabThemes.chat = Object.assign(emptyTheme(), theme || {});
+  const backend = Object.assign(emptyTheme(), theme || {});
+  if (by === 'init') {
+    const local = tabThemes.chat || emptyTheme();
+    const same = JSON.stringify(local) === JSON.stringify(backend);
+    if (!same && chatThemeIsCustom(local)) {
+      sendTheme(local);                 // our saved look wins; sync it up to the backend
+    } else if (!same) {
+      tabThemes.chat = backend; currentTheme = backend; saveTabThemes();
+      if (activeView === 'chat') applyThemeObject(currentTheme);
+    }
+    refreshTabColors();
+    if (editTarget === 'chat') syncThemeControls();
+    return;
+  }
+  tabThemes.chat = backend;
   currentTheme = tabThemes.chat;
   saveTabThemes();
+  refreshTabColors();
   if (activeView === 'chat') applyThemeObject(currentTheme);
   if (editTarget === 'chat') syncThemeControls();
   if (by === 'her') themeToast('Aitha changed the look');
@@ -1433,6 +1772,7 @@ function syncThemeControls() {
   if (accent) accent.value = t.accent || d.accent;
   if (bg) bg.value = t.bg || d.bg;
   if (orb) orb.value = t.orb || d.orb;
+  syncBgControls();
 }
 
 function sendTheme(patch) {
@@ -1441,23 +1781,26 @@ function sendTheme(patch) {
   }
 }
 
-// Apply an edit to whichever tab the binder is pointed at. Sky routes through
-// the backend (shared with Aitha); the rest are local + persisted.
+// Apply an edit to whichever tab the binder is pointed at. Every tab now applies
+// + persists locally immediately; Sky ALSO syncs to the backend (shared with
+// Aitha) — so the look survives a restart even if the backend drops the change.
 function editTheme(patch) {
-  if (editTarget === 'chat') { sendTheme(patch); return; }  // echoes back via applyTheme
   tabThemes[editTarget] = Object.assign({}, tabThemes[editTarget], patch);
   saveTabThemes();
+  refreshTabColors();
   if (activeView === editTarget) applyThemeObject(tabThemes[editTarget]);
   syncThemeControls();
+  if (editTarget === 'chat') { currentTheme = tabThemes.chat; sendTheme(patch); }
 }
 
 function restoreTabDefault() {
   const def = Object.assign(emptyTheme(), TAB_DEFAULTS[editTarget]);
-  if (editTarget === 'chat') { sendTheme(def); return; }
   tabThemes[editTarget] = def;
   saveTabThemes();
+  refreshTabColors();
   if (activeView === editTarget) applyThemeObject(def);
   syncThemeControls();
+  if (editTarget === 'chat') { currentTheme = def; sendTheme(def); }
 }
 
 document.getElementById('theme-binder')?.addEventListener('click', (e) => {
@@ -1765,10 +2108,77 @@ navItems.forEach(item => {
   item.addEventListener('click', () => switchView(item.dataset.view));
 });
 
+/* ── Custom nav scrollbar — themed thumb whose glow rides the scroll position ── */
+(() => {
+  const wrap = document.querySelector('.nav-scroll-wrap');
+  const hub = document.getElementById('nav-hub');
+  const bar = document.getElementById('nav-scrollbar');
+  const thumb = document.getElementById('nav-scrollbar-thumb');
+  if (!wrap || !hub || !bar || !thumb) return;
+
+  function sync() {
+    const { scrollTop, scrollHeight, clientHeight } = hub;
+    const scrollable = scrollHeight > clientHeight + 1;
+    wrap.classList.toggle('scrollable', scrollable);
+    if (!scrollable) return;
+    const trackH = bar.clientHeight;
+    const th = Math.max(24, Math.round(trackH * clientHeight / scrollHeight));
+    const maxTop = trackH - th;
+    const top = Math.round((scrollTop / (scrollHeight - clientHeight)) * maxTop);
+    thumb.style.height = th + 'px';
+    thumb.style.transform = `translateY(${top}px)`;
+  }
+  let scrollTimer = null;
+  hub.addEventListener('scroll', () => {
+    sync();
+    wrap.classList.add('scrolling');
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => wrap.classList.remove('scrolling'), 900);
+  });
+  if (window.ResizeObserver) { try { new ResizeObserver(sync).observe(hub); } catch (_) {} }
+  window.addEventListener('resize', sync);
+
+  // drag the thumb to scroll
+  let dragY = 0, dragTop = 0, dragging = false;
+  thumb.addEventListener('pointerdown', (e) => {
+    dragging = true; dragY = e.clientY;
+    dragTop = (hub.scrollTop / (hub.scrollHeight - hub.clientHeight)) || 0;
+    thumb.setPointerCapture?.(e.pointerId);
+    wrap.classList.add('scrolling');
+    e.preventDefault();
+  });
+  thumb.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const trackH = bar.clientHeight - thumb.clientHeight;
+    if (trackH <= 0) return;
+    const frac = Math.min(1, Math.max(0, dragTop + (e.clientY - dragY) / trackH));
+    hub.scrollTop = frac * (hub.scrollHeight - hub.clientHeight);
+  });
+  const endDrag = (e) => { if (dragging) { dragging = false; thumb.releasePointerCapture?.(e.pointerId); } };
+  thumb.addEventListener('pointerup', endDrag);
+  thumb.addEventListener('pointercancel', endDrag);
+  setTimeout(sync, 0);
+  window.syncNavScrollbar = sync;   // let other code (collapse) re-sync
+})();
+
+/* ── Curly-brace handle: minimize / restore the bottom controls ── */
+(() => {
+  const brace = document.getElementById('brace-toggle');
+  if (!brace) return;
+  if (localStorage.getItem('controlsCollapsed') === '1') document.body.classList.add('controls-collapsed');
+  brace.addEventListener('click', () => {
+    const collapsed = document.body.classList.toggle('controls-collapsed');
+    try { localStorage.setItem('controlsCollapsed', collapsed ? '1' : '0'); } catch (_) {}
+    brace.title = collapsed ? 'Show controls' : 'Minimize controls';
+    setTimeout(() => window.syncNavScrollbar?.(), 320);   // nav gained/lost space
+  });
+})();
+
 function switchView(name) {
   activeView = name;
   // Each tab wears its own theme; switching re-themes the whole view.
   showTabTheme(name);
+  applyTabBackground(name);   // and its own background (effect or image)
   navItems.forEach(i => i.classList.toggle('active', i.dataset.view === name));
   Object.entries(views).forEach(([k, el]) => el && el.classList.toggle('active', k === name));
   if (name === 'notes' && !notesLoaded) { notesLoaded = true; loadNoteList(); }
@@ -3854,6 +4264,35 @@ var ptExit   = document.getElementById('pt-exit');
 var ptHint   = document.getElementById('pt-hint');
 let passthrough = false;
 
+// The hint fades out on its own after a few seconds, and returns whenever her
+// orb is grabbed / clicked. revealPtHint() shows it and (re)arms the fade.
+let ptHintTimer = null;
+const PT_HINT_LINGER = 7000;   // ms the hint stays before fading
+function revealPtHint() {
+  if (!ptHint) return;
+  ptHint.classList.remove('pt-hint-hidden');
+  clearTimeout(ptHintTimer);
+  ptHintTimer = setTimeout(() => ptHint.classList.add('pt-hint-hidden'), PT_HINT_LINGER);
+}
+
+// Scroll the wheel OVER her orb to resize HER (the orb only — the chat text is
+// never scaled). Anywhere else the wheel scrolls the conversation as normal.
+let ptOrbScale = (() => { const v = parseFloat(localStorage.getItem('ptOrbScale')); return (v >= 0.5 && v <= 2.5) ? v : 1; })();
+function applyPtOrbScale() {
+  document.documentElement.style.setProperty('--pt-orb-scale', String(ptOrbScale));
+}
+function onPtWheel(e) {
+  if (!passthrough) return;
+  if (settingsModal.classList.contains('open')) return;
+  // only intercept the wheel while it's over her orb; otherwise let the chat scroll
+  if (!(e.target instanceof Element) || !e.target.closest('.orb-container')) return;
+  e.preventDefault();
+  ptOrbScale = Math.min(2.5, Math.max(0.5, ptOrbScale + (e.deltaY < 0 ? 0.08 : -0.08)));
+  applyPtOrbScale();
+  revealPtHint();
+  try { localStorage.setItem('ptOrbScale', String(ptOrbScale)); } catch (_) {}
+}
+
 function syncPassthroughControls() {
   if (!ptMicBtn) return;   // refs not built yet (called from applyMicUI on boot)
   ptMicBtn.classList.toggle('off', micToggle.classList.contains('off'));
@@ -3863,9 +4302,10 @@ function syncPassthroughControls() {
 function updatePtHint() {
   if (!ptHint) return;
   const collapsed = document.body.classList.contains('chat-collapsed');
-  ptHint.textContent = collapsed
+  const main = collapsed
     ? 'double-click her to show the conversation'
     : 'double-click her to hide the conversation';
+  ptHint.innerHTML = `${main}<br><span class="pt-hint-sub">scroll over her to resize · drag her to move</span>`;
 }
 
 function enterPassthrough() {
@@ -3874,15 +4314,18 @@ function enterPassthrough() {
   switchView('chat');
   document.body.classList.add('passthrough');
   document.body.classList.remove('chat-collapsed');
-  window.electron?.passthroughEnter?.();   // reshape the window to a phone ratio
+  applyPtOrbScale();                        // restore her saved size
+  window.electron?.passthroughEnter?.();    // reshape the window to a phone ratio
   syncPassthroughControls();
   updatePtHint();
+  revealPtHint();                          // show the hint, then let it fade
   inputEl.focus();
 }
 
 function exitPassthrough() {
   if (!passthrough) return;
   passthrough = false;
+  clearTimeout(ptHintTimer);
   document.body.classList.remove('passthrough', 'chat-collapsed');
   window.electron?.passthroughExit?.();    // restore the normal window
 }
@@ -3891,6 +4334,7 @@ function toggleChatCollapsed() {
   if (!passthrough) return;
   document.body.classList.toggle('chat-collapsed');
   updatePtHint();
+  revealPtHint();
   if (!document.body.classList.contains('chat-collapsed')) inputEl.focus();
 }
 
@@ -3902,7 +4346,36 @@ ptVoBtn?.addEventListener('click', () => { voiceToggle.click(); });
 // Double-click her ball to hide / reveal the conversation. Bind to the
 // orb-container, not #aitha-orb: the orb-ring overlays the orb as a sibling
 // and would otherwise swallow the clicks before they reach the orb.
-document.querySelector('.orb-container')?.addEventListener('dblclick', toggleChatCollapsed);
+const orbContainerEl = document.querySelector('.orb-container');
+orbContainerEl?.addEventListener('dblclick', toggleChatCollapsed);
+
+// Grab her orb to drag the window (custom drag via IPC so the orb still gets
+// clicks / dbl-clicks / wheel — unlike -webkit-app-region:drag, which eats them).
+// A plain click moves nothing, so double-click-to-collapse still works.
+let orbDragging = false;
+orbContainerEl?.addEventListener('pointerdown', (e) => {
+  if (!passthrough || e.button !== 0) return;
+  revealPtHint();                          // grabbing her brings the hint back
+  orbDragging = true;
+  document.body.classList.add('orb-dragging');
+  orbContainerEl.setPointerCapture?.(e.pointerId);
+  window.electron?.dragStart?.(e.screenX, e.screenY);
+});
+orbContainerEl?.addEventListener('pointermove', (e) => {
+  if (!orbDragging) return;
+  window.electron?.dragMove?.(e.screenX, e.screenY);   // screen coords → no jitter
+});
+function endOrbDrag(e) {
+  if (!orbDragging) return;
+  orbDragging = false;
+  document.body.classList.remove('orb-dragging');
+  try { orbContainerEl.releasePointerCapture?.(e.pointerId); } catch (_) {}
+}
+orbContainerEl?.addEventListener('pointerup', endOrbDrag);
+orbContainerEl?.addEventListener('pointercancel', endOrbDrag);
+
+// Scroll wheel over her resizes her; elsewhere it scrolls the chat (passthrough only).
+window.addEventListener('wheel', onPtWheel, { passive: false });
 // Esc leaves passthrough.
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && passthrough && !settingsModal.classList.contains('open')) {
@@ -5193,9 +5666,9 @@ async function loadWays() {
   try { const j = await (await fetch('/api/world/ways')).json(); w = j.enabled ? j : null; } catch (_) {}
   if (!el) return;
   if (!w) { el.innerHTML = '<div class="wways-empty">The World is off.</div>'; return; }
-  const laws = w.laws || [], customs = w.customs || [], designs = w.designs || [];
-  if (!laws.length && !customs.length && !designs.length) {
-    el.innerHTML = '<div class="wways-empty">The band has yet to make its own ways. With a mind (Ollama) running, a leader enacts laws, a soul begins traditions, and a builder designs buildings — they appear here as the band thrives.</div>';
+  const laws = w.laws || [], customs = w.customs || [], designs = w.designs || [], town = w.town;
+  if (!town && !laws.length && !customs.length && !designs.length) {
+    el.innerHTML = '<div class="wways-empty">The band has yet to make its own ways. With a mind (Ollama) running, a leader enacts laws, a soul begins traditions, a builder designs buildings, and a planned town earns its name — they appear here as the band thrives.</div>';
     return;
   }
   const group = (title, items) => items.length
@@ -5204,6 +5677,7 @@ async function loadWays() {
     `<div class="wways-card"><div class="wways-name">${icon} ${escapeHtml(name || '')}</div>` +
     `<div class="wways-sub">${escapeHtml(sub || '')}</div></div>`;
   el.innerHTML =
+    (town ? group('Town', [card('🏛', town.square || town.name, (town.character || '') + (town.name && town.square ? ' · ' + town.name : ''))]) : '') +
     group('Laws', laws.map(l => card('⚖', l.name, (l.value || '') + (l.by ? ' · ' + l.by : '')))) +
     group('Traditions', customs.map(c => card('✦', c.name, 'each ' + (c.season || '') + (c.value ? ' · ' + c.value : '')))) +
     group('Designs', designs.map(d => card('⌂', d.name, (d.function || 'home') + (d.purpose ? ' · ' + d.purpose : ''))));

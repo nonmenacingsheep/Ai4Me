@@ -283,6 +283,20 @@ ipcMain.on('passthrough-exit', () => {
   if (prePassthroughMaximized) mainWindow.maximize();
 });
 
+/* ─── IPC: drag the window by her orb (custom drag from the renderer) ─── */
+// We track the cursor-to-window offset at grab time and reposition against the
+// absolute screen cursor on each move, so the window never chases the pointer.
+let orbDragOffset = null;
+ipcMain.on('window-drag-start', (_e, { x, y }) => {
+  if (!mainWindow) return;
+  const [wx, wy] = mainWindow.getPosition();
+  orbDragOffset = { dx: x - wx, dy: y - wy };
+});
+ipcMain.on('window-drag-move', (_e, { x, y }) => {
+  if (!mainWindow || !orbDragOffset) return;
+  mainWindow.setPosition(Math.round(x - orbDragOffset.dx), Math.round(y - orbDragOffset.dy));
+});
+
 /* ─── Single instance ──────────────────────────────────────────────── */
 // Prevent a second launch (shortcut + run.bat) from fighting over port 7823.
 if (!app.requestSingleInstanceLock()) {

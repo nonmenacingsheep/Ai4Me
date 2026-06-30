@@ -19,8 +19,9 @@ KOKORO_VOICES = [
 ]
 
 
-PRESETS = ["default", "sky", "warm", "moody", "magma", "forge", "hearth",
-           "forest", "rose", "ocean", "mono"]
+PRESETS = ["default", "sky", "warm", "moody", "magma", "forge", "foundry", "hearth",
+           "forest", "rose", "ocean", "mono",
+           "crimson", "gold", "lime", "midnight", "orchid"]
 
 
 def default_theme() -> dict:
