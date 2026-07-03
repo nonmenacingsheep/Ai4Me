@@ -4426,6 +4426,7 @@ const WWATER_RGB = { 1: [79, 155, 217], 2: [47, 111, 176], 3: [22, 52, 90], 4: [
 const WPLANT_TINT = {
   grass: [120, 180, 70], shrub: [110, 150, 70], oak: [40, 95, 45], pine: [28, 72, 50],
   cactus: [80, 140, 90], reeds: [95, 155, 80], palm: [50, 125, 70],
+  wheat: [204, 172, 76],               // cultivated grain — a FARM field reads golden from afar
 };
 const WANIMAL_RGB = { rabbit: [232, 230, 224], deer: [201, 160, 106], wolf: [86, 92, 104] };
 // Rendered footprint in TILES per entity (bigger beasts read as ~2×2 = 4 tiles, a
@@ -4460,6 +4461,7 @@ const WTREE_SPAN = 2;
 const WBUSH_RGB = {
   grass: [96, 156, 66], shrub: [80, 122, 54], reeds: [108, 150, 74],
   cactus: [74, 126, 86],
+  wheat: [196, 162, 64],               // grain stalks up close (drawn as upright golden ears)
 };
 // Placed-block colours, keyed by block code (1 floor, 2 wall, 3 door, 4 window, 5 fence).
 const WBLOCK_RGB = {
@@ -4524,6 +4526,7 @@ function setWorld(s) {
     paths: s.paths || [],
     roads: s.roads || [],
     settlements: s.settlements || [],
+    era: s.era || null, wealth: s.wealth || 0, companies: s.companies || [],
     elevation: _wb64(s.layers.elevation), biome: _wb64(s.layers.biome),
     water: _wb64(s.layers.water), vegSp: _wb64(s.layers.veg_sp),
     vegGrowth: _wb64(s.layers.veg_growth),
@@ -4767,6 +4770,15 @@ function buildFoliageLayer(cv, cam, z) {
           ctx.fillRect(ccx - r * 0.5, ccy - r, r, r * 1.8);
           ctx.fillRect(ccx - r, ccy - r * 0.2, r * 0.5, r * 0.9);
           ctx.fillRect(ccx + r * 0.5, ccy - r * 0.4, r * 0.5, r);
+        } else if (name === 'wheat') {                      // cultivated grain — upright golden ears
+          const h2 = r * 1.9, sw = Math.max(1, z * 0.05);
+          for (const ox of [-0.2, 0, 0.2]) {                // three stalks…
+            ctx.fillRect(ccx + ox * z - sw / 2, ccy - h2 * 0.5, sw, h2);
+          }
+          ctx.fillStyle = 'rgb(226,198,96)';                // …each wearing a heavier seed-head
+          for (const ox of [-0.2, 0, 0.2]) {
+            ctx.fillRect(ccx + ox * z - sw, ccy - h2 * 0.62, sw * 2, h2 * 0.32);
+          }
         } else {
           for (const [ox, oy] of [[-0.18, 0.06], [0.18, 0.06], [0, -0.12]]) {
             ctx.beginPath();
@@ -5309,11 +5321,19 @@ function updateWorldHud() {
   set('whud-season', d.season);
   set('whud-weather', d.weather);
   const cen = d.census;
+  // The civilisation line: the era badge is the one chip that marks PROGRESS (Stone → Founding →
+  // Craft → Iron → Industry → Power). Ticks carry it in the census so a milestone shows the
+  // moment it's crossed; the full snapshot seeds it between ticks.
+  const era = (cen && cen.era) || d.era;
+  if (era) set('whud-era', era);
   if (cen && cen.animals) {
     const a = cen.animals;
     let html = Object.entries(a).map(([k, v]) => `${k} <span>${v}</span>`).join('');
     const ppl = cen.people != null ? cen.people : (d.people || []).length;
     html += `people <span>${ppl}</span>`;
+    // Once the band invents money / founds industry, its economy joins the census strip.
+    if (cen.wealth) html += `coin <span>${cen.wealth}</span>`;
+    if (cen.companies) html += `companies <span>${cen.companies}</span>`;
     document.getElementById('whud-census').innerHTML = html;
   }
 }

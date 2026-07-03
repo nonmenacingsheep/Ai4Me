@@ -3358,6 +3358,10 @@ body.passthrough .pt-hint .pt-hint-sub { display: inline-block; margin-top: 3px;
   padding: 3px 11px; border-radius: 999px; font-size: 11.5px; text-transform: capitalize;
   background: rgba(120, 200, 160, 0.12); color: #aee3c4; border: 1px solid rgba(120,200,160,0.2);
 }
+/* The civilisation-era chip — the one chip that marks PROGRESS, so it wears gold. */
+.whud-era {
+  background: rgba(232, 199, 106, 0.10); color: #e8c76a; border-color: rgba(232, 199, 106, 0.38);
+}
 .whud-speed { display: flex; gap: 2px; padding: 2px; border-radius: 999px;
   background: rgba(120,200,160,0.10); border: 1px solid rgba(120,200,160,0.2);
   pointer-events: auto; }   /* the HUD is click-through; re-enable it for the buttons */

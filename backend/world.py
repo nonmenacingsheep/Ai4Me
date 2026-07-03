@@ -7128,6 +7128,13 @@ class World:
             "paths": self._paths_payload(),
             "roads": [[x, y, round(c, 2)] for (x, y), c in self.roads.items()],
             "settlements": self.settlements,
+            # The civilisation layer — so the watcher can SEE the town's progress, not just its
+            # tiles: the era badge, the pooled coin, and each company with its hands and purse.
+            "era": self._civilization_era(),
+            "wealth": self._town_wealth(),
+            "companies": [{"name": c.get("name"), "kind": c.get("kind"),
+                           "workers": len(c.get("workers", [])), "coin": round(c.get("coin", 0.0), 1)}
+                          for c in self.companies],
         }
 
     def view(self, x0: int, y0: int, x1: int, y1: int, step: int = 1) -> dict:
@@ -7218,7 +7225,12 @@ class World:
         buildings = sum(1 for s in self.sites if s["done"])
         return {"animals": counts, "vegetation": veg, "people": len(self.people),
                 "structures": len(self.structures), "buildings": buildings,
-                "blocks": len(self.blocks)}
+                "blocks": len(self.blocks),
+                # The civilisation line the HUD wears live: the era the band has reached, its
+                # pooled coin, and how many companies employ its folk (0 until industry exists).
+                # All cheap derived scans — nothing here mutates or approaches the veg-count cost.
+                "era": self._civilization_era(), "wealth": self._town_wealth(),
+                "companies": len(self.companies)}
 
     def digest(self) -> str:
         """Compact text snapshot for Aitha's prompt, so she perceives the world she
