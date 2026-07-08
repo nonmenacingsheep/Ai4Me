@@ -1180,6 +1180,22 @@ async def api_world_person(pid: str):
     return {"enabled": True, "person": person}
 
 
+@app.post("/api/world/order")
+async def api_world_order(req: Request):
+    """Queue Norland-style ORDERS on one soul (or clear its list) — the god's bidding, issued
+    from the inspector panel. The soul weaves the list into its own life via the drive arbiter
+    (it obeys when well, tends itself first when not), so this never yanks a body around."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "result": "World is off — enable it in Settings."}
+    body = await req.json()
+    w = await asyncio.to_thread(world_store.get_world)
+    summary = await asyncio.to_thread(w.give_orders, body.get("id"),
+                                      body.get("orders"), bool(body.get("clear")))
+    if summary:
+        await broadcast({"type": "world_changed", "changes": [summary]})
+    return {"ok": bool(summary), "result": summary}
+
+
 @app.post("/api/world/speed")
 async def api_world_speed(req: Request):
     """Set the live fast-forward multiplier (1×/2×/4×) for the World tab. Persisted on the

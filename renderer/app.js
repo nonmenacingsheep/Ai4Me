@@ -5545,6 +5545,22 @@ function renderPersonPanel(p) {
       `${Math.min(p.plan.i || 0, p.plan.steps.length)}/${p.plan.steps.length}</div>` : '';
   if (title) title.textContent = p.name || 'Soul';
   const age = p.age != null ? `${p.age.toFixed(1)} days` : '—';
+  // ORDERS — the god's bidding (the Norland-style action queue). Chips show the standing
+  // list; the buttons append to it. goto/talk ARM the next map click to pick the target.
+  const ORDER_LABEL = {
+    goto: '🚶 send', chop: '🪓 chop', mine: '⛏️ mine', gather_fiber: '🌿 fiber',
+    gather_leaves: '🍃 leaves', forage: '🍖 forage', hunt: '🏹 hunt', fish: '🎣 fish',
+    talk: '💬 talk to…', home: '🏠 home',
+  };
+  const orders = p.orders || [];
+  const orderChips = orders.length ? orders.map(o =>
+    `<span class="wp-order">${ORDER_LABEL[o.kind] || o.kind}` +
+    `${o.kind === 'goto' ? ` (${o.x},${o.y})` : ''}${o.n ? ` ×${o.n}` : ''}</span>`).join('')
+    : '<span class="wp-order wp-order-none">none — their time is their own</span>';
+  const orderBtns = ['goto', 'talk', 'chop', 'mine', 'gather_fiber', 'gather_leaves',
+    'forage', 'hunt', 'fish', 'home']
+    .map(k => `<button class="wp-obtn" data-order="${k}">${ORDER_LABEL[k]}</button>`).join('') +
+    (orders.length ? `<button class="wp-obtn wp-oclear" data-order="clear">✕ release</button>` : '');
   body.innerHTML =
     `<div class="wp-sub">${escapeHtml(p.action || 'idle')} · ${p.stage ? escapeHtml(p.stage) + ' ' : ''}age ${age}${p.vocation ? ' · ' + escapeHtml(p.vocation) : ''}</div>` +
     kinLine(p.kin) +
@@ -5553,6 +5569,9 @@ function renderPersonPanel(p) {
     illLine +
     (p.intent ? `<div class="wp-intent">“${escapeHtml(p.intent)}”</div>` : '') +
     (p.say ? `<div class="wp-say">💬 ${escapeHtml(p.say)}</div>` : '') +
+    `<div class="wp-sec">Orders <em>the god's bidding</em></div>` +
+    `<div class="wp-orders">${orderChips}</div>` +
+    `<div class="wp-obar">${orderBtns}</div>` +
     `<div class="wp-sec">Body</div>` +
     bar('health', p.hp, '#7ed79b') +
     `<div class="wp-sub2">Comfort <em>— how much they want relief (drives behaviour)</em></div>` +
@@ -5583,6 +5602,38 @@ function renderPersonPanel(p) {
     `<div class="wp-sec">Relationships <em>${rels.length}</em></div>${relRows}` +
     (reflRows ? `<div class="wp-sec">Beliefs</div>${reflRows}` : '') +
     `<div class="wp-sec">Memory stream <em>recent</em></div>${memRows}`;
+  // Wire the order buttons ONCE (delegated — the panel body is re-rendered every refresh).
+  if (!body._ordersWired) {
+    body._ordersWired = true;
+    body.addEventListener('click', async (e) => {
+      const b = e.target.closest('.wp-obtn'); if (!b) return;
+      const pid = WORLD._personId; if (pid == null) return;
+      const k = b.dataset.order;
+      if (k === 'clear') { await worldPostOrder(pid, null, true); }
+      else if (k === 'goto' || k === 'talk') {
+        // ARM the next map click to pick the destination / the soul to talk to.
+        WORLD._orderArm = { pid, kind: k };
+        const cv = document.getElementById('world-canvas');
+        if (cv) cv.style.cursor = 'crosshair';
+        const co = document.getElementById('whud-coords');
+        if (co) co.textContent = k === 'goto' ? 'click the map — where shall they go?'
+                                              : 'click a soul — who shall they seek out?';
+        return;
+      }
+      else { await worldPostOrder(pid, [{ kind: k }]); }
+      refreshPersonPanel(true);
+    });
+  }
+}
+
+// POST an order to a soul's queue (or clear it) — the god's bidding, via the world API.
+async function worldPostOrder(pid, orders, clear) {
+  try {
+    await (await fetch('/api/world/order', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: pid, orders: orders || undefined, clear: !!clear }),
+    })).json();
+  } catch (_) {}
 }
 
 async function worldPaint(x, y) {
@@ -5910,6 +5961,27 @@ function bindWorld() {
       if (dd < bd) { bd = dd; best = p; }
     }
     if (best && bd <= 3) worldOpenPerson(best.id);
+  });
+  // An ARMED order (Send-to / Talk-to from the inspector) resolves on the next map click.
+  cv?.addEventListener('click', async (ev) => {
+    const arm = WORLD._orderArm; if (!arm) return;
+    WORLD._orderArm = null;
+    cv.style.cursor = '';
+    const { x, y } = worldTileAt(ev);
+    if (arm.kind === 'goto') {
+      await worldPostOrder(arm.pid, [{ kind: 'goto', x: Math.round(x), y: Math.round(y) }]);
+    } else if (arm.kind === 'talk') {
+      const d = WORLD.data; let best = null, bd = 9;
+      for (const q of (d?.people || [])) {
+        const s = WORLD.smooth && WORLD.smooth.get(q.id);
+        const dd = Math.abs((s ? s.x : q.x) - x) + Math.abs((s ? s.y : q.y) - y);
+        if (dd < bd) { bd = dd; best = q; }
+      }
+      if (best && bd <= 4 && best.id !== arm.pid) {
+        await worldPostOrder(arm.pid, [{ kind: 'talk', pid: best.id }]);
+      }
+    }
+    refreshPersonPanel(true);
   });
   document.getElementById('wperson-close')?.addEventListener('click', worldClosePerson);
 

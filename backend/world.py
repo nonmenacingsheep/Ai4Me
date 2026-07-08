@@ -656,6 +656,18 @@ CIVIC_ID_MIN_RENOWN = 2.0    # standing a soul needs to name the town's square a
 CIVIC_PRIDE_BOND = 0.03      # extra festival bond-warmth in a town that knows what it is
 SQUARE_STROLL = 14           # how near the town square an idle soul will be, by day, to drift to it
 RENOWN_DECAY = 0.012               # fraction of standing shed per game-day (≈ half-life ~8 weeks)
+# ── GOD-ORDERS — the Norland-style action queue ──────────────────────────────
+# A god can hand any soul a QUEUE of orders (from the inspector panel / API / a directive).
+# The queue becomes one more drive ("obey") weighed by the arbiter — comfort-gated and under
+# the survival ramp — so a content soul follows its list promptly while a parched, starving
+# or exhausted one tends itself first and returns to it after: a lord who ignores you when
+# miserable, the Norland behaviour, for free from the machinery already here.
+ORDER_KINDS = ("goto", "chop", "mine", "gather_fiber", "gather_leaves", "forage",
+               "hunt", "fish", "talk", "home")
+ORDER_MAX = 8                      # most orders a soul will hold in its head
+ORDER_GATHER_N = 3                 # default yield asked of a gather-type order
+ORDER_PATIENCE = 360.0             # game-min an order may sit unfinished before it's given up
+
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
 # CO_OP_MIN builders are on hand (it takes several to raise a beam), so a lone soul can't grind it
@@ -2960,6 +2972,12 @@ class World:
             return self._flee(p)
         if kind == "guard":
             return self._guard(p)
+        if kind == "obey":
+            # Work the god's order queue (the Norland-style action list) into a body action.
+            act = self._obey(p, edible, drinkable, tree, stone, fiber, leaf, lx, ly)
+            if act:
+                return act
+            return self._idle(p)                    # queue just emptied — at ease until the next thought
         if kind == "ply":
             # Ply one's trade: produce the surplus that division of labour and barter run on.
             return self._ply(p, edible, drinkable, tree, fiber, leaf, lx, ly)
@@ -6173,6 +6191,133 @@ class World:
         self.version += 1
         return True
 
+    # ── god-orders: the Norland-style action queue ─────────────────────────────
+    def give_orders(self, pid, orders=None, clear: bool = False) -> str:
+        """Queue orders on one soul (or release them). Validates each order and caps the
+        queue; returns a human summary for the god log, or '' if nothing took. The soul
+        weaves the list into its own life via the arbiter — this never yanks the body."""
+        p = next((q for q in self.people if str(q.get("id")) == str(pid)), None)
+        if p is None:
+            return ""
+        if clear:
+            n = len(p.get("orders") or [])
+            p["orders"] = []
+            self.version += 1
+            return f"released {p['name']} from {n} order(s)." if n else f"{p['name']} had no orders."
+        q = p.setdefault("orders", [])
+        added = []
+        for o in (orders or []):
+            k = str((o or {}).get("kind", ""))
+            if k not in ORDER_KINDS or len(q) >= ORDER_MAX:
+                continue
+            clean = {"kind": k}
+            if k == "goto":
+                try:
+                    tx, ty = int(o["x"]), int(o["y"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not self._in(tx, ty):
+                    continue
+                clean["x"], clean["y"] = tx, ty
+            elif k == "talk":
+                tid = str(o.get("pid", ""))
+                if tid == str(p.get("id")) or not any(str(r.get("id")) == tid for r in self.people):
+                    continue
+                clean["pid"] = tid
+            elif k in ("chop", "mine", "gather_fiber", "gather_leaves", "forage"):
+                try:
+                    clean["n"] = max(1, min(12, int(o.get("n", ORDER_GATHER_N))))
+                except (TypeError, ValueError):
+                    clean["n"] = ORDER_GATHER_N
+            q.append(clean)
+            added.append(k.replace("_", " "))
+        if not added:
+            return ""
+        self.version += 1
+        mind.speak(p, "As it is willed.", self.clock)
+        self._note("order", f"{p['name']} was bidden: {', '.join(added)}.")
+        return f"bade {p['name']}: {', '.join(added)}."
+
+    def _order_done(self, p, o, done: bool = True):
+        """Retire the head order — fulfilled, or given up (target gone / patience spent)."""
+        if p.get("orders") and p["orders"][0] is o:
+            p["orders"].pop(0)
+        self.version += 1
+        label = str(o.get("kind", "task")).replace("_", " ")
+        if done:
+            mind.remember(p, f"did as I was bidden — {label}", 0.5, "obey", self.clock)
+            if not p.get("orders"):
+                mind.speak(p, "It is done, as it was willed.", self.clock)
+        else:
+            mind.remember(p, f"couldn't see the bidding through — {label}", 0.45, "obey", self.clock)
+
+    def _obey(self, p, edible, drinkable, tree, stone, fiber, leaf, lx, ly):
+        """Work the HEAD of the soul's order queue into one body action, retiring orders as
+        they complete. Gathers reuse the ordinary seek/act machinery, so an ordered chop looks
+        (and skills up) exactly like a chosen one. Returns None when the queue empties."""
+        x, y = p["x"], p["y"]
+        inv = p["inv"]
+        # What each gather-order collects, where to look, and the act/travel verbs to use.
+        gather = {"chop":          ("wood",   tree,   "chop",          "seek_wood"),
+                  "mine":          ("stone",  stone,  "mine",          "seek_stone"),
+                  "gather_fiber":  ("fiber",  fiber,  "gather_fiber",  "seek_fiber"),
+                  "gather_leaves": ("leaves", leaf,   "gather_leaves", "seek_leaves"),
+                  "forage":        ("food",   edible, "eat",           "seek_food")}
+        while p.get("orders"):
+            o = p["orders"][0]
+            o.setdefault("until", round(self.clock + ORDER_PATIENCE, 1))
+            if self.clock > o["until"]:                        # patience spent — let it go
+                self._order_done(p, o, done=False)
+                continue
+            k = o.get("kind")
+            if k == "goto" or k == "home":
+                tx, ty = (o["x"], o["y"]) if k == "goto" else p["home"]
+                dx, dy = tx - x, ty - y
+                if abs(dx) + abs(dy) <= 1:
+                    self._order_done(p, o)
+                    continue
+                return "wander", (dx, dy)                      # raw delta → pathfinds around walls
+            if k == "talk":
+                q = next((r for r in self.people if str(r.get("id")) == str(o.get("pid"))), None)
+                if q is None:
+                    self._order_done(p, o, done=False)         # they are gone
+                    continue
+                dx, dy = q["x"] - x, q["y"] - y
+                if abs(dx) + abs(dy) <= 1:                     # beside them — the social pass does the rest
+                    self._order_done(p, o)
+                    continue
+                return "socialize", (dx, dy)
+            if k in gather:
+                item, mask, verb, seek = gather[k]
+                if "base" not in o:
+                    o["base"] = int(inv.get(item, 0))
+                if inv.get(item, 0) - o["base"] >= o.get("n", ORDER_GATHER_N):
+                    self._order_done(p, o)
+                    continue
+                return self._seek(p, x, y, bool(mask[ly, lx]), mask, lx, ly, item, verb, seek)
+            if k == "hunt":
+                if "base" not in o:
+                    o["base"] = int(inv.get("meat", 0) + inv.get("fish", 0))
+                if inv.get("meat", 0) + inv.get("fish", 0) - o["base"] >= 1:
+                    self._order_done(p, o)
+                    continue
+                h = self._hunt(p)
+                if h:
+                    return h
+                return "wander", self._roam_delta(p, x, y, 10)   # no game in sight — cast about
+            if k == "fish":
+                if "base" not in o:
+                    o["base"] = int(inv.get("fish", 0))
+                if inv.get("fish", 0) - o["base"] >= 1:
+                    self._order_done(p, o)
+                    continue
+                f = self._fish(p, drinkable, lx, ly)
+                if f:
+                    return f
+                return "wander", self._roam_delta(p, x, y, 10)   # no water in sight — cast about
+            self._order_done(p, o, done=False)                 # unknown kind — never wedge the queue
+        return None
+
     def _hunt(self, p, max_d=HUNT_VISION):
         """Pursue the nearest game within `max_d`; a body action toward it, or a strike when
         adjacent (the kill is resolved in the action handler). None when there's nothing to chase.
@@ -8778,6 +8923,35 @@ if __name__ == "__main__":
     p5_ok = spoils and preserves and dried_keeps and seasonal and raided
     print(f"  spoilage/season test: spoils={spoils} preserves={preserves} dried-keeps={dried_keeps} "
           f"seasonal-stockpile={seasonal} larder-raided={raided} -> {'OK' if p5_ok else 'FAILED'}")
+
+    # GOD-ORDERS — the Norland-style action queue: a bidden soul weaves the god's list into
+    # its own life via the arbiter (obey wins while content; survival still outranks it).
+    wor = World().generate(seed=5); wor.people = []
+    oyy, oxx = np.argwhere((wor.water == WATER_NONE) & (wor.biome == B["grassland"]))[0]
+    oxx, oyy = int(oxx), int(oyy)
+    wor._add_person(oxx, oyy, name="Bidden")
+    ob = wor.people[0]
+    ob["thirst"] = ob["hunger"] = ob["fatigue"] = 0.05          # content — the bidding should win
+    ob["satiety"] = ob["hydration"] = ob["stamina"] = 1.0
+    tox, toy = oxx, oyy                                          # a dry tile a short walk off
+    for ddx, ddy in ((6, 4), (6, 0), (0, 6), (-6, 0), (0, -6)):
+        if wor._in(oxx + ddx, oyy + ddy) and wor.water[oyy + ddy, oxx + ddx] == WATER_NONE:
+            tox, toy = oxx + ddx, oyy + ddy
+            break
+    gave = wor.give_orders(ob["id"], [{"kind": "goto", "x": tox, "y": toy},
+                                      {"kind": "gather_fiber", "n": 1}])
+    step_o = 24.0 / GAME_SEC_PER_REAL_SEC
+    went_d = 99
+    for _ in range(900):                                         # ~6 game-hours of leash
+        wor.step(dt_real_sec=step_o)
+        went_d = min(went_d, abs(ob["x"] - tox) + abs(ob["y"] - toy))
+        if went_d <= 2 and not ob.get("orders"):
+            break
+    order_ok = (bool(gave) and went_d <= 2 and not ob.get("orders")
+                and ob["inv"].get("fiber", 0) >= 1)
+    print(f"  god-orders test: bade={bool(gave)} went-where-sent={went_d <= 2} "
+          f"queue-emptied={not ob.get('orders')} gathered-as-bidden={ob['inv'].get('fiber', 0) >= 1} "
+          f"-> {'OK' if order_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")

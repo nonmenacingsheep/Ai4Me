@@ -3432,6 +3432,21 @@ body.passthrough .pt-hint .pt-hint-sub { display: inline-block; margin-top: 3px;
   color: #74b394; border-bottom: 1px solid rgba(120,200,160,0.12); padding-bottom: 3px;
 }
 .wp-sec em { text-transform: none; letter-spacing: 0; opacity: 0.7; font-size: 10px; }
+/* ORDERS — the god's bidding (the Norland-style action queue): the standing list as chips,
+   and the command bar that appends to it. Gold, like the era chip — the god's colour. */
+.wp-orders { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 6px; }
+.wp-order {
+  padding: 2px 9px; border-radius: 999px; font-size: 11px;
+  background: rgba(232, 199, 106, 0.10); color: #e8c76a; border: 1px solid rgba(232,199,106,0.34);
+}
+.wp-order-none { opacity: 0.55; font-style: italic; border-style: dashed; }
+.wp-obar { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 4px; }
+.wp-obtn {
+  padding: 3px 8px; border-radius: 7px; font-size: 11px; cursor: pointer;
+  background: rgba(120, 200, 160, 0.08); color: #aee3c4; border: 1px solid rgba(120,200,160,0.22);
+}
+.wp-obtn:hover { background: rgba(232, 199, 106, 0.14); color: #e8c76a; border-color: rgba(232,199,106,0.4); }
+.wp-oclear { color: #d88f8f; border-color: rgba(216,143,143,0.35); }
 .wp-bar { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
 .wp-bar > span { width: 78px; color: #a9d9c2; font-size: 11px; }
 .wp-bar > b { width: 34px; text-align: right; font-size: 11px; }

@@ -68,7 +68,7 @@ GOOD_PRICE = {"food": 1, "wood": 1, "leaves": 1, "fiber": 1, "stone": 2}
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
                 "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard", "help",
-                "forage", "whittle", "marvel", "aspire")
+                "forage", "whittle", "marvel", "aspire", "obey")
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 # Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
@@ -588,6 +588,15 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
         nerve = 1.0 - cau
         out.append(("guard", None, (0.45 + 0.5 * ward) * (0.35 + 0.9 * nerve),
                     "a wolf threatens my own — I'll stand watch"))
+
+    # THE GOD'S BIDDING — a queued order (the Norland-style action list) is a real pull:
+    # strong in a content soul, fading as any need rises, and always under the survival
+    # ramp — so a soul follows its orders promptly when well, tends itself first when
+    # not, and comes back to the list after. Obedience, never unto death.
+    if p.get("orders"):
+        comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+        what = str((p["orders"][0] or {}).get("kind", "task")).replace("_", " ")
+        out.append(("obey", None, 0.30 + 0.45 * comfort, f"I am bidden: {what}"))
 
     # Shelter & ambition — a home of one's own is half survival, half pride. A build already
     # underway adds sunk-cost MOMENTUM so it gets finished rather than dropped mid-wall.
