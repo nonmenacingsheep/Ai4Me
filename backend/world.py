@@ -6483,18 +6483,23 @@ class World:
         return True
 
     # ── god-orders: the Norland-style action queue ─────────────────────────────
-    def give_orders(self, pid, orders=None, clear: bool = False) -> str:
-        """Queue orders on one soul (or release them). Validates each order and caps the
-        queue; returns a human summary for the god log, or '' if nothing took. The soul
-        weaves the list into its own life via the arbiter — this never yanks the body."""
+    def give_orders(self, pid, orders=None, clear: bool = False, priority=None) -> str:
+        """Queue orders on one soul (or release them). Validates each order and caps the queue;
+        returns a human summary for the god log, or '' if nothing took. The soul weaves the list
+        into its own life via the AGENDA — an order is a task there like any other, so it never
+        yanks the body, a pressing need still preempts it, and a deferred order escalates until
+        it gets its turn. `priority` ('routine'|'urgent') is the god's weight on that task."""
         p = next((q for q in self.people if str(q.get("id")) == str(pid)), None)
         if p is None:
             return ""
         if clear:
             n = len(p.get("orders") or [])
             p["orders"] = []
+            p.pop("order_priority", None)
             self.version += 1
             return f"released {p['name']} from {n} order(s)." if n else f"{p['name']} had no orders."
+        if priority in ("routine", "urgent"):
+            p["order_priority"] = priority
         q = p.setdefault("orders", [])
         added = []
         for o in (orders or []):
@@ -7642,6 +7647,18 @@ class World:
                 # Skills as LEVELS for the inspector: level / mastery cap / progress to next.
                 d["skill_levels"] = {k: dict(zip(("lv", "max", "next"), self.skill_progress(p, k)))
                                      for k in (p.get("skills") or {})}
+                # THE AGENDA — the soul's plan, most-pressing first, the active task marked. This
+                # is the one queue every want now lives on (needs, orders, longings, projects,
+                # social); a deferred want's escalation shows why a pushed-back plan resurfaces.
+                cur = p.get("intention") or {}
+                ag = sorted((p.get("agenda") or []),
+                            key=lambda a: mind._task_eff(a, self.clock, cur), reverse=True)
+                d["agenda"] = [{"kind": a["kind"], "why": a.get("why", a["kind"]),
+                                "urg": round(mind._task_eff(a, self.clock, cur), 2),
+                                "need": a["kind"] in mind.NEED_KINDS,
+                                "active": (a["kind"] == cur.get("kind")
+                                           and a.get("target") == cur.get("target"))}
+                               for a in ag[:8]]
                 # The drama layer, made legible: an active longing, the grudges nursed against
                 # others (named, strongest first), and the leanings experience has taught.
                 if p.get("desire"):

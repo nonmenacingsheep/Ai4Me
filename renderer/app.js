@@ -5570,6 +5570,16 @@ function renderPersonPanel(p) {
     illLine +
     (p.intent ? `<div class="wp-intent">“${escapeHtml(p.intent)}”</div>` : '') +
     (p.say ? `<div class="wp-say">💬 ${escapeHtml(p.say)}</div>` : '') +
+    // The AGENDA — the soul's plan: every want on one queue, most-pressing first, the task
+    // they're doing NOW marked. A deferred want climbs as it waits, so a pushed-back plan
+    // resurfaces (rather than being re-invented from nothing each beat).
+    ((p.agenda && p.agenda.length)
+      ? `<div class="wp-sec">Agenda <em>what they mean to do, most pressing first</em></div>` +
+        `<div class="wp-agenda">` + p.agenda.map(a =>
+          `<div class="wp-task${a.active ? ' active' : ''}${a.need ? ' need' : ''}">` +
+          `<span class="wp-task-w">${a.active ? '▶ ' : ''}${escapeHtml(a.why)}</span>` +
+          `<em>${a.urg}</em></div>`).join('') + `</div>`
+      : '') +
     // The heart: an active longing, grudges nursed against others, and the leanings
     // experience has taught — the drama layer, made legible.
     ((p.desire || (p.grudges && p.grudges.length) || (p.leans && Object.keys(p.leans).length))

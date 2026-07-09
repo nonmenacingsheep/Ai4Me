@@ -1293,7 +1293,8 @@ async def api_world_order(req: Request):
     body = await req.json()
     w = await asyncio.to_thread(world_store.get_world)
     summary = await asyncio.to_thread(w.give_orders, body.get("id"),
-                                      body.get("orders"), bool(body.get("clear")))
+                                      body.get("orders"), bool(body.get("clear")),
+                                      body.get("priority"))
     if summary:
         await broadcast({"type": "world_changed", "changes": [summary]})
     return {"ok": bool(summary), "result": summary}

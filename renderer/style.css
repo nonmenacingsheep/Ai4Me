@@ -3447,6 +3447,16 @@ body.passthrough .pt-hint .pt-hint-sub { display: inline-block; margin-top: 3px;
 }
 .wp-obtn:hover { background: rgba(232, 199, 106, 0.14); color: #e8c76a; border-color: rgba(232,199,106,0.4); }
 .wp-oclear { color: #d88f8f; border-color: rgba(216,143,143,0.35); }
+/* The AGENDA — the soul's unified plan: one task per row, active highlighted, needs tinted. */
+.wp-agenda { display: flex; flex-direction: column; gap: 3px; margin: 4px 0; }
+.wp-task { display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
+  padding: 3px 8px; border-radius: 6px; font-size: 12px; background: rgba(255,255,255,0.03);
+  border-left: 2px solid transparent; }
+.wp-task .wp-task-w { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wp-task em { opacity: 0.5; font-style: normal; font-size: 11px; flex-shrink: 0; }
+.wp-task.need { border-left-color: rgba(86,176,196,0.5); }        /* a bodily need */
+.wp-task.active { background: rgba(120,200,160,0.14); border-left-color: #7ed79b; color: #d6f3e2; }
+.wp-task.active em { opacity: 0.8; color: #aee3c4; }
 /* The heart — the drama layer: a longing (gold), a grudge (red), the leanings learned. */
 .wp-desire { margin: 3px 0; color: #e8c76a; font-size: 12px; }
 .wp-grudge { margin: 3px 0; color: #d88f8f; font-size: 12px; }

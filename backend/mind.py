@@ -199,6 +199,20 @@ def need_urgency(comfort: float, reserve: float = 1.0) -> float:
     danger = (1.0 - reserve) * RESERVE_TILT + max(0.0, DANGER_RESERVE - reserve) * DANGER_SLOPE
     return desire + danger
 HYSTERESIS = 0.12            # an intention must be beaten by this margin to be dropped
+# ── the AGENDA — one persistent, prioritized task list per soul ───────────────
+# Every intention SOURCE (a pressing need, a god's order, a longing, a standing project, a
+# social pull) becomes a task on ONE agenda instead of being re-derived from nothing each beat.
+# The executive commits to the top task (HYSTERESIS), lets a NEED preempt whatever's underway,
+# and — the Norland heart of it — ESCALATES a want the longer it's been deferred, so a plan
+# pushed back for something more pressing is REMEMBERED and resumed, not forgotten. Survival is
+# preserved by construction: needs keep their ramped base urgency and NEVER escalate, so a real
+# need still wins; escalation only lets WANTS compete among themselves and get their quiet moment.
+NEED_KINDS = frozenset({"drink", "eat", "rest", "flee", "guard"})   # ever-fresh, never escalate, may always preempt
+TRANSIENT_KINDS = frozenset({"socialize", "befriend", "explore", "marvel", "help", "tend"})  # fade if not renewed
+AGENDA_ESCALATE = 0.06       # urgency a DEFERRED want gains per game-day it waits its turn…
+AGENDA_ESCALATE_CAP = 0.20   # …up to this (a long-deferred plan grows insistent, never overwhelming)
+AGENDA_STALE = 600.0         # game-min a transient urge lingers on the agenda unrenewed before it drops
+AGENDA_MAX = 12              # tasks kept (the most pressing; the rest fall away so it can't grow unbounded)
 REST_BY_DAY_DAMP = 0.35      # daytime: ordinary drowsiness is damped to this fraction (keeps daylight hours)
 REST_BY_DAY_RESERVE = 0.35   # …but a stamina reserve at/below this is true exhaustion — rest pull stands
 BUILD_MOMENTUM = 0.35       # sunk-cost pull: a fully-underway build adds this much to its drive,
@@ -620,7 +634,10 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     if p.get("orders"):
         comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
         what = str((p["orders"][0] or {}).get("kind", "task")).replace("_", " ")
-        out.append(("obey", None, 0.30 + 0.45 * comfort, f"I am bidden: {what}"))
+        # An URGENT order presses harder than a routine one — the god's own priority on the
+        # unified agenda (still comfort-gated below survival, so it never marches a soul to death).
+        urgent = 0.16 if p.get("order_priority") == "urgent" else 0.0
+        out.append(("obey", None, 0.30 + 0.45 * comfort + urgent, f"I am bidden: {what}"))
 
     # Shelter & ambition — a home of one's own is half survival, half pride. A build already
     # underway adds sunk-cost MOMENTUM so it gets finished rather than dropped mid-wall.
@@ -860,26 +877,76 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     return out
 
 
+def _task_eff(a: dict, clock: float, cur: dict | None) -> float:
+    """A task's EFFECTIVE urgency: its base (from the arbiter) + escalation for a want the longer
+    it's waited its turn + a hysteresis bonus for whatever we're already doing (commitment)."""
+    e = a.get("base", 0.0)
+    if a["kind"] not in NEED_KINDS:
+        waited = max(0.0, clock - (a.get("active_t") or a.get("add_t", clock)))
+        e += min(AGENDA_ESCALATE_CAP, AGENDA_ESCALATE * waited / 1440.0)
+    if cur and a["kind"] == cur.get("kind") and a.get("target") == cur.get("target"):
+        e += HYSTERESIS
+    return e
+
+
 def deliberate(p: dict, ctx: dict, rng=None) -> dict:
-    """Weigh the drives and (re)set the standing intention. Hysteresis keeps a person from
-    flip-flopping every beat — the current aim must be clearly out-competed to be dropped.
-    Returns the intention dict. This is the model-free mind; it always yields a choice."""
-    cand = drives(p, ctx)
-    cand.sort(key=lambda c: -c[2])
-    best = cand[0]
+    """The EXECUTIVE over a soul's persistent AGENDA. Each beat the reactive arbiter (`drives`)
+    proposes the live candidates; they're merged into p["agenda"] — one prioritized list holding
+    every want (needs, orders, longings, projects, social) as a task carrying its own escalation.
+    The executive commits to the top task (hysteresis), a pressing NEED preempts whatever's under
+    way, and a want DEFERRED for something more urgent keeps its place and grows more insistent
+    until it gets its moment (planning hours-to-days ahead, Norland-style). Always yields a
+    choice; wholly offline — this is the model-free mind the LLM only enriches."""
+    clock = ctx.get("clock", 0.0)
+    cand = drives(p, ctx)                                    # [(kind, target, base_urgency, why), …]
+    agenda = p.setdefault("agenda", [])
+    proposed = {(k, t): (u, why) for (k, t, u, why) in cand}
+
+    # 1. UPSERT the freshly-proposed candidates onto the agenda (refresh base urgency + wording).
+    idx = {(a["kind"], a.get("target")): a for a in agenda}
+    for (k, t), (u, why) in proposed.items():
+        a = idx.get((k, t))
+        if a is None:
+            agenda.append({"kind": k, "target": t, "why": why, "base": float(u),
+                           "add_t": clock, "seen_t": clock, "active_t": 0.0})
+        else:
+            a["base"], a["why"], a["seen_t"] = float(u), why, clock
+
+    # 2. EXPIRE — a need lives only while the body still feels it; a transient urge lingers a while
+    # then fades; a task aimed at someone gone drops. DURABLE wants (orders, longings, projects)
+    # persist even unrenewed: those are the plans a soul carries forward from beat to beat.
+    alive = ctx.get("alive_ids", ())
+    kept = []
+    for a in agenda:
+        k, t = a["kind"], a.get("target")
+        if t and t not in alive:
+            continue
+        renewed = (k, t) in proposed
+        if k in NEED_KINDS:
+            if renewed:
+                kept.append(a)
+        elif k in TRANSIENT_KINDS and not renewed and (clock - a.get("seen_t", clock)) > AGENDA_STALE:
+            continue
+        else:
+            kept.append(a)
+    agenda[:] = kept or [{"kind": "tend", "target": None, "why": "tend to my own",
+                          "base": 0.07, "add_t": clock, "seen_t": clock, "active_t": 0.0}]
+
+    # 3. PICK the top by effective urgency; it's getting its turn, so its escalation resets.
     cur = p.get("intention")
-    if cur and _intention_valid(cur, ctx):
-        cur_u = next((c[2] for c in cand if c[0] == cur["kind"] and c[1] == cur.get("target")), 0.0)
-        if cur_u + HYSTERESIS >= best[2]:
-            cur["u"] = round(float(cur_u), 3)
-            return cur
-    kind, target, u, why = best
-    changed = (not cur) or cur.get("kind") != kind or cur.get("target") != target
-    inten = {"kind": kind, "target": target, "u": round(float(u), 3), "why": why}
+    top = max(agenda, key=lambda a: _task_eff(a, clock, cur))
+    top["active_t"] = clock
+    if len(agenda) > AGENDA_MAX:                             # keep only the most pressing
+        agenda.sort(key=lambda a: _task_eff(a, clock, cur), reverse=True)
+        del agenda[AGENDA_MAX:]
+
+    changed = (not cur) or cur.get("kind") != top["kind"] or cur.get("target") != top.get("target")
+    inten = {"kind": top["kind"], "target": top.get("target"),
+             "u": round(_task_eff(top, clock, cur), 3), "why": top["why"]}
     _set_intention(p, inten, ctx)
-    # Choosing a *deliberate* aim (not just answering thirst) is itself a remembered moment.
-    if changed and kind not in ("drink", "eat", "rest", "tend"):
-        remember(p, f"resolved to {p['intent']}", 0.4, "intent", ctx.get("clock", 0.0))
+    # Turning to a *deliberate* aim (not just answering a bodily need) is a remembered moment.
+    if changed and top["kind"] not in ("drink", "eat", "rest", "tend"):
+        remember(p, f"resolved to {p['intent']}", 0.4, "intent", clock)
     return inten
 
 
