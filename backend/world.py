@@ -699,6 +699,22 @@ PLY_WOOD_STOCK = 14                # a woodcutter plying their trade stocks timb
 # slowly, becomes culture. Ages are in game-days (DAYS_PER_YEAR == 60).
 ADULT_AGE = 16 * DAYS_PER_YEAR     # childhood ends ~16 yrs: full capability + a vocation
 CHILD_SKILL_GAIN = 0.00006         # skill a youngling earns per beat of practice (grows over a childhood)
+# ── SKILL LEVELS — competence you can read ────────────────────────────────────
+# A soul's hands-on skills LEVEL from 0 toward a per-skill mastery cap, earned by doing
+# (xp accrues in p["skills"]; thresholds ramp ×1.6 a level, so early levels come quick and
+# mastery is a life's work). Levels are MECHANICAL, not cosmetic: each level works faster
+# (_skill_speed), a practiced gatherer wins bonus yield (_skill_bonus), and the deeper
+# recipe TIERS open only as a crafter levels (TIER_CRAFT_LVL) — never gating tier 0, so
+# survival is untouched and the gate only shapes the LUXURY climb.
+SKILL_MAX = {"foraging": 5, "woodcutting": 6, "mining": 6, "fishing": 5,
+             "hunting": 7, "building": 8, "crafting": 10}
+SKILL_XP_BASE = 1.0                # xp from level 0 → 1
+SKILL_XP_RAMP = 1.6                # each next level costs ×1.6 the one before
+SKILL_SPEED_PER_LVL = 0.08         # each level shaves work-time: speed ×(1 + 0.08·lvl)
+SKILL_YIELD_PER_LVL = 0.05         # per-level chance of one bonus unit on a gather yield
+HUNT_LVL_BONUS = 0.03              # kill-chance a hunting level adds to a strike (capped in code)
+# The CRAFTING level each recipe tier opens at (tier-0 survival crafts are always open).
+TIER_CRAFT_LVL = {0: 0, 1: 1, 2: 3, 3: 5, 4: 6, 5: 7, 6: 8, 7: 9}
 ARROWS_PER_WHITTLE = 2             # arrows a child shapes from one length of wood
 BREED_MIN_AGE = 18 * DAYS_PER_YEAR
 BREED_MAX_AGE = 45 * DAYS_PER_YEAR
@@ -2266,13 +2282,15 @@ class World:
                 b = self._berry_index.get((x, y))
                 if b is not None and self._bush_ripe(b):
                     self._forage_bush(p, b)
+                    self._grow_skill(p, "foraging", 0.01)
             elif action == "gather":
                 g = float(self.veg_growth[y, x])
                 food_cap = PERSON["inv_cap"] + (6 if p["inv"].get("forage_sack", 0) else 0)
                 if edible[ly, lx] and g > PERSON["gather_min"] and p["inv"].get("food", 0) < food_cap:
                     take = min(g - 0.2, 0.3)
                     self.veg_growth[y, x] = g - take
-                    p["inv"]["food"] = p["inv"].get("food", 0) + 1
+                    p["inv"]["food"] = p["inv"].get("food", 0) + 1 + self._skill_bonus(p, "foraging")
+                    self._grow_skill(p, "foraging", 0.006)
             elif action == "hunt":
                 pid = p.pop("_prey", None)               # set by _hunt only on an adjacent strike
                 if pid:
@@ -2282,20 +2300,25 @@ class World:
             elif action == "fish":
                 if drinkable[ly, lx]:
                     rate = FISH_CATCH_ROD if p["inv"].get("fishing_rod", 0) else FISH_CATCH_BARE
+                    rate *= self._skill_speed(p, "fishing")      # a levelled angler lands them sooner
                     if self.rng.random() < rate * dt_game_min:
                         p["inv"]["fish"] = p["inv"].get("fish", 0) + 1
+                        self._grow_skill(p, "fishing", 0.08)
                         self.version += 1
             elif action == "chop":
-                # Felling wood is slow, dwelt-on labour; an axe roughly halves the work.
+                # Felling wood is slow, dwelt-on labour; an axe roughly halves the work,
+                # and a levelled woodcutter works quicker still and wins the odd extra log.
                 has_axe = p["inv"].get("axe", 0) > 0
-                chop_work = CHOP_WORK * (0.5 if has_axe else 1.0)
+                chop_work = CHOP_WORK * (0.5 if has_axe else 1.0) / self._skill_speed(p, "woodcutting")
                 if tree[ly, lx] and self._work_ready(p, "chop", dt_game_min, chop_work):
                     self.veg_growth[y, x] = max(0.0, float(self.veg_growth[y, x]) - BUILD["chop_take"])
                     if self.veg_growth[y, x] <= 0.05:        # felled — the tile clears
                         self.veg_sp[y, x] = VEG_NONE
                         self.veg_growth[y, x] = 0.0
-                    gain = BUILD["chop_yield"] + (BUILD["axe_bonus"] if has_axe else 0)
+                    gain = (BUILD["chop_yield"] + (BUILD["axe_bonus"] if has_axe else 0)
+                            + self._skill_bonus(p, "woodcutting"))
                     p["inv"]["wood"] = p["inv"].get("wood", 0) + gain
+                    self._grow_skill(p, "woodcutting", 0.02)
                     # Hacking wood by hand is hard, slow work — and out of that struggle a soul
                     # WORKS OUT the axe (knaps a sharp edge). It then spreads by teaching, so not
                     # everyone must rediscover it. (No one is born knowing how to make a tool.)
@@ -2306,20 +2329,26 @@ class World:
                                 rationale="a sharpened stone bites far deeper than bare hands — an axe!"):
                             self._note("discovery", f"{p['name']} worked out how to make a crude axe.")
             elif action == "mine":
-                if stone[ly, lx] and self._work_ready(p, "mine", dt_game_min, MINE_WORK):
-                    p["inv"]["stone"] = p["inv"].get("stone", 0) + BUILD["mine_yield"]
+                if stone[ly, lx] and self._work_ready(p, "mine", dt_game_min,
+                                                      MINE_WORK / self._skill_speed(p, "mining")):
+                    p["inv"]["stone"] = (p["inv"].get("stone", 0) + BUILD["mine_yield"]
+                                         + self._skill_bonus(p, "mining"))
+                    self._grow_skill(p, "mining", 0.025)
             elif action == "gather_fiber":
                 g = float(self.veg_growth[y, x])
                 if (fiber[ly, lx] and g > 0.20 and p["inv"].get("fiber", 0) < PERSON["inv_cap"]
                         and self._gather_ready(p, "fiber", dt_game_min)):
                     self.veg_growth[y, x] = max(0.0, g - 0.25)
-                    p["inv"]["fiber"] = p["inv"].get("fiber", 0) + 1
+                    p["inv"]["fiber"] = p["inv"].get("fiber", 0) + 1 + self._skill_bonus(p, "foraging")
+                    self._grow_skill(p, "foraging", 0.006)
             elif action == "gather_leaves":
                 g = float(self.veg_growth[y, x])
                 if (leaf[ly, lx] and g > 0.25 and p["inv"].get("leaves", 0) < LEAF_CAP
                         and self._gather_ready(p, "leaves", dt_game_min)):
                     self.veg_growth[y, x] = 0.0                  # stripped bare — the foliage is gone until it regrows
-                    p["inv"]["leaves"] = p["inv"].get("leaves", 0) + LEAF_GATHER
+                    p["inv"]["leaves"] = (p["inv"].get("leaves", 0) + LEAF_GATHER
+                                          + self._skill_bonus(p, "foraging"))
+                    self._grow_skill(p, "foraging", 0.006)
             elif action == "craft":
                 # If nothing's underway yet, start the bootstrap axe (survival crafts start
                 # their own item in the decide step). Then tick the active craft's timer;
@@ -2336,7 +2365,9 @@ class World:
             elif action == "build_block":
                 # Laying a tile is real labour — dwell on it. (The cabin self-test calls
                 # _build_next_block directly, bypassing this timer, so it stays one-per-call.)
-                if self._work_ready(p, "build", dt_game_min, BUILD_WORK):
+                # A levelled builder lays tile faster — mastery you can watch on the wall.
+                if self._work_ready(p, "build", dt_game_min,
+                                    BUILD_WORK / self._skill_speed(p, "building")):
                     self._build_next_block(p)
             # Seeking and wandering move the body; acting-in-place does not.
             if action in ("seek_food", "seek_water", "seek_wood", "seek_stone",
@@ -3900,7 +3931,7 @@ class World:
                 return prior
         who = client if client is not None else p              # the home's future OWNER (sizes the household)
         fam = self._household_size(who)
-        skill = (p.get("skills") or {}).get("building", 0.0)   # but the BUILDER's hands shape it
+        skill = self.skill_level(p, "building") / SKILL_MAX["building"]   # but the BUILDER's level shapes it
         # Material is chosen for the WHOLE house, never mixed: build in timber only when wood is
         # actually to hand (carried, or trees near home); otherwise raise a coherent all-LEAF house
         # rather than a half-finished timber one waiting on wood that isn't coming.
@@ -4896,10 +4927,41 @@ class World:
         p["build_cd"] = self.clock + 720.0      # nowhere to build here — try again later
 
     def _grow_skill(self, p, name, amt=CHILD_SKILL_GAIN):
-        """Nudge a soul's hands-on skill upward (capped). How a youngling who keeps at a thing
-        slowly gets good at it — the seed of competent adulthood."""
+        """Award skill XP — how a soul who keeps at a thing gets good at it. No cap here:
+        skill_level() reads levels off the accrued xp, and the per-skill mastery cap does
+        the limiting (the old min(1.0) would have frozen everyone at level 1)."""
         sk = p.setdefault("skills", {})
-        sk[name] = min(1.0, sk.get(name, 0.0) + amt)
+        sk[name] = sk.get(name, 0.0) + amt
+
+    def skill_level(self, p, name) -> int:
+        """A skill's LEVEL — 0 up to its mastery cap — read from the xp earned by doing."""
+        xp = float((p.get("skills") or {}).get(name, 0.0))
+        cap = SKILL_MAX.get(name, 5)
+        lv, need = 0, SKILL_XP_BASE
+        while lv < cap and xp >= need:
+            xp -= need
+            lv += 1
+            need *= SKILL_XP_RAMP
+        return lv
+
+    def skill_progress(self, p, name):
+        """(level, cap, fraction-toward-next) for the inspector; fraction reads 1.0 at mastery."""
+        xp = float((p.get("skills") or {}).get(name, 0.0))
+        cap = SKILL_MAX.get(name, 5)
+        lv, need = 0, SKILL_XP_BASE
+        while lv < cap and xp >= need:
+            xp -= need
+            lv += 1
+            need *= SKILL_XP_RAMP
+        return lv, cap, (1.0 if lv >= cap else round(min(1.0, xp / need), 3))
+
+    def _skill_speed(self, p, name) -> float:
+        """Work-speed multiplier from a skill's level — a practiced hand is a quick one."""
+        return 1.0 + SKILL_SPEED_PER_LVL * self.skill_level(p, name)
+
+    def _skill_bonus(self, p, name) -> int:
+        """1 when a gatherer's level wins a bonus unit from this yield, else 0."""
+        return 1 if self.rng.random() < SKILL_YIELD_PER_LVL * self.skill_level(p, name) else 0
 
     def _child_forage(self, p, edible, lx, ly):
         """A youngling forages food — useful work small hands CAN do, and practice that grows
@@ -5053,7 +5115,7 @@ class World:
             if task.get("furn"):                         # a furnished tile: set the bed/table/… on it
                 self.decor[(task["x"], task["y"])] = task["furn"]
         task["done"] = True
-        self._grow_skill(p, "building", CHILD_SKILL_GAIN)   # hands learn the trade by laying tile
+        self._grow_skill(p, "building", 0.02)               # hands learn the trade by laying tile
         if site.get("owner") and p.get("id") != site["owner"]:   # remember who built it FOR the owner
             hs = site.setdefault("helpers", [])
             if p["id"] not in hs:
@@ -5750,9 +5812,9 @@ class World:
         return False
 
     def _gather_ready(self, p, key, dt) -> bool:
-        """Thin wrapper: an armful of leaves/fiber takes GATHER_WORK game-min of hand-work."""
-        return self._work_ready(p, key, dt, GATHER_WORK)
-        return False
+        """Thin wrapper: an armful of leaves/fiber takes GATHER_WORK game-min of hand-work —
+        less as the gatherer's foraging levels (a practiced hand strips a bush quicker)."""
+        return self._work_ready(p, key, dt, GATHER_WORK / self._skill_speed(p, "foraging"))
 
     def _passable(self, nx, ny) -> bool:
         """A tile a person may step onto: in bounds, not deep water (rivers/shallows are fordable),
@@ -6176,8 +6238,12 @@ class World:
                  if big else [p])
         if big and len(party) < HUNT_PARTY_MIN:
             return False                                       # too few hands — the deer breaks away
-        if self.rng.random() >= (HUNT_KILL_SPEAR if has_spear else HUNT_KILL_BARE):
+        # A levelled hunter strikes surer — skill added to the base odds, capped short of certain.
+        kill = ((HUNT_KILL_SPEAR if has_spear else HUNT_KILL_BARE)
+                + HUNT_LVL_BONUS * self.skill_level(p, "hunting"))
+        if self.rng.random() >= min(0.95, kill):
             return False
+        self._grow_skill(p, "hunting", 0.15)                   # a kill is the lesson that sticks
         self.animals = [a for a in self.animals if a["id"] != prey["id"]]
         yld = HUNT_MEAT_YIELD.get(prey["sp"], 2) + (1 if has_spear else 0)
         if big and len(party) > 1:                             # share the carcass among the party
@@ -6745,6 +6811,9 @@ class World:
         else:
             if rid in crafting.SURVIVAL_DISCOVERIES and not self._person_knows(p, rid):
                 return False                                     # can't make what they haven't worked out
+            r0 = crafting.recipe(rid)
+            if r0 and self.skill_level(p, "crafting") < TIER_CRAFT_LVL.get(r0["tier"], 0):
+                return False                    # a craft beyond their level — hands not yet good enough
             if not crafting.can_craft(inv, rid, stations=stations, tools=None):
                 return False
             r = crafting.RECIPES[rid]
@@ -6824,10 +6893,13 @@ class World:
         inv = p["inv"]
         tool_rids = {rid for rid, _ in self._TOOLS}
         SAFE_RAWS = {"wood", "stone", "fiber", "leaves"}
+        craft_lv = self.skill_level(p, "crafting")
         for rid in crafting.TECH_LADDER:
             r = crafting.recipe(rid)
             if not r or r["out"] in crafting.STRUCTURE_KINDS:  # don't auto-raise big structures/homes
                 continue
+            if craft_lv < TIER_CRAFT_LVL.get(r["tier"], 0):
+                continue                                       # beyond their level — practice the lower rungs first
             if rid in tool_rids and not self._can_make_tools(p):
                 continue                                       # tools are the toolmaker's craft (tool-gating)
             out = "axe" if rid == "crude_axe" else r["out"]    # the OUTPUT ITEM — cap on THIS, not the recipe id.
@@ -6867,6 +6939,7 @@ class World:
         speed = WORKSHOP_CRAFT_SPEED if self._near_workshop(p) else 1.0
         if self._powered(p["x"], p["y"]):                # electric tools speed every craft
             speed *= POWER_CRAFT_SPEED
+        speed *= self._skill_speed(p, "crafting")        # practiced hands finish sooner
         c["left"] = max(0.0, c["left"] - dt_game_min * speed)
         if c["left"] > 0:
             return False
@@ -6883,6 +6956,10 @@ class World:
         self.version += 1
         rid = c["rid"]
         p["craft"] = None
+        # The finished piece is the lesson: deeper-tier work teaches more (this is what levels
+        # a crafter into the tiers above — see TIER_CRAFT_LVL).
+        _r = crafting.recipe(rid)
+        self._grow_skill(p, "crafting", 0.35 * (1 + (_r["tier"] if _r else 0)))
         nice = rid.replace("_", " ")
         self._note("craft", f"{p['name']} finished a {nice}.")
         mind.remember(p, self._CRAFT_DONE_NOTE.get(rid, f"crafted a {nice} with my own hands"),
@@ -7336,6 +7413,9 @@ class World:
             if str(p.get("id")) == str(pid):
                 c = p.get("craft")
                 d = dict(p)
+                # Skills as LEVELS for the inspector: level / mastery cap / progress to next.
+                d["skill_levels"] = {k: dict(zip(("lv", "max", "next"), self.skill_progress(p, k)))
+                                     for k in (p.get("skills") or {})}
                 if c and c.get("total"):
                     d["crafting"] = {"rid": c["rid"], "out": c["out"],
                                      "pct": round(max(0.0, 1.0 - c["left"] / c["total"]), 3),
@@ -8952,6 +9032,28 @@ if __name__ == "__main__":
     print(f"  god-orders test: bade={bool(gave)} went-where-sent={went_d <= 2} "
           f"queue-emptied={not ob.get('orders')} gathered-as-bidden={ob['inv'].get('fiber', 0) >= 1} "
           f"-> {'OK' if order_ok else 'FAILED'}")
+
+    # SKILL LEVELS — start at 0, mastery caps vary, levels speed work and gate recipe tiers.
+    wsk = World().generate(seed=5); wsk.people = []
+    syy, sxx = np.argwhere((wsk.water == WATER_NONE) & (wsk.biome == B["grassland"]))[0]
+    wsk._add_person(int(sxx), int(syy), name="Prentice")
+    sp = wsk.people[0]
+    sp["skills"] = {}
+    lv0 = wsk.skill_level(sp, "crafting") == 0                    # every skill begins at level 0
+    sp["inv"] = {"wood": 9, "stick": 4}
+    locked = not wsk._begin_craft(sp, "plank", stations=("workbench",))   # tier 1 at lvl 0 → refused
+    sp["skills"]["crafting"] = 2.0                                 # a few finished crafts of practice
+    lv1 = wsk.skill_level(sp, "crafting") >= 1
+    opened = wsk._begin_craft(sp, "plank", stations=("workbench",))       # …and the tier opens
+    sp["craft"] = None
+    sp["skills"]["crafting"] = 999.0                               # a lifetime of it
+    capped = wsk.skill_level(sp, "crafting") == SKILL_MAX["crafting"]     # …capped at ITS OWN max
+    varied = SKILL_MAX["crafting"] != SKILL_MAX["foraging"]        # caps vary by skill
+    quick = wsk._skill_speed(sp, "crafting") > 1.3                 # mastery works markedly faster
+    skill_ok = lv0 and locked and lv1 and opened and capped and varied and quick
+    print(f"  skill-levels test: starts-lv0={lv0} tier1-locked-at-lv0={locked} "
+          f"levels-open-tiers={opened} caps-vary={varied} cap-holds={capped} "
+          f"mastery-speeds-work={quick} -> {'OK' if skill_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")

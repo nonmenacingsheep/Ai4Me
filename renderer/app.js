@@ -5585,9 +5585,15 @@ function renderPersonPanel(p) {
     standingLine(p.renown) +
     `<div class="wp-sec">Temperament <em>(born · lived drift)</em></div>` +
     `<div class="wp-traits">${['sociability', 'ambition', 'curiosity', 'caution'].map(trait).join('')}</div>` +
-    (p.skills && Object.keys(p.skills).length
-      ? `<div class="wp-sec">Skills <em>grown by doing</em></div>` +
-        Object.entries(p.skills).sort().map(([k, v]) => bar(k, v, '#c9a24a')).join('')
+    (p.skill_levels && Object.keys(p.skill_levels).length
+      ? `<div class="wp-sec">Skills <em>level up by doing — bar fills toward the next level</em></div>` +
+        Object.entries(p.skill_levels).sort().map(([k, s]) => {
+          const mastered = s.lv >= s.max;
+          const fill = mastered ? 100 : Math.round((s.next || 0) * 100);
+          return `<div class="wp-bar"><span>${escapeHtml(k)}</span>` +
+            `<div class="wp-track"><i style="width:${fill}%;background:${mastered ? '#e8c76a' : '#c9a24a'}"></i></div>` +
+            `<b>${mastered ? `Lv ${s.lv} ★` : `Lv ${s.lv}/${s.max}`}</b></div>`;
+        }).join('')
       : '') +
     `<div class="wp-sec">Carrying</div><div class="wp-inv">${escapeHtml(inv)}</div>` +
     (store ? `<div class="wp-sec">Larder at home</div><div class="wp-inv">${escapeHtml(store)}</div>` : '') +
