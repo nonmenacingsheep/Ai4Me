@@ -342,13 +342,22 @@ SITE_CANDIDATES_CAP = 60      # how many fitting spots to weigh before committin
 # whatever blueprint it's given. Blocks live in a sparse layer (self.blocks);
 # roofs in self.roofs; an in-progress building is a "site" with per-tile tasks.
 BLOCK_EMPTY, BLOCK_FLOOR, BLOCK_WALL, BLOCK_DOOR, BLOCK_WINDOW, BLOCK_FENCE, BLOCK_LEAF = 0, 1, 2, 3, 4, 5, 6
+# BETTER BUILDING MATERIALS — the masonry palette a DESIGNER can raise once a band works stone,
+# brick and glass: a stone-walled keep, brick halls, glazed windows, marble floors, pillared
+# galleries, a grand gate. New codes are INERT in the founding survival sim (no built-in home uses
+# them, no organic soul places one), so they appear only where the designer/god actually raises them.
+BLOCK_STONE, BLOCK_PILLAR, BLOCK_GLASS, BLOCK_MARBLE, BLOCK_GATE, BLOCK_BRICK = 7, 8, 9, 10, 11, 12
 BLOCK_NAMES = {BLOCK_FLOOR: "floor", BLOCK_WALL: "wall", BLOCK_DOOR: "door",
-               BLOCK_WINDOW: "window", BLOCK_FENCE: "fence", BLOCK_LEAF: "leaves"}
+               BLOCK_WINDOW: "window", BLOCK_FENCE: "fence", BLOCK_LEAF: "leaves",
+               BLOCK_STONE: "stone wall", BLOCK_PILLAR: "pillar", BLOCK_GLASS: "glass",
+               BLOCK_MARBLE: "marble floor", BLOCK_GATE: "gate", BLOCK_BRICK: "brick wall"}
 # Blueprint glyphs → block codes (rows read top-down, like a tiny map). "C" is a
 # special core: no block is placed, but the tile is roofed and becomes the home —
 # used for the open-fronted leaf lean-to whose centre you walk into.
 BLOCK_CHARS = {".": BLOCK_EMPTY, "F": BLOCK_FLOOR, "W": BLOCK_WALL,
-               "D": BLOCK_DOOR, "O": BLOCK_WINDOW, "#": BLOCK_FENCE, "L": BLOCK_LEAF}
+               "D": BLOCK_DOOR, "O": BLOCK_WINDOW, "#": BLOCK_FENCE, "L": BLOCK_LEAF,
+               "S": BLOCK_STONE, "P": BLOCK_PILLAR, "G": BLOCK_GLASS,
+               "M": BLOCK_MARBLE, "N": BLOCK_GATE, "K": BLOCK_BRICK}
 GLYPH_CORE = "C"
 # FURNITURE glyphs — a designed building can carry its OWN furnishings: each is a walkable FLOOR tile
 # with a piece of furniture set on it, so a home is built complete (a bed inside) instead of souls
@@ -358,9 +367,11 @@ FURNITURE_CHARS = {"b": "bed", "t": "table", "c": "chair", "x": "chest"}
 # Material a single block costs (item, qty). Wood/fiber/leaf based so a band can
 # build straight from what it forages, no workshop required.
 BLOCK_COST = {BLOCK_FLOOR: ("wood", 1), BLOCK_WALL: ("wood", 2), BLOCK_DOOR: ("wood", 2),
-              BLOCK_WINDOW: ("wood", 1), BLOCK_FENCE: ("wood", 1), BLOCK_LEAF: ("leaves", 1)}
+              BLOCK_WINDOW: ("wood", 1), BLOCK_FENCE: ("wood", 1), BLOCK_LEAF: ("leaves", 1),
+              BLOCK_STONE: ("stone", 3), BLOCK_PILLAR: ("stone", 2), BLOCK_GLASS: ("glass", 1),
+              BLOCK_MARBLE: ("stone", 1), BLOCK_GATE: ("wood", 3), BLOCK_BRICK: ("brick", 2)}
 ROOF_COST = ("fiber", 2)                 # default thatch over each sheltered tile
-SOLID_BLOCKS = {BLOCK_WALL}  # tiles people can't walk through. A leaf lean-to is flimsy and
+SOLID_BLOCKS = {BLOCK_WALL, BLOCK_STONE, BLOCK_BRICK, BLOCK_PILLAR}  # can't walk through — masonry & columns block; a leaf lean-to is flimsy and
 # open-fronted, so it is NOT solid: people brush through its panels. (When leaf panels blocked
 # movement, non-overlapping shelters packed along the narrow bank into a wall that boxed folk
 # away from the water they'd settled beside — and they died of thirst at home.)
@@ -464,6 +475,30 @@ BLUEPRINTS = {
         "WFFFW",
         "WFFFW",
         "WWWWW",
+    ]),
+    # A GRAND KEEP — the showpiece of the MASONRY palette: a stone curtain wall with four corner
+    # towers (marble chambers with glazed windows), a gatehouse, an open courtyard, and a brick-
+    # walled great hall inside — pillared, marble-floored, a throne at its heart. Far beyond a
+    # timber hut: the kind of "really complex" thing the designer can raise once it works stone,
+    # brick and glass. (S stone · K brick · P pillar · G glass · M marble · N gate · c throne.)
+    "castle": dict(name="Grand Keep", roof=True, insulation=1.0, communal=True, grand=True, layout=[
+        "SSSSSSSSSSSSSSSSS",
+        "SMbD.........DbMS",
+        "SMMS.........SMMS",
+        "SGSS.........SSGS",
+        "S...............S",
+        "S...KKKGKGKKK...S",
+        "S...KMMMMMMMK...S",
+        "S...GMPMtMPMG...S",
+        "S...KMMMcMMMK...S",
+        "S...GMPMtMPMG...S",
+        "S...KMMMMMMMK...S",
+        "S...KKKKDKKKK...S",
+        "S...............S",
+        "SGSS.........SSGS",
+        "SMMS.........SMMS",
+        "SMbD.........DbMS",
+        "SSSSSSSSNSSSSSSSS",
     ]),
 }
 
@@ -4087,12 +4122,12 @@ class World:
         Hh = len(layout)
         Ww = max(len(r) for r in layout)
         grid = [r.ljust(Ww, ".") for r in layout]
-        solid = {"W", "O"}                                # walls & windows block; leaf is soft-passable
-        walkable = {"F", "C"} | set(FURNITURE_CHARS)      # a furniture tile is a walkable floor too
+        solid = {"W", "O", "S", "K", "P", "G"}            # walls/windows + stone/brick/pillar/glass all block; leaf is soft-passable
+        walkable = {"F", "C", "M", "N"} | set(FURNITURE_CHARS)   # marble & a gateway are walkable floors too
         floors = [(x, y) for y in range(Hh) for x in range(Ww) if grid[y][x] in walkable]
         if not floors:
             return False, "no floor"
-        if Hh * Ww > 144 or len(floors) > 60:
+        if Hh * Ww > 196 or len(floors) > 110:            # room for a grander hall/keep (masonry era), still sane
             return False, "oversized footprint"
         # Flood from OUTSIDE the box inward through every non-solid tile; each floor must be touched.
         seen = {(-1, -1)}
@@ -4728,7 +4763,7 @@ class World:
                     return None, None
                 blocks.append({"x": tx, "y": ty, "code": int(code), "layer": "block",
                                "cost": list(BLOCK_COST[code]), "done": False})
-                if bp.get("roof") and code in (BLOCK_FLOOR, BLOCK_DOOR):
+                if bp.get("roof") and code in (BLOCK_FLOOR, BLOCK_DOOR, BLOCK_MARBLE, BLOCK_GATE):
                     roof.append({"x": tx, "y": ty, "code": int(code), "layer": "roof",
                                  "cost": list(roof_cost), "done": False})
         return blocks + roof, core
@@ -8233,6 +8268,8 @@ if __name__ == "__main__":
     wl = World().generate(seed=11)
     lint_bad = []
     for bpn, bp in list(BLUEPRINTS.items()):
+        if bp.get("grand"):
+            continue                                         # grand god-stamped works (a keep) exceed the sane-HOME size cap by design
         ok, why = wl._validate_blueprint(bp["layout"])
         if not ok:
             lint_bad.append((bpn, why))

@@ -64,15 +64,39 @@ _SAMPLE_AUTHORED = {
 
 
 def run(tier: str = "town", seed: int = 1, populate: bool = True, authored: bool = False):
-    """Build a town on a blank world and return (world, report). With `authored`, first feed the
-    designer a validated LLM-style building design so build_town raises the band's OWN design."""
+    """Build on a blank world and return (world, report). tier village|town|city → a whole
+    settlement (build_town); tier castle|keep → raise the GRAND KEEP alone (the masonry showpiece).
+    With `authored`, first feed the designer a validated LLM-style design so it's raised too."""
     w = blank_world(seed)
     injected = None
     if authored:
         injected = w.apply_authored_building(dict(_SAMPLE_AUTHORED), by="the Lab")
     cx, cy = w._origin
+    if tier in ("castle", "keep", "grand"):
+        return w, _build_grand(w, cx, cy, populate)
     summary = w.build_town(cx, cy, tier=tier, populate=populate)
     return w, report(w, summary, injected)
+
+
+def _build_grand(w, cx, cy, populate: bool):
+    """Raise the GRAND KEEP on the blank canvas — the designer's most complex structure, built
+    from the masonry palette (stone/brick/pillar/glass/marble/gate). A few folk take up residence."""
+    site = w._stamp_building("castle", cx, cy, communal=True)
+    if site is None:
+        return {"error": "the keep would not fit here"}
+    if populate:
+        floors = [(t["x"], t["y"]) for t in site["tasks"]
+                  if t.get("code") == W.BLOCK_MARBLE and t.get("layer") == "block"]
+        for (fx, fy) in floors[:6]:
+            q = w._add_person(int(fx), int(fy), age=float(w.rng.integers(W.ADULT_AGE + 200, W.ADULT_AGE + 1400)))
+            q["home"], q["home_struct"], q["insul"] = (int(fx), int(fy)), site["id"], site.get("insul", 1.0)
+    rep = report(w)
+    mats = {}
+    for t in site["tasks"]:
+        if t.get("layer") == "block":
+            mats[W.BLOCK_NAMES.get(t["code"], "?")] = mats.get(W.BLOCK_NAMES.get(t["code"], "?"), 0) + 1
+    rep["grand"] = {"name": site.get("name"), "tiles": len(site["tasks"]), "materials": mats}
+    return rep
 
 
 # ── the report ───────────────────────────────────────────────────────────────
@@ -114,6 +138,13 @@ def report(w, summary=None, injected=None) -> dict:
 
 
 def print_report(rep: dict):
+    if rep.get("grand"):
+        gr = rep["grand"]
+        print("\n── the designer's grand keep ───────────────────────────────────")
+        print(f"  {gr['name']} — {gr['tiles']} tiles of masonry")
+        print(f"  materials: {gr['materials']}")
+        print("────────────────────────────────────────────────────────────────")
+        return
     print("\n── the designer's town ─────────────────────────────────────────")
     if rep.get("town_name"):
         print(f"  {rep['town_name']}" + (f" · {rep['square']}" if rep.get('square') else "")
@@ -131,21 +162,19 @@ def print_report(rep: dict):
 
 
 # ── the picture ──────────────────────────────────────────────────────────────
-_BLOCK_RGB = {1: "#ab8456", 2: "#78522d", 3: "#c49e5c", 4: "#96c4d6", 5: "#96785a", 6: "#4e8a40"}
+_BLOCK_RGB = {1: "#ab8456", 2: "#78522d", 3: "#c49e5c", 4: "#96c4d6", 5: "#96785a", 6: "#4e8a40",
+              7: "#8a8a84", 8: "#b2b0a8", 9: "#96cde1", 10: "#e0dcd0", 11: "#966e46", 12: "#a65c4a"}
 _DECOR_DOT = {"bed": "#c2563f", "table": "#8a6038", "chair": "#9a6e3e", "chest": "#6e4a26",
               "cairn": "#b4b0a8", "obelisk": "#b9b3a6", "totem": "#c8a23a", "statue": "#c9c3b6",
               "fountain": "#5fb6e6", "arch": "#b3ada1"}
 
 
 def render_html(w, path: str, title: str = "Designer's Town"):
-    """Write a self-contained HTML picture of the town — the blocks, roads, water, furniture and
-    folk in the built region, drawn on a canvas with a legend. Open it in any browser."""
-    if not w.sites and not w.roads:
-        xs = ys = [w._origin[0]], [w._origin[1]]
-    xs = [t[0] for t in w.roads] + [s["ox"] for s in w.sites]
-    ys = [t[1] for t in w.roads] + [s["oy"] for s in w.sites]
-    if not xs:
-        xs, ys = [w._origin[0]], [w._origin[1]]
+    """Write a self-contained HTML picture of the build — every placed block, road, water tile,
+    furniture and folk in the region, drawn on a canvas with a legend. Open it in any browser."""
+    marks = list(w.blocks.keys()) + list(w.roads.keys()) + list(w.decor.keys())   # every drawn tile
+    xs = [t[0] for t in marks] or [w._origin[0]]
+    ys = [t[1] for t in marks] or [w._origin[1]]
     pad = 3
     x0, x1 = min(xs) - pad, max(xs) + pad
     y0, y1 = min(ys) - pad, max(ys) + pad
@@ -238,7 +267,7 @@ if __name__ == "__main__":
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("village", "town", "city"):
+        if a in ("village", "town", "city", "castle", "keep", "grand"):
             tier = a
         elif a == "--seed" and i + 1 < len(args):
             seed = int(args[i + 1]); i += 1
