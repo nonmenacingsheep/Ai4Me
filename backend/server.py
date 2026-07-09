@@ -1300,6 +1300,44 @@ async def api_world_order(req: Request):
     return {"ok": bool(summary), "result": summary}
 
 
+@app.post("/api/world/commission")
+async def api_world_commission(req: Request):
+    """The PROMPTABLE designer: the god asks in plain words ('a shrine to my god') and the designer
+    AI designs the building, sites it by the settlement, and raises it — returning its PLAN (name,
+    purpose, where, materials, and the designer's own words). Uses the LLM if a World mind is
+    running, and always falls back to the offline template designer so it works with no model."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"ok": False, "result": "World is off — enable it in Settings."}
+    body = await req.json()
+    request_text = str(body.get("request") or "").strip()[:200]
+    if not request_text:
+        return {"ok": False, "result": "Say what you'd like built."}
+    w = await asyncio.to_thread(world_store.get_world)
+    design = None
+    try:                                                   # the LLM architect, if a model is up
+        ctx = {"settlement": (w._band_settlement() or {}).get("name") or "the settlement",
+               "can_build_with": "wood, stone, brick, glass and marble"}
+        sysm, usr = mind_store.commission_messages(request_text, ctx)
+        raw = await asyncio.wait_for(
+            brain._complete(sysm, usr, max_tokens=420,
+                            model=brain.world_model or None, num_ctx=brain.world_num_ctx or None),
+            MIND_THINK_BUDGET)
+        data = brain._parse_json_object(raw)
+        if isinstance(data, dict) and data.get("layout"):
+            design = data
+    except Exception as e:
+        print(f"[commission] LLM design fell back to templates ({type(e).__name__}: {e})")
+    if design is None:                                     # offline template designer — always works
+        design = mind_store.commission_offline(request_text)
+    rep = await asyncio.to_thread(w.commission_build, design, request_text, "the god")
+    if rep.get("ok"):
+        await asyncio.to_thread(w.save)
+        await broadcast({"type": "world_changed",
+                         "changes": [f"a {rep['name'].lower()} was raised at "
+                                     f"({rep['where'][0]}, {rep['where'][1]})"]})
+    return {"ok": bool(rep.get("ok")), "plan": rep}
+
+
 @app.post("/api/world/speed")
 async def api_world_speed(req: Request):
     """Set the live fast-forward multiplier (1×/2×/4×) for the World tab. Persisted on the

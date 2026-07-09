@@ -1102,6 +1102,93 @@ def apply_discovery(p: dict, data: dict, ctx: dict, world_known: set, clock: flo
     return None
 
 
+# ── the PROMPTABLE designer — a god asks in words, the designer answers with a plan ──────────
+# The GLYPH palette the architect designs in (shared by the autonomous author + the commission).
+_GLYPH_LEGEND = (
+    "  W = wall   F = floor (inside)   D = door (on an OUTER edge)   O = window   C = HEART of the "
+    "building (a shrine's idol, a hall's hearth)   . = open ground (outside)\n"
+    "  MASONRY (grand materials): S = stone wall   K = brick wall   P = stone pillar   G = glazed "
+    "window   M = marble floor   N = grand gateway (like a door)\n"
+    "  FURNITURE (a floor tile with a piece on it, indoors): b = bed  t = table  c = chair  x = chest\n"
+)
+
+
+def commission_messages(request: str, ctx: dict) -> tuple[str, str]:
+    """Build (system, user) for a COMMISSION: the god has asked, in plain words, for a building, and
+    the master builder must design it — name it, plan its floor, choose its stuff, and answer their
+    god. The engine then validates and raises it. This is the promptable designer (the LLM path)."""
+    have = ctx.get("can_build_with") or "wood, stone, brick, glass and marble"
+    where = ctx.get("settlement") or "the settlement"
+    system = (
+        "You are the master builder and architect of a small people, answering your god's command to "
+        "raise a building. You think in floor-plans and reply with ONE JSON object only — no prose "
+        "outside it.\n"
+        "A plan is a grid of single-character GLYPHS, one string per row, every row the SAME length:\n"
+        + _GLYPH_LEGEND +
+        "Design something FITTING and handsome for what's asked — a shrine is small and solemn with an "
+        "idol (C) at its heart; a temple or keep is grand, pillared and glazed; a tower is tall and "
+        "narrow. Use the masonry glyphs for anything meant to last or awe.\n"
+        "RULES: wall the floor in; put at LEAST one door (D) or gateway (N) on an OUTER edge; make every "
+        "inside tile reachable from it; put C at the heart; at MOST 20 rows by 20 columns.\n"
+        'Reply as JSON: {"name": "<short name>", "function": '
+        '"<shrine|temple|monument|garden|palace|keep|tower|library|hall|workshop|storehouse|smithy|home>", '
+        '"purpose": "<one short phrase>", "say": "<your reply TO YOUR GOD — first person, what you\'ll '
+        'raise and where you\'ll set it>", "layout": ["SSNSS","SMCMS","SSSSS"]}'
+    )
+    user = (f'In {where}, your people can build with: {have}.\n'
+            f'Your god commands: "{request}".\nDesign it, and answer your god.')
+    return system, user
+
+
+# Offline template library — so the promptable designer WORKS with no model: a keyword picks a
+# handsome, valid masonry plan. Each is a small, connected floor-plan with C at its heart.
+_T_SHRINE = ["..SNS..", ".SMMMS.", "SMPMPMS", "SMMCMMS", "SMPMPMS", ".SMMMS.", "..SGS.."]
+_T_TEMPLE = ["SSSSNSSSS", "SMMMMMMMS", "SPMPMPMPS", "GMMMMMMMG", "SMMMCMMMS",
+             "GMMMMMMMG", "SPMPMPMPS", "SMMMMMMMS", "SSSSDSSSS"]
+_T_TOWER = ["SSSSS", "SMMMS", "SGMGS", "SMMMS", "SGMGS", "SMCMS", "SGMGS", "SMMMS", "SSNSS"]
+_T_LIBRARY = ["KKKKNKKKK", "KMtMMMtMK", "KMMMMMMMK", "GMtMCMtMG", "KMMMMMMMK", "KMtMMMtMK", "KKKKKKKKK"]
+_T_MONUMENT = [".SSS.", "SMMMS", "SMCMS", "SMMMS", ".SNS."]
+_T_HALL = ["SSSSDSSSS", "SMMMMMMMS", "SPMMMMMPS", "SMMMCMMMS", "SPMMMMMPS", "SMMMMMMMS", "SSSSSSSSS"]
+_T_GARDEN = ["SSSSNSSSS", "S.......S", "S.MMMMM.S", "S.M...M.S", "S.M.C.M.S",
+             "S.M...M.S", "S.MMMMM.S", "S.......S", "SSSSSSSSS"]
+_T_KEEP = ["SSSSSSSSSSSSSSSSS", "SMbD.........DbMS", "SMMS.........SMMS", "SGSS.........SSGS",
+           "S...............S", "S...KKKGKGKKK...S", "S...KMMMMMMMK...S", "S...GMPMtMPMG...S",
+           "S...KMMMCMMMK...S", "S...GMPMtMPMG...S", "S...KMMMMMMMK...S", "S...KKKKDKKKK...S",
+           "S...............S", "SGSS.........SSGS", "SMMS.........SMMS", "SMbD.........DbMS",
+           "SSSSSSSSNSSSSSSSS"]
+
+
+def commission_offline(request: str, rng=None) -> dict:
+    """Design a building for a plain-words request with NO model — a keyword picks a handsome,
+    valid masonry plan and the designer's own reply. The offline promptable designer."""
+    r = (request or "").lower()
+    def has(*ws): return any(w in r for w in ws)
+    if has("temple", "cathedral", "basilica", "sanctuary"):
+        d = ("temple", "Temple", _T_TEMPLE, "a house for the holy, pillared and glazed")
+    elif has("shrine", "altar", "chapel", "idol"):
+        d = ("shrine", "Shrine", _T_SHRINE, "a small stone shrine with an idol at its heart")
+    elif has("tower", "lighthouse", "spire", "beacon", "belfry"):
+        d = ("tower", "Tower", _T_TOWER, "a tall stone tower to watch the far country")
+    elif has("library", "archive", "athenaeum", "scriptorium"):
+        d = ("library", "Library", _T_LIBRARY, "a brick hall of tables where lore is kept")
+    elif has("keep", "castle", "fortress", "citadel", "palace", "stronghold"):
+        d = ("keep", "Grand Keep", _T_KEEP, "a stone keep with towers and a great hall")
+    elif has("monument", "obelisk", "statue", "memorial", "pillar", "column"):
+        d = ("monument", "Monument", _T_MONUMENT, "a stone monument crowned with an obelisk")
+    elif has("garden", "grove", "court", "cloister"):
+        d = ("garden", "Garden", _T_GARDEN, "a walled garden about a fountain")
+    elif has("hall", "longhouse", "meeting", "feast", "moot", "bath", "forum"):
+        d = ("hall", "Great Hall", _T_HALL, "a pillared hall for the whole people")
+    else:
+        d = ("shrine", "Shrine", _T_SHRINE, "a small stone shrine, an offering in cut stone")
+    role, name, layout, purpose = d
+    say = (f"As you command — {purpose}. I'll cut the stone and raise it on a clearing by the town, "
+           f"where all will see it.")
+    roof = role not in ("garden", "monument")
+    return {"name": name, "function": role, "purpose": purpose, "say": say,
+            "layout": list(layout), "roof": roof}
+
+
 def author_building_messages(p: dict, ctx: dict) -> tuple[str, str]:
     """Build (system, user) asking the mind to DESIGN a new kind of building for its settlement —
     the LLM as ARCHITECT (Phase A). It returns a small glyph-grid floor-plan the engine then

@@ -4112,7 +4112,7 @@ class World:
                 best, best_floor = ub["id"], floor
         return best
 
-    def _validate_blueprint(self, layout) -> tuple:
+    def _validate_blueprint(self, layout, grand=False) -> tuple:
         """Lint a building layout: it must enclose at least one floor/core tile, every such tile
         must be reachable FROM OUTSIDE (through doors or open/leaf panels — no walled-off room a
         soul could never enter), and the footprint must be a sane size. The guard that keeps a
@@ -4127,7 +4127,8 @@ class World:
         floors = [(x, y) for y in range(Hh) for x in range(Ww) if grid[y][x] in walkable]
         if not floors:
             return False, "no floor"
-        if Hh * Ww > 196 or len(floors) > 110:            # room for a grander hall/keep (masonry era), still sane
+        max_tiles, max_floors = (576, 400) if grand else (196, 110)   # a god-commissioned work may be grand
+        if Hh * Ww > max_tiles or len(floors) > max_floors:
             return False, "oversized footprint"
         # Flood from OUTSIDE the box inward through every non-solid tile; each floor must be touched.
         seen = {(-1, -1)}
@@ -5657,6 +5658,97 @@ class World:
                              + (f" ({bp['purpose']})" if bp["purpose"] else "") + ".")
         return bid
 
+    # ── the PROMPTABLE designer — a god asks, the designer designs, sites and raises it ──────────
+    # Decorative/cultural roles a commission may fill beyond the mechanical functions — a shrine has
+    # no effect but its presence; it's a landmark. (Mechanical functions still key off _bp_function.)
+    COMMISSION_ROLES = ("shrine", "temple", "monument", "garden", "palace", "keep", "bath", "tower",
+                        "library", "arena", "lighthouse")
+    # A centrepiece a shrine/monument gets set at its heart, by role.
+    _CENTREPIECE = {"shrine": "statue", "temple": "statue", "monument": "obelisk", "palace": "fountain",
+                    "garden": "fountain", "keep": "statue", "library": "obelisk", "tower": "obelisk"}
+
+    def _clear_footprint(self, px, py, bw, bh, margin=1) -> bool:
+        """Is the bw×bh box centred on (px,py) — plus a margin — all in bounds, dry, and clear of
+        existing blocks/roads? The siting test for dropping a whole building somewhere sensible."""
+        ox, oy = px - bw // 2, py - bh // 2
+        for yy in range(oy - margin, oy + bh + margin):
+            for xx in range(ox - margin, ox + bw + margin):
+                if not self._in(xx, yy) or self.water[yy, xx] != WATER_NONE:
+                    return False
+                if (xx, yy) in self.blocks or (xx, yy) in self.roads:
+                    return False
+        return True
+
+    def _commission_site(self, bw, bh):
+        """Find a good clear spot to raise a commissioned work: near the band's settlement (or the
+        founding valley) but not on top of anything, searching outward in rings. Returns (px,py) or
+        None. So a shrine lands on a real clearing by the town, not floating in the sea."""
+        s = self._band_settlement() or {}
+        cx, cy = (s.get("centre") or self._origin)
+        cx, cy = int(cx), int(cy)
+        step = max(2, max(bw, bh) // 2)
+        for r in range(max(bw, bh) // 2 + 2, 90, step):       # rings outward from the heart
+            for ang in range(0, 360, 30):
+                px = cx + int(round(r * np.cos(np.radians(ang))))
+                py = cy + int(round(r * np.sin(np.radians(ang))))
+                if self._clear_footprint(px, py, bw, bh):
+                    return px, py
+        return None
+
+    def commission_build(self, design, request="", by="the god", instant=True) -> dict:
+        """RAISE a god-commissioned building from a designed floor-plan. Validates the plan through
+        the immune system (with a GRAND allowance — a god may ask for a keep), registers it as a
+        reusable design, finds it a clear site by the settlement, and stamps it (instantly, at a
+        god's word). Returns a rich PLAN report — name, purpose, where, materials, and the designer's
+        own words — so the caller can say 'here's the design, here's where it goes'. The designer
+        PROPOSES (via `design`, from the LLM or the offline templates); this engine DISPOSES."""
+        if not isinstance(design, dict):
+            return {"ok": False, "reason": "no design"}
+        name = (str(design.get("name") or "").strip() or "Building")[:40]
+        layout = design.get("layout")
+        if isinstance(layout, list):
+            layout = [str(r) for r in layout]
+        if not self._valid_layout(layout, grand=True):
+            return {"ok": False, "reason": "the plan used unknown symbols or was too vast to raise"}
+        ok, why = self._validate_blueprint(layout, grand=True)
+        if not ok:
+            return {"ok": False, "reason": why, "name": name}
+        role = str(design.get("function") or "shrine").strip().lower()
+        communal = role != "home"
+        bid = "comm_" + uuid.uuid4().hex[:8]
+        bp = {"id": bid, "name": name, "roof": bool(design.get("roof", True)), "insulation": 1.0,
+              "layout": layout, "communal": communal, "authored": True,
+              "function": role if role in BUILTIN_FUNCTION.values() else "",
+              "purpose": (str(design.get("purpose") or "").strip())[:100], "commissioned": True}
+        self.authored_blueprints.append(bp)
+        self._register_authored()
+        BLUEPRINTS[bid]["function"] = bp["function"]          # keep the (possibly-decorative) role
+        bw, bh = len(layout[0]), len(layout)
+        site_xy = self._commission_site(bw, bh)
+        if site_xy is None:
+            return {"ok": False, "reason": "nowhere clear near the band to raise it", "name": name}
+        px, py = site_xy
+        site = self._stamp_building(bid, px, py, communal=communal)
+        if site is None:
+            return {"ok": False, "reason": "the ground would not take it", "name": name}
+        # A centrepiece at its heart for a shrine/monument — an idol, an obelisk, a fountain.
+        piece = self._CENTREPIECE.get(role)
+        core = site.get("core")
+        if piece and core:
+            self.decor[(int(core[0]), int(core[1]))] = piece
+        mats = {}
+        for t in site.get("tasks", []):
+            if t.get("layer") == "block":
+                mats[BLOCK_NAMES.get(t["code"], "?")] = mats.get(BLOCK_NAMES.get(t["code"], "?"), 0) + 1
+        say = (str(design.get("say") or "").strip()
+               or f"As you ask — a {name.lower()}. I'll raise it in good order.")
+        self.version += 1
+        self._bump("commissioned")
+        self._note("design", f"{by} commissioned a {name.lower()} — raised at ({px}, {py}).")
+        return {"ok": True, "name": name, "purpose": bp["purpose"], "function": role,
+                "where": [px, py], "tiles": len(site.get("tasks", [])), "materials": mats,
+                "say": say, "request": request, "id": bid}
+
     def wants_new_building(self, p) -> bool:
         """Rule trigger for the LLM design ratchet: a SETTLED BUILDER in a band prosperous enough to
         spare the imagination — grown past AUTHOR_MIN_POP — when the band has room left in its design
@@ -5671,12 +5763,14 @@ class World:
         return len(self.people) >= AUTHOR_MIN_POP          # only a grown, prospering band
 
     @staticmethod
-    def _valid_layout(layout) -> bool:
-        """A layout is a non-empty list of equal-length rows of known glyphs, ≤ 16×16."""
-        if not isinstance(layout, list) or not layout or len(layout) > 16:
+    def _valid_layout(layout, grand=False) -> bool:
+        """A layout is a non-empty list of equal-length rows of known glyphs, ≤ 16×16 (≤ 24×24 for
+        a GRAND, god-commissioned work — a shrine, a temple, a keep)."""
+        cap = 24 if grand else 16
+        if not isinstance(layout, list) or not layout or len(layout) > cap:
             return False
         w = len(layout[0])
-        if not (1 <= w <= 16):
+        if not (1 <= w <= cap):
             return False
         ok = set(BLOCK_CHARS) | {GLYPH_CORE} | set(FURNITURE_CHARS)   # …including furniture glyphs (b/t/c/x)
         return all(isinstance(r, str) and len(r) == w and all(c in ok for c in r) for r in layout)

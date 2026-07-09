@@ -5780,6 +5780,52 @@ function _chronOpen() {
   return sec && sec.classList.contains('open');
 }
 
+// The PROMPTABLE designer — ask for a building, it designs + sites + raises it, and shows the plan.
+async function commissionBuild(request) {
+  request = (request || '').trim();
+  const out = document.getElementById('wcomm-out');
+  const go = document.getElementById('wcomm-go');
+  if (!out) return;
+  if (!request) { out.innerHTML = '<div class="wcomm-note">Tell the designer what to build.</div>'; return; }
+  out.innerHTML = '<div class="wcomm-note">The designer is drawing up plans…</div>';
+  if (go) go.disabled = true;
+  try {
+    const j = await (await fetch('/api/world/commission', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request }),
+    })).json();
+    const p = j.plan || {};
+    if (j.ok && p.name && p.where) {
+      const mats = Object.entries(p.materials || {}).map(([k, n]) => `${n}× ${k}`).join(' · ');
+      out.innerHTML =
+        `<div class="wcomm-say">“${escapeHtml(p.say || '')}”</div>` +
+        `<div class="wcomm-plan"><b>${escapeHtml(p.name)}</b>${p.purpose ? ' — ' + escapeHtml(p.purpose) : ''}</div>` +
+        `<div class="wcomm-meta">raised at (${p.where[0]}, ${p.where[1]}) · ${p.tiles} tiles${mats ? ' · ' + escapeHtml(mats) : ''}</div>` +
+        `<button class="wcomm-goto">Show me</button>`;
+      out.querySelector('.wcomm-goto')?.addEventListener('click', () => worldCenterOn(p.where[0], p.where[1]));
+      const inp = document.getElementById('wcomm-input'); if (inp) inp.value = '';
+      worldCenterOn(p.where[0], p.where[1]);
+    } else {
+      out.innerHTML = `<div class="wcomm-note">The designer set it aside — ${escapeHtml((p && p.reason) || j.result || 'it could not be built.')}</div>`;
+    }
+  } catch (_) {
+    out.innerHTML = '<div class="wcomm-note">The request did not go through.</div>';
+  } finally {
+    if (go) go.disabled = false;
+  }
+}
+
+function worldCenterOn(x, y) {
+  const cv = document.getElementById('world-canvas');
+  if (!cv || !WORLD.cam) return;
+  const cam = WORLD.cam;
+  cam.zoom = Math.max(cam.zoom, 9);                 // zoom in enough to actually see the building
+  cam.camX = x - (cv.width / cam.zoom) / 2;
+  cam.camY = y - (cv.height / cam.zoom) / 2;
+  if (typeof clampCamera === 'function') clampCamera();
+  if (typeof renderWorld === 'function') renderWorld();
+}
+
 /* Ways of the band — the LLM design layer's output: enacted laws, kept traditions, self-designed buildings. */
 async function loadWays() {
   const el = document.getElementById('wways-list');
@@ -6036,6 +6082,13 @@ function bindWorld() {
     refreshPersonPanel(true);
   });
   document.getElementById('wperson-close')?.addEventListener('click', worldClosePerson);
+
+  // Commission a building — the promptable designer. Type a request, the AI designs + raises it.
+  const commInput = document.getElementById('wcomm-input');
+  const commGo = document.getElementById('wcomm-go');
+  const commit = () => commissionBuild(commInput?.value || '');
+  commGo?.addEventListener('click', commit);
+  commInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); });
 
   // World speed (fast-forward) selector.
   document.getElementById('whud-speed')?.addEventListener('click', async (ev) => {

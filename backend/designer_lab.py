@@ -260,9 +260,19 @@ leg.innerHTML='<b>Legend</b>'+items.map(([c,n])=>
 </script></body></html>"""
 
 
+def commission(request: str, seed: int = 1):
+    """The PROMPTABLE designer in the lab: ask for a building in words, it designs (offline
+    templates), sites and raises it on a blank canvas, and returns (world, plan)."""
+    import mind
+    w = blank_world(seed)
+    design = mind.commission_offline(request)
+    rep = w.commission_build(design, request=request, by="the god")
+    return w, rep
+
+
 if __name__ == "__main__":
     tier = "town"
-    seed, authored, html_path, populate = 1, False, None, True
+    seed, authored, html_path, populate, request = 1, False, None, True, None
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -275,9 +285,24 @@ if __name__ == "__main__":
             authored = True
         elif a == "--empty":
             populate = False
+        elif a == "--request" and i + 1 < len(args):
+            request = args[i + 1]; i += 1
         elif a == "--html" and i + 1 < len(args):
             html_path = args[i + 1]; i += 1
         i += 1
+    if request:                                            # the promptable designer
+        print(f'the god asks for: "{request}"…')
+        w, rep = commission(request, seed=seed)
+        if rep.get("ok"):
+            print(f'\n  the designer says: "{rep["say"]}"')
+            print(f'  → raised {rep["name"]} at ({rep["where"][0]}, {rep["where"][1]}) — '
+                  f'{rep["tiles"]} tiles: {rep["materials"]}')
+        else:
+            print(f'  the designer set it aside — {rep.get("reason")}')
+        out = html_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "designer_commission.html")
+        render_html(w, out, title=rep.get("name") or "Commission")
+        print(f"\npicture written → {out}\n(open it in a browser)")
+        sys.exit(0)
     print(f"building a {tier} on a blank canvas (seed {seed})…")
     w, rep = run(tier=tier, seed=seed, populate=populate, authored=authored)
     print_report(rep)

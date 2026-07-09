@@ -3616,6 +3616,25 @@ body.passthrough .pt-hint .pt-hint-sub { display: inline-block; margin-top: 3px;
 .wledger-list { max-height: 46vh; overflow-y: auto; margin-top: 4px; }
 .wledger-empty { font-size: 11px; color: var(--text-dim); padding: 8px 2px; }
 
+/* Commission — the promptable designer input + the plan it returns */
+.wcomm-row { display: flex; gap: 6px; margin: 6px 0; }
+.wcomm-input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 8px; font-size: 13px;
+  background: var(--surface-1); color: var(--text); border: 1px solid rgba(232,199,106,0.3); }
+.wcomm-input:focus { outline: none; border-color: rgba(232,199,106,0.6); }
+.wcomm-go { padding: 7px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; white-space: nowrap;
+  background: rgba(232,199,106,0.14); color: #e8c76a; border: 1px solid rgba(232,199,106,0.4); }
+.wcomm-go:hover { background: rgba(232,199,106,0.24); }
+.wcomm-go:disabled { opacity: 0.5; cursor: default; }
+.wcomm-out:not(:empty) { margin-top: 8px; padding: 9px 11px; border-radius: 8px;
+  background: rgba(232,199,106,0.06); border-left: 2px solid rgba(232,199,106,0.4); }
+.wcomm-say { font-style: italic; color: #e8c76a; font-size: 13px; margin-bottom: 5px; }
+.wcomm-plan { font-size: 13.5px; color: var(--text); }
+.wcomm-meta { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; }
+.wcomm-note { font-size: 12.5px; color: var(--text-dim); }
+.wcomm-goto { margin-top: 7px; padding: 3px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  background: rgba(120,200,160,0.1); color: #aee3c4; border: 1px solid rgba(120,200,160,0.28); }
+.wcomm-goto:hover { background: rgba(120,200,160,0.18); }
+
 /* Chronicle — the band's saga, newest first */
 .wchron-list { max-height: 48vh; overflow-y: auto; margin-top: 6px; display: flex; flex-direction: column; gap: 9px; }
 .wchron-empty { font-size: 11.5px; color: var(--text-dim); opacity: 0.75; padding: 8px 2px; line-height: 1.5; }
