@@ -3447,6 +3447,11 @@ body.passthrough .pt-hint .pt-hint-sub { display: inline-block; margin-top: 3px;
 }
 .wp-obtn:hover { background: rgba(232, 199, 106, 0.14); color: #e8c76a; border-color: rgba(232,199,106,0.4); }
 .wp-oclear { color: #d88f8f; border-color: rgba(216,143,143,0.35); }
+/* The heart — the drama layer: a longing (gold), a grudge (red), the leanings learned. */
+.wp-desire { margin: 3px 0; color: #e8c76a; font-size: 12px; }
+.wp-grudge { margin: 3px 0; color: #d88f8f; font-size: 12px; }
+.wp-grudge em { opacity: 0.7; font-style: normal; }
+.wp-lean { margin: 3px 0; color: var(--text-dim); font-size: 12px; font-style: italic; }
 .wp-bar { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
 .wp-bar > span { width: 78px; color: #a9d9c2; font-size: 11px; }
 .wp-bar > b { width: 34px; text-align: right; font-size: 11px; }
@@ -3600,6 +3605,14 @@ body.passthrough .pt-hint .pt-hint-sub { display: inline-block; margin-top: 3px;
 /* Ledger of Making */
 .wledger-list { max-height: 46vh; overflow-y: auto; margin-top: 4px; }
 .wledger-empty { font-size: 11px; color: var(--text-dim); padding: 8px 2px; }
+
+/* Chronicle — the band's saga, newest first */
+.wchron-list { max-height: 48vh; overflow-y: auto; margin-top: 6px; display: flex; flex-direction: column; gap: 9px; }
+.wchron-empty { font-size: 11.5px; color: var(--text-dim); opacity: 0.75; padding: 8px 2px; line-height: 1.5; }
+.wchron-entry { padding: 7px 9px; border-radius: 7px; background: rgba(232, 199, 106, 0.05);
+  border-left: 2px solid rgba(232, 199, 106, 0.4); }
+.wchron-day { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: #e8c76a; opacity: 0.8; margin-bottom: 3px; }
+.wchron-text { font-size: 12.5px; line-height: 1.5; color: var(--text); font-style: italic; }
 
 /* Ways of the band — laws / traditions / designs the LLM authored */
 .wways-list { max-height: 48vh; overflow-y: auto; margin-top: 6px; display: flex; flex-direction: column; gap: 10px; }

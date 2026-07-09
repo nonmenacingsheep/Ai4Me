@@ -5379,6 +5379,7 @@ function worldOnChanged() {
       if (j.enabled && j.world) setWorld(j.world);
     } catch (_) {}
     if (_ledgerOpen()) loadLedger();   // a discovery/teaching may have just been logged
+    if (_chronOpen()) loadChronicle();   // a new day may have been chronicled
   }, 250);
 }
 
@@ -5569,6 +5570,16 @@ function renderPersonPanel(p) {
     illLine +
     (p.intent ? `<div class="wp-intent">“${escapeHtml(p.intent)}”</div>` : '') +
     (p.say ? `<div class="wp-say">💬 ${escapeHtml(p.say)}</div>` : '') +
+    // The heart: an active longing, grudges nursed against others, and the leanings
+    // experience has taught — the drama layer, made legible.
+    ((p.desire || (p.grudges && p.grudges.length) || (p.leans && Object.keys(p.leans).length))
+      ? `<div class="wp-sec">Heart</div>` +
+        (p.desire ? `<div class="wp-desire">✨ longs for ${escapeHtml(p.desire.text)}</div>` : '') +
+        ((p.grudges || []).map(g =>
+          `<div class="wp-grudge">⚔ holds a grudge against ${escapeHtml(g.name)} <em>${g.grudge}</em></div>`).join('')) +
+        (p.leans && Object.keys(p.leans).length
+          ? `<div class="wp-lean">has come to ${Object.keys(p.leans).map(l => escapeHtml(l.replace(/_/g, ' '))).join(', ')}</div>` : '')
+      : '') +
     `<div class="wp-sec">Orders <em>the god's bidding</em></div>` +
     `<div class="wp-orders">${orderChips}</div>` +
     `<div class="wp-obar">${orderBtns}</div>` +
@@ -5735,6 +5746,27 @@ function _ledgerOpen() {
   return sec && sec.classList.contains('open');
 }
 
+/* Chronicle — the band's saga, one line per game-day from the LLM chronicler. */
+async function loadChronicle() {
+  const el = document.getElementById('wchron-list');
+  if (el && !el.innerHTML) el.innerHTML = '<div class="wchron-empty">Loading…</div>';
+  let ch = null;
+  try { const j = await (await fetch('/api/world/chronicle')).json(); ch = j.enabled ? (j.chronicle || []) : null; } catch (_) {}
+  if (!el) return;
+  if (!ch) { el.innerHTML = '<div class="wchron-empty">The World is off.</div>'; return; }
+  if (!ch.length) {
+    el.innerHTML = '<div class="wchron-empty">No saga yet. With a mind (Ollama) running, the chronicler sets down a line of the band\'s story each game-day — it fills in as they live.</div>';
+    return;
+  }
+  el.innerHTML = ch.slice().reverse().map(c =>
+    `<div class="wchron-entry"><div class="wchron-day">Day ${c.day}${c.season ? ' · ' + escapeHtml(c.season) : ''}</div>` +
+    `<div class="wchron-text">${escapeHtml(c.text || '')}</div></div>`).join('');
+}
+function _chronOpen() {
+  const sec = document.querySelector('.wmenu[data-menu="chronicle"]');
+  return sec && sec.classList.contains('open');
+}
+
 /* Ways of the band — the LLM design layer's output: enacted laws, kept traditions, self-designed buildings. */
 async function loadWays() {
   const el = document.getElementById('wways-list');
@@ -5858,6 +5890,7 @@ function bindWorld() {
       const open = sec.classList.toggle('open');
       if (open && sec.dataset.menu === 'crafting') loadCraftingRecipes();   // lazy-load on first open
       if (open && sec.dataset.menu === 'ledger') loadLedger();
+      if (open && sec.dataset.menu === 'chronicle') loadChronicle();   // the band's saga
       if (open && sec.dataset.menu === 'ways') loadWays();   // the band's laws, traditions & designs
       if (open && sec.dataset.menu === 'templates') loadTemplates();
       if (open && sec.dataset.menu === 'settings') loadSnapshots();   // World saves

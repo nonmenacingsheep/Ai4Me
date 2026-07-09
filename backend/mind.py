@@ -68,7 +68,14 @@ GOOD_PRICE = {"food": 1, "wood": 1, "leaves": 1, "fiber": 1, "stone": 2}
 # A person's standing intention is one of these kinds (some carry a target person id):
 INTENT_KINDS = ("drink", "eat", "rest", "build", "provide", "provision", "socialize",
                 "befriend", "explore", "avoid", "tend", "tinker", "ply", "flee", "guard", "help",
-                "forage", "whittle", "marvel", "aspire", "obey")
+                "forage", "whittle", "marvel", "aspire", "obey", "confront")
+
+# ── desires & beliefs: the drama engine's mind-side ──────────────────────────
+DESIRE_BUMP = 0.14           # how hard an active longing leans on its matching drive
+# What experience may teach a soul to LEAN toward (reflection → a typed utility bend).
+LEAN_KINDS = ("value_company", "value_work", "hoard_food", "fear_wolves", "wary_water")
+LEAN_STEP = 0.05             # a reflection deepens a leaning by this much…
+LEAN_CAP = 0.15              # …up to a cap (a belief bends a life, it doesn't own it)
 
 PROVISION_TARGET = 12       # a settled soul lays in food at home up to this before it eases off
 # Stockpiling scales with the season — lay in heavily through autumn against the lean winter,
@@ -86,13 +93,27 @@ VOCATION_NEED = 0.30         # draw toward a calling the band has NO-ONE in yet 
 VOCATION_HYSTERESIS = 0.12   # a soul won't switch trade unless another is clearly the better fit (no churn)
 
 
-def vocation(p: dict, band=None) -> str:
+def vocation(p: dict, band=None, counts=None) -> str:
     """A soul's calling. Read first from TEMPERAMENT (ambition builds, curiosity makes, the steady
     rest forage), then BENT toward the trade the band still LACKS — so the band doesn't end up all
     one calling. The second would-be toolmaker, seeing one already, forages instead ('Elsa makes,
-    Nate builds, so I'll forage'). With no band given it's pure temperament (the offline default)."""
+    Nate builds, so I'll forage'). With no band given it's pure temperament (the offline default).
+    `counts` (a whole-band vocation tally the world caches once per tick) replaces the O(n) band
+    scan — the fix for the old per-soul-per-beat sweep that made deliberation O(n²)."""
     amb, cur = _trait(p, "ambition"), _trait(p, "curiosity")
     fit = {"builder": amb, "toolmaker": cur, "forager": 0.45 + 0.40 * (1.0 - max(amb, cur))}
+    if counts is not None:
+        counts = {v: int(counts.get(v, 0)) for v in VOCATIONS}
+        if p.get("vocation") in counts:                      # the tally includes this soul — look at the OTHERS
+            counts[p["vocation"]] = max(0, counts[p["vocation"]] - 1)
+        n = sum(counts.values())
+        band = None                                          # the tally stands in for the scan
+        if n:
+            ideal = n / len(VOCATIONS)
+            for v in VOCATIONS:
+                if counts[v] == 0 and n >= 2:
+                    fit[v] += VOCATION_NEED
+                fit[v] -= VOCATION_CROWDING * max(0.0, counts[v] - ideal)
     if band:
         counts = {v: 0 for v in VOCATIONS}
         n = 0
@@ -361,6 +382,8 @@ def encounter(p: dict, other: dict, clock: float, rng) -> list[str]:
         # something on their mind. Spoken bubbles make a gathering read as a conversation.
         speak(p, _chat_line(p, other, clock, rng), clock)
         speak(other, _chat_line(other, p, clock, rng), clock)
+        for s in (p, other):
+            fulfil_desire(s, "company", clock)               # a greet IS the company a lonely soul longed for
         # Gossip: pass along a strong opinion about a third party, so good/bad names travel.
         if rng.random() < GOSSIP_CHANCE:
             spread = _gossip(p, other, clock)
@@ -376,6 +399,7 @@ def encounter(p: dict, other: dict, clock: float, rng) -> list[str]:
             tale = _tell_tale(teller, listener, clock, rng)
             if tale:
                 events.append(tale)
+                fulfil_desire(listener, "hear_tale", clock)  # the tale a longing listener waited on
 
     # Barter when adjacent and both are comfortable enough to stop and deal.
     if _manhattan(p, other) <= 1 and _comfortable(p) and _comfortable(other):
@@ -728,6 +752,14 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
     foe_id, foe_name, foe_mag = ctx.get("foe_id"), ctx.get("foe_name"), ctx.get("foe_mag", 0.0)
     if foe_id and foe_mag > 0.3:
         out.append(("avoid", foe_id, cau * foe_mag, f"I'll keep clear of {foe_name}"))
+    # CONFRONTATION — a nursed grudge in an ambitious soul demands its day: they seek the
+    # offender out to have words (redress or a quarrel — resolved by the world on contact).
+    # The timid keep avoiding instead; comfort-gated, and never above survival's ramp.
+    if (foe_id and ctx.get("foe_grudge", 0.0) >= 0.45 and amb > 0.5
+            and clock >= p.get("confront_cd", 0.0)):
+        comfort = 1.0 - _clamp01(max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0)))
+        out.append(("confront", foe_id, (0.28 + 0.34 * amb) * comfort,
+                    f"{foe_name} has wronged me — I'll have words"))
 
     # Care — a well, settled soul goes to nurse a band-mate laid low by sickness (#11), bringing
     # food to them if it can (#10 rescue). Keenest in the sociable; comfort-gated so a soul tends
@@ -778,6 +810,34 @@ def drives(p: dict, ctx: dict) -> list[tuple[str, str | None, float, str]]:
 
     # A low baseline of just tending one's own patch, so an idle mind has somewhere to rest.
     out.append(("tend", None, 0.07, "tend to my own"))
+
+    # DESIRES — an active longing leans on its matching drive, so a soul with a want in its
+    # heart actually pursues it (and the why says so — legibility in the inspector).
+    des = p.get("desire")
+    if des:
+        aim = {"far_country": "explore", "company": "socialize", "hear_tale": "socialize",
+               "finer_home": "build", "new_gear": "build", "day_of_rest": "rest",
+               "cooked_meal": "eat"}.get(des.get("kind"))
+        if aim:
+            out = [(k, t, u + (DESIRE_BUMP if k == aim else 0.0),
+                    (why + " — and I've a longing for it") if k == aim else why)
+                   for k, t, u, why in out]
+    # BELIEF LEANS — what reflection has taught bends the utilities (identity feeding back
+    # into choice): one who has learned to value company seeks it a little more, one who has
+    # learned to fear wolves guards less and flees sooner, and so on. Small and capped.
+    leans = p.get("leans") or {}
+    if leans:
+        AIM = {"value_company": (("socialize", 1), ("befriend", 1)),
+               "value_work":    (("build", 1), ("ply", 1)),
+               "hoard_food":    (("provision", 1),),
+               "fear_wolves":   (("flee", 1), ("guard", -1)),
+               "wary_water":    (("explore", -1),)}
+        bend = {}
+        for lean, w in leans.items():
+            for kind_, sign in AIM.get(lean, ()):
+                bend[kind_] = bend.get(kind_, 0.0) + sign * float(w)
+        if bend:
+            out = [(k, t, max(0.0, u + bend.get(k, 0.0)), why) for k, t, u, why in out]
 
     # YOUNGLINGS — a child's hands aren't ready for the hard or dangerous work (raising buildings,
     # crafting gear, standing a watch, plying a trade). Strip those pulls and give them a child's
@@ -884,6 +944,19 @@ def speak(p: dict, line: str, clock: float) -> None:
     if line:
         p["say"] = line
         p["say_t"] = round(clock, 1)
+
+
+def fulfil_desire(p: dict, kind: str, clock: float) -> bool:
+    """If the soul's active longing is of this kind, it is ANSWERED: a joyful memory, a spoken
+    line, and the want is laid to rest. Returns True when a desire was actually fulfilled."""
+    d = p.get("desire")
+    if not d or d.get("kind") != kind:
+        return False
+    p["desire"] = None
+    remember(p, f"my longing was answered — {d.get('text', kind.replace('_', ' '))}",
+             0.75, "desire", clock)
+    speak(p, "Ah — just as I'd been longing for.", clock)
+    return True
 
 
 # ─── discovery: a people works out its own make-shift crafts ────────────────────────
@@ -1180,11 +1253,78 @@ def reflect_messages(p: dict, clock: float) -> tuple[str, str]:
         f"You are {p['name']}'s memory, looking back. From these recent experiences, draw "
         "ONE or TWO short, durable conclusions about people, places, or how to live well "
         "here — beliefs worth keeping. First person, plain words.\n"
-        'Reply ONLY as JSON: {"reflections": ["...", "..."]}.'
+        'Reply ONLY as JSON: {"reflections": ["...", "..."], "identity": "...", "lean": "..."}.'
     )
     user = ("Lately:\n- " + ("\n- ".join(recent) if recent else "little has happened") +
             "\nWhat have I learned, and in a word, who am I becoming "
-            f"({', '.join(TRAITS)}, or none)?")
+            f"({', '.join(TRAITS)}, or none)? And does experience counsel a leaning "
+            f"({', '.join(LEAN_KINDS)}, or none)?")
+    return system, user
+
+
+def dialogue_messages(a: dict, b: dict, clock: float) -> tuple[str, str]:
+    """Build (system, user) for a brief LLM exchange between two adjacent souls — grounded in
+    their real relationship and recent lives, so what's said can honestly MOVE it."""
+    ra = a.get("rel", {}).get(b["id"], {})
+    rb = b.get("rel", {}).get(a["id"], {})
+    am = retrieve(a, "", clock, n=2)
+    bm = retrieve(b, "", clock, n=2)
+    system = (
+        f"You voice a brief exchange between {a['name']} and {b['name']}, two souls of a small "
+        "primitive band, meeting in passing. One line each, in-world, plain speech — no modern "
+        "words. Let their history colour the tone (a grudge is curt, warmth is warm).\n"
+        'Reply ONLY as JSON: {"a_say": "...", "b_say": "...", "warmth": -1.0 to 1.0} '
+        "where warmth is how the exchange leaves them feeling about each other."
+    )
+    user = (
+        f"{a['name']} ({a.get('vocation') or 'hand'}; intent: {a.get('intent', '')!r}) feels "
+        f"sentiment {ra.get('sentiment', 0.0):+.2f}, grudge {ra.get('grudge', 0.0):.2f} toward {b['name']}. "
+        f"Remembers: {'; '.join(am) or 'little'}.\n"
+        f"{b['name']} ({b.get('vocation') or 'hand'}; intent: {b.get('intent', '')!r}) feels "
+        f"sentiment {rb.get('sentiment', 0.0):+.2f}, grudge {rb.get('grudge', 0.0):.2f} toward {a['name']}. "
+        f"Remembers: {'; '.join(bm) or 'little'}.\n"
+        "What passes between them?"
+    )
+    return system, user
+
+
+def apply_dialogue(a: dict, b: dict, data: dict, clock: float) -> bool:
+    """Apply a parsed LLM exchange: both speak, and the WORDS move the relationship — warmth
+    thaws sentiment (and mends a little grudge), coldness chills it. Junk is ignored."""
+    if not isinstance(data, dict):
+        return False
+    a_say = str(data.get("a_say", "") or "").strip()
+    b_say = str(data.get("b_say", "") or "").strip()
+    if not a_say and not b_say:
+        return False
+    try:
+        w = max(-1.0, min(1.0, float(data.get("warmth", 0.0))))
+    except (TypeError, ValueError):
+        w = 0.0
+    speak(a, a_say, clock)
+    speak(b, b_say, clock)
+    for s, o in ((a, b), (b, a)):
+        r = _rel(s, o, clock)
+        r["sentiment"] = max(-1.0, min(1.0, r["sentiment"] + 0.06 * w))
+        if w > 0:
+            r["trust"] = min(1.0, r["trust"] + 0.03 * w)
+            if r.get("grudge") and w > 0.3:                  # a kind word mends an old wound a little
+                r["grudge"] = round(r["grudge"] * 0.7, 3)
+        remember(s, f"talked with {o['name']} — {'warmly' if w > 0.15 else 'coldly' if w < -0.15 else 'in passing'}",
+                 0.35, "social", clock)
+    return True
+
+
+def chronicle_messages(day: int, season: str, era: str, events: list[str]) -> tuple[str, str]:
+    """Build (system, user) for the CHRONICLER — one call per game-day that turns the world
+    log into a few sentences of saga, so the world tells its own story."""
+    system = (
+        "You are the chronicler of a small band in a primitive land. From the day's happenings, "
+        "write 2-4 sentences of saga — past tense, plain and vivid, naming names, no lists, no "
+        "modern words. If little happened, one quiet line is enough. Reply with the prose only."
+    )
+    user = (f"Day {day}, {season}, in the {era}. The day's happenings:\n- "
+            + ("\n- ".join(events[-28:]) if events else "a quiet day") + "\nChronicle it.")
     return system, user
 
 
@@ -1205,6 +1345,12 @@ def apply_reflections(p: dict, data: dict, clock: float) -> None:
     if ident in TRAITS:
         vals = p.setdefault("values", {t: 0.0 for t in TRAITS})
         vals[ident] = round(min(VALUE_CAP, vals.get(ident, 0.0) + 0.06), 3)
+    # A TYPED leaning — the belief made mechanical. Validated against the small enum (the
+    # immune-system pattern: free text may say anything, only a known lean bends a drive).
+    lean = str(data.get("lean", "") or "").strip().lower()
+    if lean in LEAN_KINDS:
+        leans = p.setdefault("leans", {})
+        leans[lean] = round(min(LEAN_CAP, leans.get(lean, 0.0) + LEAN_STEP), 3)
 
 
 # ─── helpers / read-side ────────────────────────────────────────────────────────────

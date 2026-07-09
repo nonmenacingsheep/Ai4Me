@@ -691,12 +691,26 @@ MIND_THINK_BUDGET = float(os.getenv("AITHA_MIND_BUDGET", "30"))  # max seconds p
 REFLECT_EVERY = 6                                          # deliberations between a reflection
 
 
-def _pick_thinker(people: list[dict]):
-    """Whoever has gone longest without being voiced — attention spreads evenly over the
-    whole population (including those in trouble, who now have the most to reason about)."""
+def _pick_thinker(people: list[dict], clock: float):
+    """Whoever most warrants a thought right now. The base is fairness (longest since voiced),
+    but a soul in danger, ill, under god-orders, gripped by a longing or a nursed grudge, or the
+    band's leader is BUMPED up the queue — so the LLM's scarce attention finds the DRAMA instead
+    of spreading blindly over idle foragers (the old plain round-robin's flaw at any real scale)."""
     if not people:
         return None
-    return min(people, key=lambda p: p.get("think_cd", 0.0))
+    def salience(p):
+        s = clock - p.get("think_cd", 0.0)                 # base: game-min since last voiced
+        s += 500.0 * min(1.0, p.get("_danger", 0.0))       # a soul in a wolf's jaws has the most to think
+        if p.get("illness"):
+            s += 300.0
+        if p.get("orders"):
+            s += 260.0                                     # the god is watching this one
+        if p.get("desire"):
+            s += 160.0
+        s += 600.0 * max((r.get("grudge", 0.0) for r in (p.get("rel") or {}).values()), default=0.0)
+        s += 220.0 * min(1.0, p.get("renown", 0.0))        # the leader's word carries
+        return s
+    return max(people, key=salience)
 
 
 async def _mind_think_one():
@@ -707,7 +721,14 @@ async def _mind_think_one():
     w = await asyncio.to_thread(world_store.get_world)
     if not w.people:
         return
-    p = _pick_thinker(w.people)
+    # Now and then, voice a PAIR in conversation instead of one soul alone — what's SAID moves
+    # their bond (the fix for canned soul-to-soul dialogue), at a low cadence to spare tokens.
+    if len(w.people) >= 2 and (_MIND_STATE.setdefault("n", 0) % 4 == 3):
+        _MIND_STATE["n"] += 1
+        if await _voice_pair(w):
+            return
+    _MIND_STATE["n"] = _MIND_STATE.get("n", 0) + 1
+    p = _pick_thinker(w.people, w.clock)
     if p is None:
         return
     pid = p["id"]
@@ -736,70 +757,143 @@ async def _mind_think_one():
         target = _live(w, pid)
         if target is not None and data:
             mind_store.apply_deliberation(target, data, ctx, clock)
-        # Invention by reasoning: if they've set their mind to tinkering and they still have
-        # unsolved problems, let the model REASON OUT a make-shift craft (the "guess the
-        # ingredients" mechanic). A correct hunch unlocks it for THEM (it then spreads by
-        # teaching) and is written into the Ledger of Making; a wrong hunch is logged too.
-        if target is not None and ctx.get("unsolved") and (target.get("intention") or {}).get("kind") == "tinker":
-            dsys, dusr = mind_store.discover_messages(target, ctx)
-            draw = await asyncio.wait_for(
-                brain._complete(dsys, dusr, max_tokens=120, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
-            rid = w.apply_llm_discovery(target, brain._parse_json_object(draw))
-            if rid:
-                w.version += 1
-                await broadcast({"type": "world_changed",
-                                 "changes": [f"{target['name']} reasoned out a {rid.replace('_', ' ')}"]})
-        # Architecture authoring (Phase A — the design ratchet): when a SETTLED BUILDER's band has
-        # grown prosperous, let the model DESIGN a new kind of building. The engine VALIDATES it (the
-        # immune system) before the band can raise it — the mind proposes a form, the engine disposes.
-        if target is not None and w.wants_new_building(target):
-            asys, ausr = mind_store.author_building_messages(target, ctx)
-            araw = await asyncio.wait_for(
-                brain._complete(asys, ausr, max_tokens=200, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
-            bid = w.apply_authored_building(brain._parse_json_object(araw), by=target["name"])
-            if bid:
-                await broadcast({"type": "world_changed",
-                                 "changes": [f"{target['name']} designed a new kind of building"]})
-        # Institutions (Phase B): when a recurring wrong goes un-named and the band has a recognised
-        # LEADER, let the model give the people a LAW. The engine validates it's an enforceable norm,
-        # then judges by reputation — the leader proposes, the deterministic governance disposes.
-        if target is not None and w.wants_new_law(target):
-            problem = w._law_problem()
-            if problem is not None:
-                ctx["law_reproach"] = world_store.LAW_REPROACH.get(problem, problem)
-                lsys, lusr = mind_store.author_law_messages(target, ctx)
-                lraw = await asyncio.wait_for(
-                    brain._complete(lsys, lusr, max_tokens=140, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
-                norm = w.apply_authored_law(brain._parse_json_object(lraw), by=target["name"])
-                if norm:
-                    await broadcast({"type": "world_changed",
-                                     "changes": [f"{target['name']} gave the band a law"]})
-        # Culture (Phase C): when a much-loved soul in a grown band is at ease, let the model found a
-        # TRADITION — a yearly feast the band keeps. The engine observes it (deepening that season's
-        # gathering). The author proposes a custom, the deterministic world disposes.
-        if target is not None and w.wants_new_custom(target):
-            ctx["season"] = w.season()
-            csys, cusr = mind_store.author_custom_messages(target, ctx)
-            craw = await asyncio.wait_for(
-                brain._complete(csys, cusr, max_tokens=120, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
-            nm = w.apply_authored_custom(brain._parse_json_object(craw), by=target["name"])
-            if nm:
-                await broadcast({"type": "world_changed",
-                                 "changes": [f"{target['name']} began a tradition — {nm}"]})
-        # City-planning (Phase D.2): when a respected soul's town has been LAID OUT but not yet named,
-        # let the model give it its identity — a name for its square and a character. The author
-        # proposes the town's identity; the world records it (a town that knows itself takes pride).
-        if target is not None and w.wants_civic_identity(target):
-            ctx["town_name"] = (w._band_settlement() or {}).get("name", "the town")
-            vsys, vusr = mind_store.author_civic_messages(target, ctx)
-            vraw = await asyncio.wait_for(
-                brain._complete(vsys, vusr, max_tokens=100, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
-            sq = w.apply_civic_identity(brain._parse_json_object(vraw), by=target["name"])
-            if sq:
-                await broadcast({"type": "world_changed",
-                                 "changes": [f"{target['name']} named the town's square — {sq}"]})
+        # AUTHORING — at most ONE authoring phase per voicing. The old chain could fire up to
+        # FIVE serial LLM calls in a single think (discovery + building + law + custom + civic),
+        # stalling the whole mind loop for minutes and reasoning off a ctx gone stale by the last
+        # call. Now the eligible phases are gathered and ONE is run, rotated by think_n so none is
+        # starved — the author-chain round-robin (audit #4).
+        if target is not None:
+            phases = []
+            if ctx.get("unsolved") and (target.get("intention") or {}).get("kind") == "tinker":
+                phases.append(_author_discovery)
+            if w.wants_new_building(target):
+                phases.append(_author_building)
+            if w.wants_new_law(target):
+                phases.append(_author_law)
+            if w.wants_new_custom(target):
+                phases.append(_author_custom)
+            if w.wants_civic_identity(target):
+                phases.append(_author_civic)
+            if phases:
+                fn = phases[target.get("think_n", 0) % len(phases)]
+                await fn(w, target, ctx, clock, wm, wc)
     except Exception as e:
         print(f"[mind] deliberation fell back to the arbiter ({type(e).__name__}: {e})")
+
+
+# ── the authoring phases (one per voicing; each proposes, the engine validates & disposes) ──
+async def _author_discovery(w, target, ctx, clock, wm, wc):
+    """Reason out a make-shift craft (guess-the-ingredients); a right hunch unlocks it for them."""
+    dsys, dusr = mind_store.discover_messages(target, ctx)
+    draw = await asyncio.wait_for(
+        brain._complete(dsys, dusr, max_tokens=120, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+    rid = w.apply_llm_discovery(target, brain._parse_json_object(draw))
+    if rid:
+        w.version += 1
+        await broadcast({"type": "world_changed",
+                         "changes": [f"{target['name']} reasoned out a {rid.replace('_', ' ')}"]})
+
+
+async def _author_building(w, target, ctx, clock, wm, wc):
+    """Design a new kind of building; the engine validates the layout before the band may raise it."""
+    asys, ausr = mind_store.author_building_messages(target, ctx)
+    araw = await asyncio.wait_for(
+        brain._complete(asys, ausr, max_tokens=200, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+    if w.apply_authored_building(brain._parse_json_object(araw), by=target["name"]):
+        await broadcast({"type": "world_changed",
+                         "changes": [f"{target['name']} designed a new kind of building"]})
+
+
+async def _author_law(w, target, ctx, clock, wm, wc):
+    """Give the band a LAW against a recurring wrong; validated as an enforceable norm."""
+    problem = w._law_problem()
+    if problem is None:
+        return
+    ctx["law_reproach"] = world_store.LAW_REPROACH.get(problem, problem)
+    lsys, lusr = mind_store.author_law_messages(target, ctx)
+    lraw = await asyncio.wait_for(
+        brain._complete(lsys, lusr, max_tokens=140, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+    if w.apply_authored_law(brain._parse_json_object(lraw), by=target["name"]):
+        await broadcast({"type": "world_changed", "changes": [f"{target['name']} gave the band a law"]})
+
+
+async def _author_custom(w, target, ctx, clock, wm, wc):
+    """Found a yearly TRADITION; the engine observes it (deepening that season's gathering)."""
+    ctx["season"] = w.season()
+    csys, cusr = mind_store.author_custom_messages(target, ctx)
+    craw = await asyncio.wait_for(
+        brain._complete(csys, cusr, max_tokens=120, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+    nm = w.apply_authored_custom(brain._parse_json_object(craw), by=target["name"])
+    if nm:
+        await broadcast({"type": "world_changed", "changes": [f"{target['name']} began a tradition — {nm}"]})
+
+
+async def _author_civic(w, target, ctx, clock, wm, wc):
+    """Name the town's square and give it a character — a town that knows itself."""
+    ctx["town_name"] = (w._band_settlement() or {}).get("name", "the town")
+    vsys, vusr = mind_store.author_civic_messages(target, ctx)
+    vraw = await asyncio.wait_for(
+        brain._complete(vsys, vusr, max_tokens=100, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+    sq = w.apply_civic_identity(brain._parse_json_object(vraw), by=target["name"])
+    if sq:
+        await broadcast({"type": "world_changed",
+                         "changes": [f"{target['name']} named the town's square — {sq}"]})
+
+
+# Shared cadence state for the mind loop (which soul/pair to voice, last chronicled day).
+_MIND_STATE: dict = {"n": 0}
+
+
+async def _voice_pair(w) -> bool:
+    """Voice a brief LLM exchange between two ADJACENT souls, grounded in their real bond — and
+    let what's SAID move it (words become social physics; audit #10). Returns True if it ran."""
+    adj = []
+    ppl = w.people
+    for i in range(len(ppl)):
+        for j in range(i + 1, len(ppl)):
+            a, b = ppl[i], ppl[j]
+            if abs(a["x"] - b["x"]) + abs(a["y"] - b["y"]) <= 1:
+                adj.append((a, b))
+    if not adj:
+        return False
+    a, b = adj[int(w.rng.integers(len(adj)))]
+    aid, bid = a["id"], b["id"]
+    wm = brain.world_model or None
+    wc = brain.world_num_ctx or None
+    try:
+        sysm, usr = mind_store.dialogue_messages(a, b, w.clock)
+        raw = await asyncio.wait_for(
+            brain._complete(sysm, usr, max_tokens=140, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+        la, lb = _live(w, aid), _live(w, bid)
+        if la is not None and lb is not None:
+            if mind_store.apply_dialogue(la, lb, brain._parse_json_object(raw), w.clock):
+                w.version += 1
+                return True
+    except Exception as e:
+        print(f"[mind] pair dialogue fell back ({type(e).__name__}: {e})")
+    return False
+
+
+async def _chronicle_day(w, day: int):
+    """The CHRONICLER — once per game-day, distil the world log into a line or two of saga, so
+    the world tells its own story (audit #12). Appended to w.chronicle for the saga panel."""
+    events = [e.get("text", "") for e in w.log[-40:] if e.get("kind") != "world"]
+    if not events:
+        return
+    wm = brain.world_model or None
+    wc = brain.world_num_ctx or None
+    try:
+        sysm, usr = mind_store.chronicle_messages(day, w.season(), w._civilization_era(), events)
+        raw = await asyncio.wait_for(
+            brain._complete(sysm, usr, max_tokens=160, model=wm, num_ctx=wc), MIND_THINK_BUDGET)
+        text = (raw or "").strip().strip('"')
+        if text:
+            w.chronicle.append({"day": day, "season": w.season(), "text": text[:400]})
+            w.chronicle[:] = w.chronicle[-world_store.CHRONICLE_CAP:]
+            w.version += 1
+            await broadcast({"type": "world_changed", "changes": [f"— the chronicle of day {day} —"]})
+    except Exception as e:
+        print(f"[mind] chronicle fell back ({type(e).__name__}: {e})")
 
 
 def _live(w, pid: str):
@@ -812,10 +906,19 @@ def _live(w, pid: str):
 
 async def mind_engine_loop():
     await asyncio.sleep(40)   # let startup + model warm-up settle (after the world is live)
+    last_chron_day = -1
     while True:
         try:
             if (settings.get("capabilities") or {}).get("world", False):
-                await _mind_think_one()
+                w = await asyncio.to_thread(world_store.get_world)
+                # Don't burn tokens on a PAUSED or empty world (audit #2): a frozen instant has
+                # nothing new to reason about, and the frozen clock would re-voice the same souls.
+                if w.people and getattr(w, "speed", 1.0) > 0:
+                    d = w.day()
+                    if d != last_chron_day:
+                        last_chron_day = d
+                        await _chronicle_day(w, d)     # once per game-day: the saga line
+                    await _mind_think_one()
         except Exception as e:
             print(f"[mind] loop error: {e}")
         await asyncio.sleep(MIND_TICK)
@@ -1230,6 +1333,16 @@ async def api_world_ledger():
         return {"enabled": False}
     w = await asyncio.to_thread(world_store.get_world)
     return {"enabled": True, "ledger": list(w.ledger)}
+
+
+@app.get("/api/world/chronicle")
+async def api_world_chronicle():
+    """The band's SAGA — the Chronicler's line of story per game-day. Powers the World-tab
+    Chronicle panel (the world telling its own tale, not just a raw event log)."""
+    if not (settings.get("capabilities") or {}).get("world", False):
+        return {"enabled": False}
+    w = await asyncio.to_thread(world_store.get_world)
+    return {"enabled": True, "chronicle": list(getattr(w, "chronicle", []))[-60:]}
 
 
 @app.get("/api/world/ways")

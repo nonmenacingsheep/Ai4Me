@@ -668,6 +668,26 @@ ORDER_MAX = 8                      # most orders a soul will hold in its head
 ORDER_GATHER_N = 3                 # default yield asked of a gather-type order
 ORDER_PATIENCE = 360.0             # game-min an order may sit unfinished before it's given up
 
+# ── DESIRES & GRUDGES — the drama engine ─────────────────────────────────────
+# A settled, comfortable soul now and then conceives a DESIRE (a one-off want shaped by its
+# nature: a cooked meal, a tale by the fire, the far country…). An active desire leans on its
+# matching drive; answered, it's a joy remembered — left to sour, a disappointment. GRUDGES
+# are the shadow side: wrongs (a caught thief, a public shaming) are held against their doer,
+# fade slowly, weight who a soul avoids — and in the ambitious, demand a CONFRONTATION.
+DESIRE_CHANCE_DAY = 0.5            # chance per game-day a content settled soul conceives a want
+DESIRE_DAYS = 3.0                  # days a desire waits to be answered before it sours
+GRUDGE_CAUGHT = 0.5                # grudge for catching a thief red-handed at your larder
+GRUDGE_FOUND = 0.3                 # …for finding your larder short after (the footprints tell)
+GRUDGE_HALFLIFE_D = 12.0           # game-days for an untended grudge to fade by half
+SENTIMENT_DRIFT_D = 30.0           # days for idle sentiment to drift halfway back to neutral
+CONFRONT_CD = 1440.0               # game-min between one soul's confrontations
+THEFT_SATIETY = 0.35               # reserves this low (and no food anywhere honest) → desperation
+THEFT_CD = 720.0                   # game-min between desperate takings
+# School — where a standing school-function building turns childhood practice into real learning.
+SCHOOL_RANGE = 6                   # tiles from the school within which lessons reach
+SCHOOL_XP_MULT = 2.5               # practice learned at the school counts this much more
+CHRONICLE_CAP = 90                 # days of the band's saga kept
+
 AMBITION_MONUMENT = 0.55           # a soul this ambitious will undertake a monument for the band
 # Cooperative big-builds: a communal monument is heavy work — a tile is laid only when at least
 # CO_OP_MIN builders are on hand (it takes several to raise a beam), so a lone soul can't grind it
@@ -936,6 +956,7 @@ class World:
         self.laws: list[dict] = []         # the band's enacted LAWS (LLM-authored, validated) — Phase B
         self.customs: list[dict] = []      # the band's TRADITIONS (LLM-authored festivals) — Phase C
         self.companies: list[dict] = []    # COMPANIES that own factories, employ folk, make goods — the town economy
+        self.chronicle: list[dict] = []    # the band's SAGA — a line of story per game-day (the Chronicler, an LLM call)
         self.money_invented = False      # has a soul WORKED OUT money yet? (then coins circulate)
         self.money_inventor = None       # who gave the band the idea of money
         self.user_blueprints: list[dict] = []   # the god's hand-authored building templates (library)
@@ -1480,6 +1501,7 @@ class World:
         self._update_weather()
         self._tick_wildlife(dt_game_min)
         self._tick_people(dt_game_min)
+        self._tick_drama(dt_game_min)                              # desires, grudges cooling, desperation theft
         self._tick_reactors(dt_game_min)                           # a carelessly-sited reactor heats toward meltdown
         if self.clock - self._last_eco >= 60.0:                    # one game-hour elapsed
             self._tick_ecology_active()
@@ -2177,6 +2199,21 @@ class World:
         wolf_pos = [(a["x"], a["y"]) for a in self.animals if a["sp"] == "wolf"]
         self._wolf_pos = wolf_pos                          # cached for the danger-aware walker
         self._occ = {(q["x"], q["y"]): q for q in self.people}   # LIVE occupancy → souls don't share a tile
+        # Coarse spatial BUCKETS (cell = social radius) — O(n) neighbourhood queries for the
+        # social pass, in place of the old all-pairs sweep that would wall at city populations.
+        cell = mind.SOCIAL_RADIUS
+        bk: dict[tuple, list] = {}
+        for q in self.people:
+            bk.setdefault((q["x"] // cell, q["y"] // cell), []).append(q)
+        self._buckets = bk
+        # Whole-band vocation tally, cached once per tick — mind.vocation() reads this instead
+        # of re-scanning the band per soul per deliberation (the old hidden O(n²)).
+        vc: dict[str, int] = {}
+        for q in self.people:
+            v = q.get("vocation")
+            if v:
+                vc[v] = vc.get(v, 0) + 1
+        self._voc_counts = vc
         self._build_perception_masks()                     # resource masks once/tick (vs np.isin per soul — perf)
 
         dead = []
@@ -2223,7 +2260,7 @@ class World:
             if action == "eat":
                 g = float(self.veg_growth[y, x])
                 if self._eat_cooked(p):                          # a cooked meal is the finest fare — eat it first
-                    pass
+                    mind.fulfil_desire(p, "cooked_meal", self.clock)   # a longing for a proper meal, answered
                 elif edible[ly, lx] and g > 0.12:                # else graze the tile (free food underfoot)
                     bite = min(g, PERSON["eat_bite"] * dt_game_min)
                     self.veg_growth[y, x] = g - bite
@@ -2273,6 +2310,8 @@ class World:
                     mult += BED_REST_BONUS
                 p["fatigue"] = max(0.0, p["fatigue"] - PERSON["rest_rate"] * mult * dt_game_min)
                 self._refill(p, "stamina", PERSON["restore_rate"] * mult * dt_game_min)
+                if p.get("fatigue", 0) < 0.15:               # rested through — a longed-for day of rest
+                    mind.fulfil_desire(p, "day_of_rest", self.clock)
                 if (x, y) == tuple(p["home"]):
                     if p.get("hearth"):
                         self._boil_at_home(p)            # tend the fire while resting: raw water → safe
@@ -2455,87 +2494,251 @@ class World:
 
     def _tick_minds_social(self):
         """Run encounters between every nearby pair of people (each pair once). Notable
-        outcomes — trades, gossip — go to the world log so a god can watch culture form."""
-        ppl = self.people
-        for i in range(len(ppl)):
-            for j in range(i + 1, len(ppl)):
-                a, b = ppl[i], ppl[j]
-                if mind._manhattan(a, b) > mind.SOCIAL_RADIUS:
+        outcomes — trades, gossip — go to the world log so a god can watch culture form.
+        Pairs come from the per-tick spatial buckets (cell = social radius): within a cell,
+        plus the four FORWARD neighbour cells, so each unordered pair is seen exactly once —
+        O(n·k) instead of the old all-pairs O(n²) that would wall at city populations."""
+        bk = getattr(self, "_buckets", None)
+        if bk is None:                                     # (tests may call this before a tick)
+            cell = mind.SOCIAL_RADIUS
+            bk = {}
+            for q in self.people:
+                bk.setdefault((q["x"] // cell, q["y"] // cell), []).append(q)
+        FWD = ((0, 0), (1, 0), (0, 1), (1, 1), (1, -1))    # forward half-neighbourhood
+        for (cx, cy), cell_ppl in bk.items():
+            for dx, dy in FWD:
+                other_ppl = cell_ppl if (dx, dy) == (0, 0) else bk.get((cx + dx, cy + dy))
+                if not other_ppl:
                     continue
-                for ev in mind.encounter(a, b, self.clock, self.rng):
-                    self._note("social", ev)
-                # Knowledge spreads soul to soul: a trusted neighbour passes on a craft.
-                self._maybe_teach(a, b)
-                # Two warm, unattached adults may pair off — the start of a family line.
-                self._maybe_bond(a, b)
-                # Generosity: whoever has resolved to *provide* gives, if they're beside
-                # the other and carry a surplus — a one-way gift, the warmest social act.
-                if mind._manhattan(a, b) <= 1:
-                    for giver, taker in ((a, b), (b, a)):
-                        inten = giver.get("intention") or {}
-                        if (inten.get("kind") == "provide"
-                                and giver.get("inv", {}).get("food", 0) > mind.TRADE_SURPLUS
-                                and taker.get("inv", {}).get("food", 0) <= 1):
-                            ev = mind.give(giver, taker, "food", self.clock)
-                            if ev:
-                                self._note("social", ev)
-                        # Rescue: a caretaker nursing this sick soul shares food with them even
-                        # off their last ration — a hungry, ailing body must be fed (#10).
-                        if (inten.get("kind") == "tend" and inten.get("target") == taker["id"]
-                                and giver.get("inv", {}).get("food", 0) > 0
-                                and taker.get("illness") and taker.get("hunger", 0) > 0.4):
-                            ev = mind.give(giver, taker, "food", self.clock)
-                            if ev:
-                                self._note("social", ev)
-                        # A toolmaker (or anyone) beside a band-mate who lacks a piece of gear
-                        # they carry a SPARE of hands it over — how crafted goods spread when
-                        # they aren't barter goods. This is the toolmaker's social role.
-                        for gid, _h, _r in self._GEAR:
-                            if giver.get("inv", {}).get(gid, 0) >= 2 and taker.get("inv", {}).get(gid, 0) == 0:
-                                ev = mind.give(giver, taker, gid, self.clock)
-                                if ev:
-                                    self._note("social", ev)
-                                    self._record_trade(giver, taker)
-                                break
-                        # Help someone CRAFT: a band-mate who's worked out a piece of gear but is
-                        # short the makings gets the missing material from someone who has it to
-                        # spare — so the craft can go ahead. The other half of helping: not just
-                        # lending labour on a build, but sharing the stuff a maker needs.
-                        self._maybe_gift_craft_material(giver, taker)
-                        # A toolmaker hands a spare TOOL to a band-mate who has none — how a
-                        # builder gets their axe and a hunter their spear (tool-gating's payoff).
-                        for _rid, key in self._TOOLS:
-                            if giver.get("inv", {}).get(key, 0) >= 2 and taker.get("inv", {}).get(key, 0) == 0:
-                                ev = mind.give(giver, taker, key, self.clock)
-                                if ev:
-                                    self._note("social", ev)
-                                    # Maker-renown: a tool one fashioned, now serving another, builds
-                                    # the maker's name as a craftsman the band relies on (#20).
-                                    self._earn_renown(giver, RENOWN_GAIN["gift"],
-                                                      f"made a {key} that now serves {taker['name']}")
-                                    self._record_trade(giver, taker)
-                                break
-                    # The quiet bonds of daily life — kin breaking bread side by side (#1), and
-                    # children at play (#5) — each warms a relationship a little. Gated to a small
-                    # per-tick chance so standing together a while builds the bond gradually
-                    # rather than spiking it, and to keep the pass cheap.
-                    if self.rng.random() < 0.06:
-                        _WORK = {"gather", "seek_food", "forage_berry", "seek_berry", "chop",
-                                 "seek_wood", "mine", "hunt", "fish"}
-                        both_eat = a.get("action") == "eat" and b.get("action") == "eat"
-                        both_kids = a["age"] < ADULT_AGE and b["age"] < ADULT_AGE
-                        both_work = a.get("action") in _WORK and b.get("action") in _WORK   # co-foraging
-                        if both_eat or both_kids or both_work:
-                            ra2, rb2 = mind._rel(a, b, self.clock), mind._rel(b, a, self.clock)
-                            mind._adjust(ra2, 0.008, 0.03); mind._adjust(rb2, 0.008, 0.03)
-                            if self.rng.random() < 0.15:
-                                if both_kids:
-                                    mind.speak(a, f"Tag — you're it, {b['name']}!", self.clock)
-                                    self._note("social", f"{a['name']} and {b['name']} played together.")
-                                elif both_eat:
-                                    self._note("social", f"{a['name']} and {b['name']} shared a meal.")
-                                else:
-                                    self._note("social", f"{a['name']} and {b['name']} worked side by side.")
+                for i, a in enumerate(cell_ppl):
+                    for b in (cell_ppl[i + 1:] if (dx, dy) == (0, 0) else other_ppl):
+                        if mind._manhattan(a, b) <= mind.SOCIAL_RADIUS:
+                            self._pair_encounter(a, b)
+
+    def _vocation_counts(self) -> dict:
+        """Whole-band vocation tally — the fallback when the per-tick cache isn't set (a test that
+        calls _mind_ctx before any tick). The live path uses self._voc_counts, built once a tick."""
+        vc: dict[str, int] = {}
+        for q in self.people:
+            v = q.get("vocation")
+            if v:
+                vc[v] = vc.get(v, 0) + 1
+        return vc
+
+    def _tick_drama(self, dt_game_min: float):
+        """The desires-&-grudges engine, run once a tick. Content settled souls conceive one-off
+        DESIRES (which lean their drives until answered, then sour if ignored); GRUDGES fade slowly
+        and idle sentiment drifts back toward neutral; and a desperate, starving soul with no honest
+        food in reach may STEAL from a neighbour's larder — the wrong that seeds a feud. All cheap:
+        per-soul O(1) work, and every branch is gated so a fed, friendly band never triggers it."""
+        dt_day = dt_game_min / 1440.0
+        grudge_keep = 0.5 ** (dt_day / GRUDGE_HALFLIFE_D)
+        sent_keep = 0.5 ** (dt_day / SENTIMENT_DRIFT_D)
+        alive = {q["id"] for q in self.people}
+        for p in self.people:
+            # Grudges cool, and idle warmth/coldness drifts back toward neutral — nothing is
+            # held against someone forever, and time heals (or dulls) all. Also PRUNES the dead:
+            # a relationship ledger shouldn't carry souls long gone (bloat + inspector clutter).
+            rels = p.get("rel")
+            if rels:
+                for oid in list(rels.keys()):
+                    if oid not in alive:
+                        del rels[oid]
+                        continue
+                    r = rels[oid]
+                    if r.get("grudge"):
+                        r["grudge"] = round(r["grudge"] * grudge_keep, 4)
+                        if r["grudge"] < 0.02:
+                            r["grudge"] = 0.0
+                    if r.get("sentiment"):
+                        r["sentiment"] = round(r["sentiment"] * sent_keep, 4)
+            if p.get("age", 999) < ADULT_AGE or p.get("home_struct") is None:
+                continue
+            # A sour desire — waited too long unanswered — becomes a small disappointment and lifts.
+            des = p.get("desire")
+            if des and self.clock >= des.get("sour", 1e18):
+                p["desire"] = None
+                mind.remember(p, f"my longing went unanswered — {des.get('text', '')}", 0.4, "desire", self.clock)
+            # Conceive a new want, now and then, when content (needs quiet) and wanting for nothing.
+            elif des is None and self.rng.random() < DESIRE_CHANCE_DAY * dt_day:
+                comfort = 1.0 - max(p.get("thirst", 0), p.get("hunger", 0), p.get("fatigue", 0))
+                if comfort > 0.6:
+                    self._conceive_desire(p)
+            # Desperation theft — the shadow of hunger: a soul whose reserves are failing, with no
+            # honest food to hand or in its own larder, takes from a neighbour's store. Rare by
+            # construction (needs real, sustained scarcity), but the seed of crime and feud.
+            if (p.get("satiety", 1.0) < THEFT_SATIETY and p["inv"].get("food", 0) == 0
+                    and p.get("store", {}).get("food", 0) == 0
+                    and self.clock >= p.get("theft_cd", 0.0)):
+                self._desperate_theft(p)
+
+    _DESIRES = (("cooked_meal", "a proper cooked meal"), ("day_of_rest", "a day's true rest"),
+                ("company", "the warmth of company"), ("hear_tale", "a good tale by the fire"),
+                ("finer_home", "a finer home of my own"), ("new_gear", "some good new gear"),
+                ("far_country", "to see the far country"))
+
+    def _conceive_desire(self, p):
+        """A soul conceives a one-off longing, coloured by its nature (the curious yearn to roam,
+        the sociable for company). Recorded, spoken, and set to sour after DESIRE_DAYS if unmet."""
+        weights = []
+        cur, soc, amb = (mind._trait(p, "curiosity"), mind._trait(p, "sociability"),
+                         mind._trait(p, "ambition"))
+        for kind, text in self._DESIRES:
+            w = 1.0
+            if kind == "far_country":
+                w += 2.0 * cur
+            elif kind in ("company", "hear_tale"):
+                w += 2.0 * soc
+            elif kind in ("finer_home", "new_gear"):
+                w += 2.0 * amb
+            weights.append(w)
+        pick = self.rng.choice(len(self._DESIRES), p=np.array(weights) / sum(weights))
+        kind, text = self._DESIRES[int(pick)]
+        p["desire"] = {"kind": kind, "text": text, "born": round(self.clock, 1),
+                       "sour": round(self.clock + DESIRE_DAYS * 1440.0, 1)}
+        mind.remember(p, f"I find myself longing for {text}", 0.5, "desire", self.clock)
+        mind.speak(p, f"I've a mind for {text}, lately.", self.clock)
+
+    def _desperate_theft(self, p):
+        """A starving soul takes food from the fullest larder in reach that isn't its own. If the
+        owner (or a band-mate) is near, the thief is CAUGHT — a heavy grudge and a shaming; if
+        unseen, the owner later finds the larder short and suspects. Either way, a wrong is done."""
+        best, most = None, 0
+        for q in self.people:
+            if q is p:
+                continue
+            food = q.get("store", {}).get("food", 0)
+            if food > most and mind._manhattan(p, q) <= PERSON["vision"] * 2:
+                best, most = q, food
+        if best is None or most < 1:
+            return
+        take = min(most, 3)
+        best["store"]["food"] -= take
+        p["inv"]["food"] = p["inv"].get("food", 0) + take
+        p["theft_cd"] = self.clock + THEFT_CD
+        # Caught red-handed if anyone (the owner guarding home, or a passer-by) is within sight
+        # of the thief; otherwise the deed is unseen and only later suspected.
+        seen = any(q is not p and mind._manhattan(q, p) <= PERSON["vision"] for q in self.people)
+        rel = mind._rel(best, p, self.clock)
+        if seen:
+            rel["grudge"] = min(1.0, rel.get("grudge", 0.0) + GRUDGE_CAUGHT)
+            mind._adjust(rel, -0.02, -0.5)
+            self._note("crime", f"{best['name']} caught {p['name']} thieving from the larder.")
+            mind.speak(best, f"Thief! That's mine, {p['name']}!", self.clock)
+            mind.remember(p, f"I was caught stealing {best['name']}'s food — hunger drove me to it",
+                          0.7, "crime", self.clock)
+            self._earn_renown(p, -RENOWN_GAIN.get("gift", 0.3), "was caught thieving")
+        else:
+            rel["grudge"] = min(1.0, rel.get("grudge", 0.0) + GRUDGE_FOUND)
+            self._note("crime", f"{best['name']}'s larder was robbed in the night.")
+            mind.remember(best, "someone has been at my larder — food gone missing", 0.55, "crime", self.clock)
+
+    def _resolve_confrontation(self, p, foe):
+        """p has sought out foe over a nursed grudge. It's had out face to face: if the foe is
+        contrite (warm, or low-caution) it's REDRESSED — the grudge mends, both step back; if not,
+        it FLARES into a quarrel that hardens the feud on both sides. No blood (yet) — words and
+        standing are the weapons. Sets a cooldown so a soul doesn't confront every beat."""
+        p["confront_cd"] = self.clock + CONFRONT_CD
+        pr = mind._rel(p, foe, self.clock)
+        fr = mind._rel(foe, p, self.clock)
+        # The foe yields if they bear little ill will and aren't too proud/wary to make amends.
+        contrite = (fr.get("sentiment", 0.0) > -0.2 and mind._trait(foe, "caution") < 0.6
+                    and self.rng.random() < 0.6)
+        if contrite:
+            pr["grudge"] = round(pr.get("grudge", 0.0) * 0.35, 3)
+            mind._adjust(pr, 0.05, 0.25); mind._adjust(fr, 0.05, 0.25)
+            mind.speak(foe, f"You're right, {p['name']} — I was wrong. Peace between us.", self.clock)
+            mind.speak(p, "See that it doesn't happen again.", self.clock)
+            self._note("social", f"{p['name']} and {foe['name']} made their peace.")
+            mind.remember(p, f"{foe['name']} and I settled our quarrel", 0.55, "social", self.clock)
+            mind.remember(foe, f"I made amends with {p['name']}", 0.5, "social", self.clock)
+        else:
+            pr["grudge"] = min(1.0, pr.get("grudge", 0.0) + 0.15)
+            fr["grudge"] = min(1.0, fr.get("grudge", 0.0) + 0.2)   # now the foe resents them back
+            mind._adjust(pr, -0.03, -0.4); mind._adjust(fr, -0.03, -0.4)
+            mind.speak(p, f"You'll answer for it, {foe['name']}.", self.clock)
+            mind.speak(foe, "Away with you — you'll get nothing from me!", self.clock)
+            self._note("social", f"{p['name']} and {foe['name']} came to bitter words.")
+            mind.remember(p, f"{foe['name']} would not make amends — the feud deepens", 0.6, "social", self.clock)
+
+    def _pair_encounter(self, a, b):
+        """Everything that passes between two souls found near each other this tick — greeting,
+        gossip, trade, gifts, teaching, bonding, the quiet warmth of shared work. Split out of the
+        (now bucketed) neighbour sweep so the loop stays legible and each pair is handled once."""
+        for ev in mind.encounter(a, b, self.clock, self.rng):
+            self._note("social", ev)
+        # Knowledge spreads soul to soul: a trusted neighbour passes on a craft.
+        self._maybe_teach(a, b)
+        # Two warm, unattached adults may pair off — the start of a family line.
+        self._maybe_bond(a, b)
+        # Generosity: whoever has resolved to *provide* gives, if they're beside
+        # the other and carry a surplus — a one-way gift, the warmest social act.
+        if mind._manhattan(a, b) <= 1:
+            for giver, taker in ((a, b), (b, a)):
+                inten = giver.get("intention") or {}
+                if (inten.get("kind") == "provide"
+                        and giver.get("inv", {}).get("food", 0) > mind.TRADE_SURPLUS
+                        and taker.get("inv", {}).get("food", 0) <= 1):
+                    ev = mind.give(giver, taker, "food", self.clock)
+                    if ev:
+                        self._note("social", ev)
+                # Rescue: a caretaker nursing this sick soul shares food with them even
+                # off their last ration — a hungry, ailing body must be fed (#10).
+                if (inten.get("kind") == "tend" and inten.get("target") == taker["id"]
+                        and giver.get("inv", {}).get("food", 0) > 0
+                        and taker.get("illness") and taker.get("hunger", 0) > 0.4):
+                    ev = mind.give(giver, taker, "food", self.clock)
+                    if ev:
+                        self._note("social", ev)
+                # A toolmaker (or anyone) beside a band-mate who lacks a piece of gear
+                # they carry a SPARE of hands it over — how crafted goods spread when
+                # they aren't barter goods. This is the toolmaker's social role.
+                for gid, _h, _r in self._GEAR:
+                    if giver.get("inv", {}).get(gid, 0) >= 2 and taker.get("inv", {}).get(gid, 0) == 0:
+                        ev = mind.give(giver, taker, gid, self.clock)
+                        if ev:
+                            self._note("social", ev)
+                            self._record_trade(giver, taker)
+                        break
+                # Help someone CRAFT: a band-mate who's worked out a piece of gear but is
+                # short the makings gets the missing material from someone who has it to
+                # spare — so the craft can go ahead. The other half of helping: not just
+                # lending labour on a build, but sharing the stuff a maker needs.
+                self._maybe_gift_craft_material(giver, taker)
+                # A toolmaker hands a spare TOOL to a band-mate who has none — how a
+                # builder gets their axe and a hunter their spear (tool-gating's payoff).
+                for _rid, key in self._TOOLS:
+                    if giver.get("inv", {}).get(key, 0) >= 2 and taker.get("inv", {}).get(key, 0) == 0:
+                        ev = mind.give(giver, taker, key, self.clock)
+                        if ev:
+                            self._note("social", ev)
+                            # Maker-renown: a tool one fashioned, now serving another, builds
+                            # the maker's name as a craftsman the band relies on (#20).
+                            self._earn_renown(giver, RENOWN_GAIN["gift"],
+                                              f"made a {key} that now serves {taker['name']}")
+                            self._record_trade(giver, taker)
+                        break
+            # The quiet bonds of daily life — kin breaking bread side by side (#1), and
+            # children at play (#5) — each warms a relationship a little. Gated to a small
+            # per-tick chance so standing together a while builds the bond gradually
+            # rather than spiking it, and to keep the pass cheap.
+            if self.rng.random() < 0.06:
+                _WORK = {"gather", "seek_food", "forage_berry", "seek_berry", "chop",
+                         "seek_wood", "mine", "hunt", "fish"}
+                both_eat = a.get("action") == "eat" and b.get("action") == "eat"
+                both_kids = a["age"] < ADULT_AGE and b["age"] < ADULT_AGE
+                both_work = a.get("action") in _WORK and b.get("action") in _WORK   # co-foraging
+                if both_eat or both_kids or both_work:
+                    ra2, rb2 = mind._rel(a, b, self.clock), mind._rel(b, a, self.clock)
+                    mind._adjust(ra2, 0.008, 0.03); mind._adjust(rb2, 0.008, 0.03)
+                    if self.rng.random() < 0.15:
+                        if both_kids:
+                            mind.speak(a, f"Tag — you're it, {b['name']}!", self.clock)
+                            self._note("social", f"{a['name']} and {b['name']} played together.")
+                        elif both_eat:
+                            self._note("social", f"{a['name']} and {b['name']} shared a meal.")
+                        else:
+                            self._note("social", f"{a['name']} and {b['name']} worked side by side.")
 
     # ── generations: bonding, birth, inheritance (Phase 4) ───────────────────────
     def _maybe_bond(self, a, b):
@@ -2759,15 +2962,21 @@ class World:
         and cheap — built once per deliberation, not per tick."""
         names = {q["id"]: q["name"] for q in self.people}
         fav_id = fav_name = foe_id = foe_name = None
-        foe_mag = 0.0
+        foe_mag = foe_grudge = 0.0
         rels = p.get("rel", {})
         if rels:
             best = max(rels.items(), key=lambda kv: kv[1]["sentiment"])
-            worst = min(rels.items(), key=lambda kv: kv[1]["sentiment"])
+            # ENMITY = coldness PLUS any nursed grudge, so a wrong done (theft, shaming) makes a
+            # foe even of someone once neutral — and the grudge magnitude rides along for the
+            # confront drive (a held wrong that DEMANDS its day, not just avoidance).
+            worst = max(rels.items(), key=lambda kv: -kv[1].get("sentiment", 0.0) + kv[1].get("grudge", 0.0))
             if best[1]["sentiment"] > 0.15 and best[0] in names:
                 fav_id, fav_name = best[0], best[1]["name"]
-            if worst[1]["sentiment"] < -0.15 and worst[0] in names:
-                foe_id, foe_name, foe_mag = worst[0], worst[1]["name"], -worst[1]["sentiment"]
+            enmity = -worst[1].get("sentiment", 0.0) + worst[1].get("grudge", 0.0)
+            if enmity > 0.15 and worst[0] in names:
+                foe_id, foe_name = worst[0], worst[1]["name"]
+                foe_mag = max(0.0, -worst[1].get("sentiment", 0.0))
+                foe_grudge = worst[1].get("grudge", 0.0)
         needy_id = needy_name = None
         nd = 999
         ail_id = ail_name = None
@@ -2827,7 +3036,7 @@ class World:
                           if site and site.get("tasks") else 0.0)
         # The soul's calling — read from temperament but BENT toward the trade the band lacks, so the
         # division of labour stays balanced (not everyone the same calling). Hysteresis keeps it stable.
-        voc = None if is_child else mind.vocation(p, self.people)
+        voc = None if is_child else mind.vocation(p, counts=getattr(self, "_voc_counts", None) or self._vocation_counts())
         p["vocation"] = voc
         needs_hearth = (not is_child and p.get("home_struct") is not None
                         and self._person_knows(p, "campfire") and not p.get("hearth"))
@@ -2864,7 +3073,7 @@ class World:
             "others_exist": len(self.people) > 1,
             "alive_ids": tuple(names.keys()), "_names": names,
             "fav_id": fav_id, "fav_name": fav_name,
-            "foe_id": foe_id, "foe_name": foe_name, "foe_mag": foe_mag,
+            "foe_id": foe_id, "foe_name": foe_name, "foe_mag": foe_mag, "foe_grudge": foe_grudge,
             "needy_id": needy_id, "needy_name": needy_name,
             "ail_id": ail_id, "ail_name": ail_name,
             "mentor_id": mentor_id, "mentor_name": mentor_name,
@@ -3043,6 +3252,7 @@ class World:
             return self._idle(p)          # already beside them — the social pass does the rest
         if kind == "explore":
             p["last_explore_t"] = self.clock
+            mind.fulfil_desire(p, "far_country", self.clock)   # the wanderlust, satisfied by setting out
             lend = self._offer_help_maybe(p, tree, stone, fiber, leaf, lx, ly)
             if lend is not None:                          # a neighbour's raising their home nearby — pitch in
                 return lend
@@ -3069,6 +3279,16 @@ class World:
             t = next((q for q in self.people if q["id"] == target), None)
             if t is not None and (t["x"] != x or t["y"] != y):
                 return "wander", (int(np.sign(x - t["x"])), int(np.sign(y - t["y"])))
+        if kind == "confront" and target:
+            # Seek the offender out and have it out with them — the quarrel resolves on contact
+            # (in the social pass): a plain apology-and-mend, or it flares and hardens the feud.
+            t = next((q for q in self.people if q["id"] == target), None)
+            if t is None:
+                return self._idle(p)
+            if abs(t["x"] - x) + abs(t["y"] - y) > 1:
+                return "socialize", (t["x"] - x, t["y"] - y)   # stride over (pathfinds round walls)
+            self._resolve_confrontation(p, t)
+            return "socialize", None
         if kind == "marvel":
             return self._marvel(p)
         if kind == "aspire":
@@ -4929,7 +5149,11 @@ class World:
     def _grow_skill(self, p, name, amt=CHILD_SKILL_GAIN):
         """Award skill XP — how a soul who keeps at a thing gets good at it. No cap here:
         skill_level() reads levels off the accrued xp, and the per-skill mastery cap does
-        the limiting (the old min(1.0) would have frozen everyone at level 1)."""
+        the limiting (the old min(1.0) would have frozen everyone at level 1). A CHILD who
+        practices within reach of a SCHOOL learns markedly faster — the school building's real
+        purpose (childhood turned into competence sooner), now that skills are levels worth having."""
+        if p.get("age", 999) < ADULT_AGE and self._near_function(p, "school", SCHOOL_RANGE):
+            amt *= SCHOOL_XP_MULT
         sk = p.setdefault("skills", {})
         sk[name] = sk.get(name, 0.0) + amt
 
@@ -5257,6 +5481,7 @@ class World:
                                     "salvaging what timber they could.")
         owner["home_struct"] = site["id"]
         owner["insul"] = site.get("insul", 1.0)     # how well the finished home holds heat/cold
+        mind.fulfil_desire(owner, "finer_home", self.clock)   # a longing for a finer home, answered in timber
         if commission:                              # the builder raised it FOR the client
             builder = next((q for q in self.people if q["id"] == site.get("builder")), None)
             bname = builder["name"] if builder else site.get("by", "a builder")
@@ -6944,6 +7169,7 @@ class World:
         if c["left"] > 0:
             return False
         p["inv"][c["out"]] = p["inv"].get(c["out"], 0) + c["qty"]
+        mind.fulfil_desire(p, "new_gear", self.clock)    # a longing for good new gear, made real
         # A crafted STATION (workbench/furnace/kiln/forge/loom/tannery/anvil) is PLACED at the
         # soul's home as a VISIBLE object and thereafter opens its tier of the tree there — the
         # soul's own climb. The kind is also indexed on the soul for the fast station-in-reach gate.
@@ -7416,6 +7642,14 @@ class World:
                 # Skills as LEVELS for the inspector: level / mastery cap / progress to next.
                 d["skill_levels"] = {k: dict(zip(("lv", "max", "next"), self.skill_progress(p, k)))
                                      for k in (p.get("skills") or {})}
+                # The drama layer, made legible: an active longing, the grudges nursed against
+                # others (named, strongest first), and the leanings experience has taught.
+                if p.get("desire"):
+                    d["desire"] = {"text": p["desire"].get("text", "")}
+                grudges = [{"name": r.get("name", "?"), "grudge": round(r["grudge"], 2)}
+                           for r in (p.get("rel") or {}).values() if r.get("grudge", 0) >= 0.1]
+                d["grudges"] = sorted(grudges, key=lambda g: -g["grudge"])[:4]
+                d["leans"] = {k: v for k, v in (p.get("leans") or {}).items() if v > 0}
                 if c and c.get("total"):
                     d["crafting"] = {"rid": c["rid"], "out": c["out"],
                                      "pct": round(max(0.0, 1.0 - c["left"] / c["total"]), 3),
@@ -7567,6 +7801,7 @@ class World:
                 "laws": self.laws,                                 # the band's enacted laws (Phase B)
                 "customs": self.customs,                           # the band's traditions (Phase C)
                 "companies": self.companies,                       # the town's companies/industry
+                "chronicle": self.chronicle[-CHRONICLE_CAP:],      # the band's saga (the Chronicler)
                 "log": self.log, "version": self.version,
                 "known_recipes": sorted(self.known_recipes),
                 "ledger": self.ledger,
@@ -7666,6 +7901,7 @@ class World:
             self.laws = meta.get("laws", []) or []                                  # enacted laws (Phase B)
             self.customs = meta.get("customs", []) or []                            # traditions (Phase C)
             self.companies = meta.get("companies", []) or []                        # the town's companies/industry
+            self.chronicle = meta.get("chronicle", []) or []                        # the band's saga (the Chronicler)
             self._register_authored()                     # re-inject them into BLUEPRINTS for the build machinery
             self._relocate_granary_if_stranded()          # heal a granary saved in the water
             self.berry_bushes = meta.get("berry_bushes", [])
@@ -9054,6 +9290,36 @@ if __name__ == "__main__":
     print(f"  skill-levels test: starts-lv0={lv0} tier1-locked-at-lv0={locked} "
           f"levels-open-tiers={opened} caps-vary={varied} cap-holds={capped} "
           f"mastery-speeds-work={quick} -> {'OK' if skill_ok else 'FAILED'}")
+
+    # DRAMA & HARDENING — desires, grudges, confrontation, belief leans, and the O(n) refactors.
+    wdr = World().generate(seed=5); wdr.people = []
+    dyy, dxx = np.argwhere((wdr.water == WATER_NONE) & (wdr.biome == B["grassland"]))[0]
+    dxx, dyy = int(dxx), int(dyy)
+    thief = wdr._add_person(dxx, dyy, name="Thief")
+    owner = wdr._add_person(dxx + 3, dyy, name="Owner")
+    thief["satiety"] = 0.1; thief["inv"] = {}; thief["store"] = {}
+    owner["store"] = {"food": 10}; owner["home"] = (dxx + 3, dyy)
+    wdr._desperate_theft(thief)
+    g0 = owner.get("rel", {}).get(thief["id"], {}).get("grudge", 0.0)
+    theft_ok = g0 > 0 and thief["inv"].get("food", 0) > 0
+    wdr._tick_drama(20 * 1440.0)
+    decay_ok = owner["rel"][thief["id"]].get("grudge", 0.0) < g0
+    # Confront drive fires for an ambitious grudge-holder; a lean bends a drive; vocation cache holds.
+    pr = wdr._add_person(dxx, dyy + 4, name="Proud")
+    pr["traits"] = dict(pr.get("traits", {}), ambition=0.9, caution=0.3)
+    pr["home_struct"] = "h"; pr["age"] = 25 * DAYS_PER_YEAR
+    pr["thirst"] = pr["hunger"] = pr["fatigue"] = 0.05
+    mind._rel(pr, owner, wdr.clock)["grudge"] = 0.6
+    dctx = wdr._mind_ctx(pr, night=False)
+    confront_ok = any(k == "confront" for k, *_ in mind.drives(pr, dctx))
+    base_soc = {k: u for k, t, u, wy in mind.drives(pr, dctx)}.get("socialize", 0.0)
+    pr["leans"] = {"value_company": 0.15}
+    lean_ok = {k: u for k, t, u, wy in mind.drives(pr, dctx)}.get("socialize", 0.0) > base_soc
+    vc = wdr._vocation_counts()
+    voc_ok = mind.vocation(pr, band=wdr.people) == mind.vocation(pr, counts=vc)
+    drama_ok = theft_ok and decay_ok and confront_ok and lean_ok and voc_ok
+    print(f"  drama test: theft-grudge={theft_ok} grudge-decays={decay_ok} confront-drive={confront_ok} "
+          f"lean-bends-drive={lean_ok} vocation-cache={voc_ok} -> {'OK' if drama_ok else 'FAILED'}")
 
     # Exercise a couple of god actions, then persistence round-trips.
     w.sculpt(64, 64, 6, 0.25, by="test")
