@@ -5485,6 +5485,58 @@ class World:
         self.version += 1
         return s
 
+    def can_expand_home(self, site, to_bp="cabin"):
+        """Is there ROOM to grow this home into `to_bp` at the same heart? Returns the new centre
+        (cx,cy) if the bigger footprint fits — clear of water, rock, roads and OTHER buildings, with
+        the home's OWN ground free to reuse and trees fine (they clear) — else None. The space check
+        behind the editable village: you can only knock through and expand if there's room to grow into."""
+        if site is None or site.get("bp") not in BLUEPRINTS or to_bp not in BLUEPRINTS:
+            return None
+        old = BLUEPRINTS[site["bp"]]
+        obw, obh = len(old["layout"][0]), len(old["layout"])
+        cx, cy = site["ox"] + obw // 2, site["oy"] + obh // 2
+        new = BLUEPRINTS[to_bp]
+        nbw, nbh = len(new["layout"][0]), len(new["layout"])
+        if nbw <= obw and nbh <= obh:
+            return None                                        # not actually bigger — nothing to expand
+        own = {(site["ox"] + dx, site["oy"] + dy) for dy in range(obh) for dx in range(obw)}
+        nox, noy = cx - nbw // 2, cy - nbh // 2
+        for yy in range(noy, noy + nbh):
+            for xx in range(nox, nox + nbw):
+                if (xx, yy) in own:
+                    continue                                   # the home's own footprint — free to build back over
+                if not self._in(xx, yy) or self.water[yy, xx] != WATER_NONE or self._is_mountain(xx, yy):
+                    return None                                # can't push into water or a crag
+                if (xx, yy) in self.roads or (xx, yy) in self.blocks:
+                    return None                                # a road or a neighbour's wall is in the way
+                # a TREE here is fine — it comes down when the new wall goes up (forest is clearable)
+        return cx, cy
+
+    def expand_home(self, site, to_bp="cabin", by=None):
+        """Grow a home into a bigger one IN PLACE — the editable village. If there's room (can_expand_
+        home), tear the old walls down (salvaging half the timber to the owner), CLEAR any trees in the
+        way, and raise the bigger design at the same heart, moving the owner into it. Returns the new
+        site, or None if there's no room to expand into. This is 'they wanted a bigger house, and had
+        the space, so they knocked through and grew it'."""
+        centre = self.can_expand_home(site, to_bp)
+        if centre is None:
+            return None
+        cx, cy = centre
+        owner_id = site.get("owner")
+        owner = next((q for q in self.people if q.get("id") == owner_id), None)
+        self._dismantle_site(site["id"], salvage_to=owner)     # tear the old walls down, salvage timber
+        new_site = self._stamp_building(to_bp, cx, cy, owner_id=owner_id, communal=False)
+        if new_site is None:
+            return None                                        # (pre-checked, but never leave a hole)
+        if owner is not None:
+            owner["home_struct"], owner["home"] = new_site["id"], (int(cx), int(cy))
+            owner["insul"] = new_site.get("insul", 1.0)
+        who = by or (owner["name"] if owner else "someone")
+        self._note("build", f"{who} knocked through the walls and grew their home into a "
+                            f"bigger {BLUEPRINTS[to_bp]['name'].lower()}.")
+        self.version += 1
+        return new_site
+
     def _finish_site(self, p, site):
         site["done"] = True
         self.version += 1
@@ -5884,6 +5936,10 @@ class World:
         if not tasks:
             return None
         for t in tasks:
+            # CLEAR any tree/brush under the footprint — forest is cleared where a building is raised,
+            # so a house CAN go in the wood (the trees come down for it), not just skirt around it.
+            self.veg_sp[t["y"], t["x"]] = VEG_NONE
+            self.veg_growth[t["y"], t["x"]] = 0.0
             if t["layer"] == "roof":
                 self.roofs.add((t["x"], t["y"]))
             else:

@@ -198,22 +198,9 @@ _DECOR_DOT = {"bed": "#c2563f", "table": "#8a6038", "chair": "#9a6e3e", "chest":
               "fountain": "#5fb6e6", "arch": "#b3ada1"}
 
 
-def render_html(w, path: str, title: str = "Designer's Town", window=None):
-    """Write a self-contained HTML picture of the build — every placed block, road, and the TERRAIN
-    (water, forest, rocky highland) it was sited around, plus furniture and folk, on a canvas with a
-    legend. `window=(cx,cy,r)` forces a fixed view (so the lake/wood/ridge show, not just the build)."""
-    if window is not None:
-        cxw, cyw, rw = window
-        x0, x1, y0, y1 = cxw - rw, cxw + rw, cyw - rw, cyw + rw
-    else:
-        marks = list(w.blocks.keys()) + list(w.roads.keys()) + list(w.decor.keys())
-        xs = [t[0] for t in marks] or [w._origin[0]]
-        ys = [t[1] for t in marks] or [w._origin[1]]
-        pad = 3
-        x0, x1 = min(xs) - pad, max(xs) + pad
-        y0, y1 = min(ys) - pad, max(ys) + pad
-    wtiles, htiles = x1 - x0 + 1, y1 - y0 + 1
-    # Tile codes: 0 grass, 'w' water, 'k' rocky highland, 'f' forest, 'r' road, or a block code 1..12.
+def grid_payload(w, x0, x1, y0, y1):
+    """The tile grid for a window: 0 grass, 'w' water, 'k' rocky highland, 'f' forest, 'r' road, or a
+    block code 1..12 — plus decor + folk in it, offset to the window. Shared by render + the scenarios."""
     grid = []
     for y in range(y0, y1 + 1):
         row = []
@@ -232,16 +219,51 @@ def render_html(w, path: str, title: str = "Designer's Town", window=None):
             else:
                 row.append(0)
         grid.append(row)
-    decor = [[t[0] - x0, t[1] - y0, k] for t, k in w.decor.items()
-             if x0 <= t[0] <= x1 and y0 <= t[1] <= y1]
-    people = [[p["x"] - x0, p["y"] - y0] for p in w.people
-              if x0 <= p["x"] <= x1 and y0 <= p["y"] <= y1]
+    decor = [[t[0] - x0, t[1] - y0, k] for t, k in w.decor.items() if x0 <= t[0] <= x1 and y0 <= t[1] <= y1]
+    people = [[p["x"] - x0, p["y"] - y0] for p in w.people if x0 <= p["x"] <= x1 and y0 <= p["y"] <= y1]
+    return {"grid": grid, "decor": decor, "people": people, "w": x1 - x0 + 1, "h": y1 - y0 + 1}
+
+
+def expand_scenario(seed: int = 1):
+    """Play out the editable-village scenario: raise a small HUT on the edge of a wood, settle a soul
+    in it, then — since there's room to grow — knock the walls through and EXPAND it into a cabin,
+    clearing the trees in the way. Returns (before, after) render payloads for a side-by-side."""
+    w = varied_world(seed)
+    cx, cy = w._origin
+    # Put a hut hard against the west edge of the eastern wood, so growing it eats into the trees.
+    hx, hy = cx + 9, cy + 3
+    hut = w._stamp_building("hut", hx, hy)
+    ocx, ocy = (hut["core"] if hut and hut.get("core") else (hx, hy))
+    q = w._add_person(int(ocx), int(ocy), age=float(w.rng.integers(W.ADULT_AGE + 200, W.ADULT_AGE + 1400)))
+    q["home"], q["home_struct"], q["name"] = (int(ocx), int(ocy)), hut["id"], "Wren"
+    win = (hx, hy, 12)
+    before = grid_payload(w, hx - 12, hx + 12, hy - 12, hy + 12)
+    grew = w.expand_home(hut, to_bp="cabin", by="Wren")
+    after = grid_payload(w, hx - 12, hx + 12, hy - 12, hy + 12)
+    return before, after, bool(grew)
+
+
+def render_html(w, path: str, title: str = "Designer's Town", window=None):
+    """Write a self-contained HTML picture of the build — every placed block, road, and the TERRAIN
+    (water, forest, rocky highland) it was sited around, plus furniture and folk, on a canvas with a
+    legend. `window=(cx,cy,r)` forces a fixed view (so the lake/wood/ridge show, not just the build)."""
+    if window is not None:
+        cxw, cyw, rw = window
+        x0, x1, y0, y1 = cxw - rw, cxw + rw, cyw - rw, cyw + rw
+    else:
+        marks = list(w.blocks.keys()) + list(w.roads.keys()) + list(w.decor.keys())
+        xs = [t[0] for t in marks] or [w._origin[0]]
+        ys = [t[1] for t in marks] or [w._origin[1]]
+        pad = 3
+        x0, x1 = min(xs) - pad, max(xs) + pad
+        y0, y1 = min(ys) - pad, max(ys) + pad
+    pay = grid_payload(w, x0, x1, y0, y1)
     labels = [[s["ox"] - x0, s["oy"] - y0, (s.get("name") or s.get("bp") or "")]
               for s in w.sites if s.get("done") and s.get("communal")
               and x0 <= s["ox"] <= x1 and y0 <= s["oy"] <= y1]
     rep = report(w)
-    payload = {"grid": grid, "decor": decor, "people": people, "labels": labels,
-               "blockRGB": _BLOCK_RGB, "decorDot": _DECOR_DOT, "w": wtiles, "h": htiles}
+    payload = {"grid": pay["grid"], "decor": pay["decor"], "people": pay["people"], "labels": labels,
+               "blockRGB": _BLOCK_RGB, "decorDot": _DECOR_DOT, "w": pay["w"], "h": pay["h"]}
     html = _HTML_TEMPLATE.replace("__TITLE__", title) \
         .replace("__SUBTITLE__", _subtitle(rep)) \
         .replace("__DATA__", json.dumps(payload))
@@ -315,7 +337,7 @@ def commission(request: str, seed: int = 1, terrain: bool = False):
 
 if __name__ == "__main__":
     tier = "town"
-    seed, authored, html_path, populate, request, terrain = 1, False, None, True, None, False
+    seed, authored, html_path, populate, request, terrain, do_expand = 1, False, None, True, None, False, False
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -330,11 +352,22 @@ if __name__ == "__main__":
             populate = False
         elif a == "--terrain":                             # a lake/wood/ridge to build AROUND
             terrain = True
+        elif a == "--expand":                              # the editable-village scenario (hut → cabin)
+            do_expand = True
         elif a == "--request" and i + 1 < len(args):
             request = args[i + 1]; i += 1
         elif a == "--html" and i + 1 < len(args):
             html_path = args[i + 1]; i += 1
         i += 1
+    if do_expand:                                          # play out the editable-village scenario
+        print("scenario: a hut on the edge of a wood — then Wren wants it bigger, and there's room…")
+        before, after, grew = expand_scenario(seed=seed)
+        print(f"  expanded (walls knocked through, trees cleared): {grew}")
+        out = html_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "designer_expand.json")
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump({"before": before, "after": after}, f, separators=(",", ":"))
+        print(f"\nbefore/after payloads → {out}")
+        sys.exit(0)
     # With terrain, force a wide fixed view around the origin so the obstacles + the build both show.
     win = None
     if request:                                            # the promptable designer
