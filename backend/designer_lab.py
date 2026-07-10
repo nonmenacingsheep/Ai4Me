@@ -52,6 +52,33 @@ def blank_world(seed: int = 1):
     return w
 
 
+def _disc(cx, cy, r):
+    """The (x,y) tiles in a rough disc, clipped to the map — for painting terrain features."""
+    for yy in range(cy - r, cy + r + 1):
+        for xx in range(cx - r, cx + r + 1):
+            if 0 <= xx < W.W and 0 <= yy < W.H and (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r:
+                yield xx, yy
+
+
+def varied_world(seed: int = 1):
+    """A blank canvas with real OBSTACLES to build around — a lake to the north-west, a wood to the
+    east, and a rocky ridge to the south — so the designer's terrain-avoidance can be seen and tuned.
+    The features straddle where a town or commission would want to go, forcing it to weave around."""
+    w = blank_world(seed)
+    w.water[:] = W.WATER_NONE                                  # drop blank_world's default pond
+    cx, cy = w._origin
+    oak = next(k for k, v in W.PLANTS.items() if v["name"] == "oak")
+    for x, y in _disc(cx - 19, cy - 12, 8):                    # a LAKE, north-west
+        w.water[y, x] = W.WATER_LAKE
+    for x, y in _disc(cx + 16, cy + 3, 11):                    # a WOOD, east — grown oak
+        w.veg_sp[y, x] = oak
+        w.veg_growth[y, x] = 0.85
+    for x, y in _disc(cx - 3, cy + 18, 9):                     # a rocky RIDGE, south
+        w.biome[y, x] = W.B["rock"]
+        w.elevation[y, x] = 0.86
+    return w
+
+
 # A tiny, valid AUTHORED design to demonstrate the authored-blueprint path (the "immune system"
 # validates it before it can be placed). A 3×3 hut-like home with a bed inside — the shape the
 # LLM would emit. Swap/extend this to test the designer's authored forms without a live model.
@@ -63,11 +90,13 @@ _SAMPLE_AUTHORED = {
 }
 
 
-def run(tier: str = "town", seed: int = 1, populate: bool = True, authored: bool = False):
+def run(tier: str = "town", seed: int = 1, populate: bool = True, authored: bool = False,
+        terrain: bool = False):
     """Build on a blank world and return (world, report). tier village|town|city → a whole
     settlement (build_town); tier castle|keep → raise the GRAND KEEP alone (the masonry showpiece).
-    With `authored`, first feed the designer a validated LLM-style design so it's raised too."""
-    w = blank_world(seed)
+    With `authored`, first feed the designer a validated LLM-style design so it's raised too. With
+    `terrain`, the canvas has a lake/wood/ridge to build AROUND (to see the collision-avoidance)."""
+    w = varied_world(seed) if terrain else blank_world(seed)
     injected = None
     if authored:
         injected = w.apply_authored_building(dict(_SAMPLE_AUTHORED), by="the Lab")
@@ -169,27 +198,37 @@ _DECOR_DOT = {"bed": "#c2563f", "table": "#8a6038", "chair": "#9a6e3e", "chest":
               "fountain": "#5fb6e6", "arch": "#b3ada1"}
 
 
-def render_html(w, path: str, title: str = "Designer's Town"):
-    """Write a self-contained HTML picture of the build — every placed block, road, water tile,
-    furniture and folk in the region, drawn on a canvas with a legend. Open it in any browser."""
-    marks = list(w.blocks.keys()) + list(w.roads.keys()) + list(w.decor.keys())   # every drawn tile
-    xs = [t[0] for t in marks] or [w._origin[0]]
-    ys = [t[1] for t in marks] or [w._origin[1]]
-    pad = 3
-    x0, x1 = min(xs) - pad, max(xs) + pad
-    y0, y1 = min(ys) - pad, max(ys) + pad
+def render_html(w, path: str, title: str = "Designer's Town", window=None):
+    """Write a self-contained HTML picture of the build — every placed block, road, and the TERRAIN
+    (water, forest, rocky highland) it was sited around, plus furniture and folk, on a canvas with a
+    legend. `window=(cx,cy,r)` forces a fixed view (so the lake/wood/ridge show, not just the build)."""
+    if window is not None:
+        cxw, cyw, rw = window
+        x0, x1, y0, y1 = cxw - rw, cxw + rw, cyw - rw, cyw + rw
+    else:
+        marks = list(w.blocks.keys()) + list(w.roads.keys()) + list(w.decor.keys())
+        xs = [t[0] for t in marks] or [w._origin[0]]
+        ys = [t[1] for t in marks] or [w._origin[1]]
+        pad = 3
+        x0, x1 = min(xs) - pad, max(xs) + pad
+        y0, y1 = min(ys) - pad, max(ys) + pad
     wtiles, htiles = x1 - x0 + 1, y1 - y0 + 1
-    # Tile codes: 0 grass, 'w' water, 'r' road, or a block code 1..6.
+    # Tile codes: 0 grass, 'w' water, 'k' rocky highland, 'f' forest, 'r' road, or a block code 1..12.
     grid = []
     for y in range(y0, y1 + 1):
         row = []
         for x in range(x0, x1 + 1):
+            inb = 0 <= y < W.H and 0 <= x < W.W
             if w.blocks.get((x, y)):
                 row.append(w.blocks[(x, y)])
             elif (x, y) in w.roads:
                 row.append("r")
-            elif 0 <= y < W.H and 0 <= x < W.W and w.water[y, x] != W.WATER_NONE:
+            elif inb and w.water[y, x] != W.WATER_NONE:
                 row.append("w")
+            elif inb and (w.biome[y, x] in W.MOUNTAIN_BIOMES or w.elevation[y, x] >= W.MOUNTAIN_LEVEL):
+                row.append("k")
+            elif inb and w.veg_sp[y, x] in W.WOOD_ID_SET and w.veg_growth[y, x] > 0.2:
+                row.append("f")
             else:
                 row.append(0)
         grid.append(row)
@@ -240,8 +279,11 @@ const g = cv.getContext('2d');
 for(let y=0;y<D.h;y++)for(let x=0;x<D.w;x++){
   const c = D.grid[y][x]; let col='#2a3a20';
   if(c==='w') col='#2f6fb0'; else if(c==='r') col='#9c7c56';
+  else if(c==='k') col='#6d6a63'; else if(c==='f') col='#24491f';
   else if(c && D.blockRGB[c]) col=D.blockRGB[c];
   g.fillStyle=col; g.fillRect(x*TS,y*TS,TS,TS);
+  if(c==='f'){ g.fillStyle='#3a6b30'; g.beginPath();
+    g.arc(x*TS+TS/2,y*TS+TS/2,Math.max(1,TS*0.3),0,7); g.fill(); }
 }
 for(const [x,y,k] of D.decor){ g.fillStyle=D.decorDot[k]||'#e8c76a';
   g.beginPath(); g.arc(x*TS+TS/2,y*TS+TS/2,Math.max(1.5,TS*0.28),0,7); g.fill(); }
@@ -252,19 +294,20 @@ for(const [x,y,t] of D.labels){ g.fillStyle='#00000088';
   const w=g.measureText(t).width+6; g.fillRect(x*TS+TS/2-w/2,y*TS-11,w,12);
   g.fillStyle='#f4e8c0'; g.fillText(t, x*TS+TS/2, y*TS-2); }
 const leg=document.getElementById('leg');
-const items=[['#9c7c56','road'],['#78522d','wall'],['#ab8456','floor'],['#c49e5c','door'],
-  ['#96c4d6','window'],['#4e8a40','leaf wall'],['#2f6fb0','water'],['#c2563f','bed'],
-  ['#8a6038','table'],['#f2e9d8','folk']];
+const items=[['#2f6fb0','water'],['#24491f','forest'],['#6d6a63','rock'],['#9c7c56','road'],
+  ['#78522d','timber wall'],['#8a8a84','stone'],['#a65c4a','brick'],['#e0dcd0','marble'],
+  ['#96cde1','glazing'],['#c2563f','bed'],['#f2e9d8','folk']];
 leg.innerHTML='<b>Legend</b>'+items.map(([c,n])=>
   `<div><span class="sw" style="background:${c}"></span>${n}</div>`).join('');
 </script></body></html>"""
 
 
-def commission(request: str, seed: int = 1):
+def commission(request: str, seed: int = 1, terrain: bool = False):
     """The PROMPTABLE designer in the lab: ask for a building in words, it designs (offline
-    templates), sites and raises it on a blank canvas, and returns (world, plan)."""
+    templates), sites and raises it, and returns (world, plan). With `terrain`, the canvas has a
+    lake/wood/ridge so you can watch it site the work AROUND them."""
     import mind
-    w = blank_world(seed)
+    w = varied_world(seed) if terrain else blank_world(seed)
     design = mind.commission_offline(request)
     rep = w.commission_build(design, request=request, by="the god")
     return w, rep
@@ -272,7 +315,7 @@ def commission(request: str, seed: int = 1):
 
 if __name__ == "__main__":
     tier = "town"
-    seed, authored, html_path, populate, request = 1, False, None, True, None
+    seed, authored, html_path, populate, request, terrain = 1, False, None, True, None, False
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -285,14 +328,20 @@ if __name__ == "__main__":
             authored = True
         elif a == "--empty":
             populate = False
+        elif a == "--terrain":                             # a lake/wood/ridge to build AROUND
+            terrain = True
         elif a == "--request" and i + 1 < len(args):
             request = args[i + 1]; i += 1
         elif a == "--html" and i + 1 < len(args):
             html_path = args[i + 1]; i += 1
         i += 1
+    # With terrain, force a wide fixed view around the origin so the obstacles + the build both show.
+    win = None
     if request:                                            # the promptable designer
-        print(f'the god asks for: "{request}"…')
-        w, rep = commission(request, seed=seed)
+        print(f'the god asks for: "{request}"' + (' (on varied terrain)' if terrain else '') + '…')
+        w, rep = commission(request, seed=seed, terrain=terrain)
+        if terrain:
+            win = (w._origin[0], w._origin[1], 34)
         if rep.get("ok"):
             print(f'\n  the designer says: "{rep["say"]}"')
             print(f'  → raised {rep["name"]} at ({rep["where"][0]}, {rep["where"][1]}) — '
@@ -300,13 +349,15 @@ if __name__ == "__main__":
         else:
             print(f'  the designer set it aside — {rep.get("reason")}')
         out = html_path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "designer_commission.html")
-        render_html(w, out, title=rep.get("name") or "Commission")
+        render_html(w, out, title=rep.get("name") or "Commission", window=win)
         print(f"\npicture written → {out}\n(open it in a browser)")
         sys.exit(0)
-    print(f"building a {tier} on a blank canvas (seed {seed})…")
-    w, rep = run(tier=tier, seed=seed, populate=populate, authored=authored)
+    print(f"building a {tier}" + (" on varied terrain" if terrain else " on a blank canvas") + f" (seed {seed})…")
+    w, rep = run(tier=tier, seed=seed, populate=populate, authored=authored, terrain=terrain)
+    if terrain:
+        win = (w._origin[0], w._origin[1], 30)
     print_report(rep)
     out = html_path or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     f"designer_town_{tier}.html")
-    render_html(w, out, title=(rep.get("town_name") or f"The designer's {tier}"))
+    render_html(w, out, title=(rep.get("town_name") or f"The designer's {tier}"), window=win)
     print(f"\npicture written → {out}\n(open it in a browser)")

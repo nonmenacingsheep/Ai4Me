@@ -247,6 +247,9 @@ NAMES_F = ("Ada", "Bel", "Cyra", "Dara", "Esme", "Fern", "Greta", "Hana",
 # later slice. Tools/materials live in the person's inv dict alongside food.
 WOOD_PLANTS = {"oak", "pine", "palm"}       # trees that yield wood when felled
 WOOD_IDS = [sp for sp, info in PLANTS.items() if info["name"] in WOOD_PLANTS]
+WOOD_ID_SET = set(WOOD_IDS)                  # fast membership for terrain-siting (build AROUND forest)
+MOUNTAIN_BIOMES = {B["mountain"], B["rock"]}   # bare highland a building can't sit on — build AROUND it
+FOREST_BIOMES = {B["forest"], B["rainforest"]}
 BUILD = dict(
     chop_growth_min=0.35, chop_take=0.5,    # a chop needs a grown tree; removes this much growth
     chop_yield=2, axe_bonus=2,              # wood gained per chop; an axe adds this much (→4 w/ axe)
@@ -4631,6 +4634,16 @@ class World:
             out.append(("market", "raise a marketplace — a place to trade now that we have coin"))
         return [{"kind": "monument", "bp": b, "why": w} for b, w in out]
 
+    def _is_mountain(self, x, y) -> bool:
+        """Bare highland — a mountain/rock biome or ground above the mountain line. A building can't
+        sit on a cliff; the designer routes AROUND it."""
+        return (self.biome[y, x] in MOUNTAIN_BIOMES) or (self.elevation[y, x] >= MOUNTAIN_LEVEL)
+
+    def _is_forest(self, x, y) -> bool:
+        """Grown tree cover — a soul PREFERS a clearing, and the designer builds AROUND a wood
+        rather than plowing it (whatever veg is under an organic build is still cleared tile by tile)."""
+        return (self.veg_sp[y, x] in WOOD_ID_SET) and (self.veg_growth[y, x] > 0.2)
+
     def _tile_unbuildable(self, tx, ty, occupied, avoid: int):
         """Why a tile can't take a building tile (a short, human reason), or None if it can — so
         the same check both rejects a footprint AND lets a soul SAY why it won't build there."""
@@ -4638,6 +4651,8 @@ class World:
             return "off the edge of the world"
         if self.water[ty, tx] != WATER_NONE:
             return "in the water"
+        if self._is_mountain(tx, ty):
+            return "on bare mountain rock"
         if (tx, ty) in occupied:
             return "right where something already stands"
         if avoid:
@@ -5667,32 +5682,40 @@ class World:
     _CENTREPIECE = {"shrine": "statue", "temple": "statue", "monument": "obelisk", "palace": "fountain",
                     "garden": "fountain", "keep": "statue", "library": "obelisk", "tower": "obelisk"}
 
-    def _clear_footprint(self, px, py, bw, bh, margin=1) -> bool:
-        """Is the bw×bh box centred on (px,py) — plus a margin — all in bounds, dry, and clear of
-        existing blocks/roads? The siting test for dropping a whole building somewhere sensible."""
+    def _clear_footprint(self, px, py, bw, bh, margin=1, avoid_trees=True) -> bool:
+        """Is the bw×bh box centred on (px,py) — plus a margin — good ground to raise a building on?
+        It must be in bounds and clear of WATER, bare MOUNTAIN/rock, existing blocks/roads, and (by
+        default) grown FOREST — so a commissioned work is sited AROUND the lake, the wood and the
+        crag, on a real clearing, not plowed through them. This is the designer's collision-avoidance."""
         ox, oy = px - bw // 2, py - bh // 2
         for yy in range(oy - margin, oy + bh + margin):
             for xx in range(ox - margin, ox + bw + margin):
-                if not self._in(xx, yy) or self.water[yy, xx] != WATER_NONE:
+                if not self._in(xx, yy):
+                    return False
+                if self.water[yy, xx] != WATER_NONE or self._is_mountain(xx, yy):
+                    return False
+                if avoid_trees and self._is_forest(xx, yy):
                     return False
                 if (xx, yy) in self.blocks or (xx, yy) in self.roads:
                     return False
         return True
 
     def _commission_site(self, bw, bh):
-        """Find a good clear spot to raise a commissioned work: near the band's settlement (or the
-        founding valley) but not on top of anything, searching outward in rings. Returns (px,py) or
-        None. So a shrine lands on a real clearing by the town, not floating in the sea."""
+        """Find a good spot to raise a commissioned work: near the band's settlement (or the founding
+        valley), searching outward in rings and AROUND the terrain — never in water or on a crag, and
+        preferring a real clearing to a wood. Returns (px,py) or None. First pass shuns trees; a second
+        pass allows wooded ground (the trees clear as it's raised) so a forested vale isn't a dead end."""
         s = self._band_settlement() or {}
         cx, cy = (s.get("centre") or self._origin)
         cx, cy = int(cx), int(cy)
         step = max(2, max(bw, bh) // 2)
-        for r in range(max(bw, bh) // 2 + 2, 90, step):       # rings outward from the heart
-            for ang in range(0, 360, 30):
-                px = cx + int(round(r * np.cos(np.radians(ang))))
-                py = cy + int(round(r * np.sin(np.radians(ang))))
-                if self._clear_footprint(px, py, bw, bh):
-                    return px, py
+        for avoid_trees in (True, False):                     # clearing first, then wooded ground
+            for r in range(max(bw, bh) // 2 + 2, 140, step):  # rings outward from the heart
+                for ang in range(0, 360, 24):
+                    px = cx + int(round(r * np.cos(np.radians(ang))))
+                    py = cy + int(round(r * np.sin(np.radians(ang))))
+                    if self._clear_footprint(px, py, bw, bh, avoid_trees=avoid_trees):
+                        return px, py
         return None
 
     def commission_build(self, design, request="", by="the god", instant=True) -> dict:
@@ -5959,21 +5982,25 @@ class World:
                     continue
                 if (((gx - cx) % STRIDE == 0) or ((gy - cy) % STRIDE == 0)) \
                         and self._in(gx, gy) and self.water[gy, gx] == WATER_NONE \
+                        and not self._is_mountain(gx, gy) \
                         and (gx, gy) not in self.blocks:
-                    self.roads[(gx, gy)] = 1.0
+                    self.roads[(gx, gy)] = 1.0                 # roads skip water & crags (may pass a wood)
         # 2) a paved civic SQUARE at the heart
         for dx in range(-1, 2):
             for dy in range(-1, 2):
-                if self._in(cx + dx, cy + dy) and self.water[cy + dy, cx + dx] == WATER_NONE:
+                if (self._in(cx + dx, cy + dy) and self.water[cy + dy, cx + dx] == WATER_NONE
+                        and not self._is_mountain(cx + dx, cy + dy)):
                     self.roads[(cx + dx, cy + dy)] = 1.0
-        # 3) building PLOTS = cell centres between the roads, nearest the heart first
+        # 3) building PLOTS = cell centres between the roads, nearest the heart first — sited on real
+        #    clearings, so the town builds AROUND the lake, the wood and the crag (they read as parks).
         plots = []
         span = R // STRIDE + 1
         for k in range(-span, span + 1):
             for j in range(-span, span + 1):
                 px, py = cx + k * STRIDE + STRIDE // 2, cy + j * STRIDE + STRIDE // 2
                 d = abs(px - cx) + abs(py - cy)
-                if d <= R and self._in(px, py) and self.water[py, px] == WATER_NONE:
+                if (d <= R and self._in(px, py) and self.water[py, px] == WATER_NONE
+                        and not self._is_mountain(px, py) and not self._is_forest(px, py)):
                     plots.append((d, px, py))
         plots.sort()
         civic_bps, home_bps = self._town_civic_bps(), self._town_home_bps()
